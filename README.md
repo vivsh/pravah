@@ -1,5 +1,11 @@
 # Pravah
 
+[![Crates.io](https://img.shields.io/crates/v/pravah)](https://crates.io/crates/pravah)
+[![docs.rs](https://img.shields.io/docsrs/pravah)](https://docs.rs/pravah)
+[![License](https://img.shields.io/crates/l/pravah)](LICENSE-MIT)
+
+*Pravah* (प्रवाह, *pruh-VAH*) — Sanskrit/Hindi for "flow" or "current".
+
 A Rust library for building typed, stepwise agentic information flows.
 
 Pravah is not a general workflow engine. A flow is a single-threaded graph that
