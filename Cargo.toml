@@ -1,6 +1,6 @@
 [package]
 name = "pravah"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Typed, stepwise agentic information flows for Rust"
 license = "MIT OR Apache-2.0"
