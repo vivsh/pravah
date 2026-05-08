@@ -1,0 +1,34 @@
+[package]
+name = "pravah"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["provider-openai", "provider-anthropic", "provider-gemini", "provider-ollama"]
+provider-openai = []
+provider-anthropic = []
+provider-gemini = ["dep:gemini-rust"]
+provider-ollama = []
+provider-genai = ["dep:genai"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+schemars = { version = "0.8", features = ["uuid1"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+async-trait = "0.1"
+reqwest = { version = "0.13.2", features = ["query", "multipart", "json", "form", "cookies"] }
+scraper = "0.22"
+dom_smoothie = "0.17.0"
+genai = { version = "0.5.3", optional = true }
+gemini-rust = { version = "1.7.1", optional = true }
+tracing = "0.1"
+indexmap = { version = "2.14.0", features = ["serde"] }
+either = { version = "1.15.0", features = ["serde"] }
+futures = "0.3.32"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+mockito = "1"
