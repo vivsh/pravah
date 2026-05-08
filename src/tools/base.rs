@@ -12,13 +12,6 @@ use crate::clients::ToolCall;
 use crate::context::Context;
 use crate::deps::DepsError;
 
-/// Opaque wrapper around the exit value produced by the auto-generated `submit` tool.
-///
-/// The inner field is `pub(crate)` so only [`AgentExitTool`] inside this crate
-/// can construct it, preventing hand-written tools from signalling exit.
-#[derive(Debug)]
-pub struct AgentExit(pub(crate) serde_json::Value);
-
 /// Error produced when a tool invocation fails.
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -44,7 +37,7 @@ pub enum ToolError {
     /// Caught by the orchestrator before reaching history; never propagates to user code.
     #[doc(hidden)]
     #[error("exit signal from tool")]
-    Exit(AgentExit),
+    Exit(serde_json::Value),
     /// A tool requesting user input before the flow can continue.
     /// Produced by [`ToolError::suspend`]; caught by the orchestrator, which transitions
     /// to the matching resume variant and returns [`crate::flows::FlowError::Suspended`].
@@ -157,20 +150,18 @@ pub trait Tool: DeserializeOwned + JsonSchema + Sized + Send {
             parameters,
         }
     }
+}
 
-    /// Returns an object-safe [`ErasedTool`] backed by this tool type.
-    fn dispatcher() -> Box<dyn ErasedTool>
-    where
-        Self: 'static,
-    {
-        Box::new(ToolDispatcher::<Self>(PhantomData))
-    }
+/// Creates a heap-allocated type-erased dispatcher for tool type `T`.
+/// Crate-internal; used by [`ToolBoxBuilder::tool`] and `commons`.
+pub(crate) fn make_dispatcher<T: Tool + 'static>() -> Box<dyn ErasedTool> {
+    Box::new(ToolDispatcher::<T>(PhantomData))
 }
 
 /// Object-safe wrapper around [`Tool`] for use in heterogeneous collections.
 ///
 /// Do not implement this directly — use the blanket impl via [`Tool`].
-pub trait ErasedTool: Send + Sync {
+pub(crate) trait ErasedTool: Send + Sync {
     fn name(&self) -> &str;
     fn definition(&self) -> ToolDefinition;
     /// Deserializes `args` into the concrete tool type, calls it, returns the output.
@@ -277,7 +268,7 @@ impl ToolBoxBuilder {
 
     /// Registers a tool type `T`. Call multiple times to add more tools.
     pub fn tool<T: Tool + 'static>(mut self) -> Self {
-        self.tools.push(T::dispatcher());
+        self.tools.push(make_dispatcher::<T>());
         self
     }
 

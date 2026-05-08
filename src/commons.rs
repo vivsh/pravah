@@ -6,7 +6,8 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::context::Context;
-use crate::tools::{AgentExit, ErasedTool, ToolBox, ToolDefinition, ToolError};
+use crate::tools::base::ErasedTool;
+use crate::tools::{ToolBox, ToolDefinition, ToolError};
 
 /// Trait implemented by every agent input type.
 ///
@@ -61,7 +62,7 @@ impl ErasedTool for AgentExitTool {
         _ctx: Context,
         args: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Value, ToolError>> + Send + 'a>> {
-        Box::pin(async move { Err(ToolError::Exit(AgentExit(args))) })
+        Box::pin(async move { Err(ToolError::Exit(args)) })
     }
 }
 

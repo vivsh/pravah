@@ -215,7 +215,6 @@ payments, ticket handoffs, or any agent action that needs outside confirmation.
 Implement `Flow` for the initial input type and return a validated builder.
 
 ```rust
-use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use pravah::context::Context;
@@ -237,11 +236,9 @@ impl Flow for PlannerInput {
     }
 }
 
-fn finish_plan(plan: Plan, _ctx: Context) -> BoxFuture<'static, Result<FinalAnswer, FlowError>> {
-    Box::pin(async move {
-        Ok(FinalAnswer {
-            text: plan.steps.join("\n"),
-        })
+async fn finish_plan(plan: Plan, _ctx: Context) -> Result<FinalAnswer, FlowError> {
+    Ok(FinalAnswer {
+        text: plan.steps.join("\n"),
     })
 }
 ```

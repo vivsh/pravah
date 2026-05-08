@@ -1,9 +1,8 @@
 pub mod flows;
 mod state;
-pub use crate::clients::{ClientHistory, ClientOutput, ClientResponse};
+#[cfg(test)]
+mod tests;
+pub use crate::clients::ClientFactory;
 pub use crate::commons::Agent;
 pub use crate::context::Context;
-pub use flows::{
-    AgentStep, Flow, FlowBuilder, FlowError, FlowGraph, FlowOut, FlowRuntime, RunOut, StateNode,
-    node,
-};
+pub use flows::{Flow, FlowBuilder, FlowError, FlowGraph, FlowRuntime, RunOut};

@@ -25,10 +25,6 @@ impl FlowState {
         self.suspension.as_ref()
     }
 
-    pub fn is_suspended(&self) -> bool {
-        self.suspension.is_some()
-    }
-
     pub fn clear_suspension(&mut self) {
         self.suspension = None;
         self.pending_calls = None;
@@ -37,13 +33,6 @@ impl FlowState {
     pub fn suspend(&mut self, node_id: &str, calls: Option<Vec<ToolCall>>) {
         self.suspension = Some(node_id.to_string());
         self.pending_calls = calls;
-    }
-
-    pub fn resume(&mut self) -> Option<(String, Option<Vec<ToolCall>>)> {
-        self.suspension.take().map(|node_id| {
-            let calls = self.pending_calls.take();
-            (node_id, calls)
-        })
     }
 
     pub fn contains_state(&self, state_name: &str) -> bool {
@@ -79,10 +68,6 @@ impl FlowState {
 
     pub fn len(&self) -> usize {
         self.states.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.states.is_empty()
     }
 
     pub fn get_index(&self, i: usize) -> Option<(&String, &Value)> {

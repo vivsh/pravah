@@ -1,12 +1,10 @@
-pub mod base;
+pub(crate) mod base;
 pub mod cmd;
 pub mod fs;
 pub mod web;
 
 pub use crate::context::Context;
-pub use base::{
-    AgentExit, ErasedTool, Tool, ToolBox, ToolBoxBuilder, ToolDefinition, ToolError, ToolOutput,
-};
+pub use base::{Tool, ToolBox, ToolBoxBuilder, ToolDefinition, ToolError, ToolOutput};
 pub use cmd::{RunCommand, RunCommandOutput};
 pub use fs::{
     ListDir, ListDirOutput, MultiPatchFile, MultiPatchFileOutput, PatchFile, PatchFileOutput,

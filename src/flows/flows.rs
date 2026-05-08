@@ -17,11 +17,11 @@ use crate::{
     clients::{ClientHistory, ClientOutput},
     commons::Agent,
     context::Context,
-    tools::{AgentExit, ToolBox, ToolError},
+    tools::{ToolBox, ToolError},
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct StateNode {
+pub(crate) struct StateNode {
     name: String,
     value: serde_json::Value,
 }
@@ -65,7 +65,7 @@ pub enum FlowError {
     Invalid(Vec<String>),
 }
 
-pub enum AgentStep {
+pub(crate) enum AgentStep {
     Complete,
     Exit {
         value: serde_json::Value,
@@ -113,7 +113,7 @@ struct WorkInfo {
 }
 
 /// Constructs a typed [`StateNode`] from an [`Agent`] input value.
-pub fn node<A: JsonSchema + Serialize>(input: A) -> Result<StateNode, FlowError> {
+pub(crate) fn node<A: JsonSchema + Serialize>(input: A) -> Result<StateNode, FlowError> {
     let node_id = A::schema_name();
     let value = serde_json::to_value(&input)
         .map_err(|e| FlowError::SerializeError(format!("node '{}': {e}", node_id)))?;
@@ -131,21 +131,28 @@ enum FlowNode {
     Work(WorkInfo),
 }
 
-pub enum FlowOut {
+pub(crate) enum FlowOut {
     Continue,
     Done(Value),
     Suspend { value: Value, tool_id: String },
 }
 
 /// Typed step result returned by [`FlowRuntime`].
-pub enum RunOut<O> {
+#[derive(Debug)]
+pub enum RunOut<O: std::fmt::Debug> {
     Continue,
     Done(O),
     Suspend { value: Value, tool_id: String },
 }
 
 pub trait Flow: 'static + JsonSchema + Serialize + DeserializeOwned + Send + Sync {
-    type Output: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'static;
+    type Output: std::fmt::Debug
+        + JsonSchema
+        + Serialize
+        + DeserializeOwned
+        + Send
+        + Sync
+        + 'static;
 
     fn build() -> FlowBuilder;
 
@@ -171,7 +178,7 @@ impl FlowGraph {
         FlowBuilder::new()
     }
 
-    pub fn is_terminal(&self, state_name: &str) -> bool {
+    pub(crate) fn is_terminal(&self, state_name: &str) -> bool {
         !self.nodes.contains_key(state_name)
     }
 
@@ -278,7 +285,7 @@ impl FlowGraph {
                         output.value.to_string(),
                     ));
                 }
-                Err(ToolError::Exit(AgentExit(value))) => {
+                Err(ToolError::Exit(value)) => {
                     history.push(Message::tool_output(call.id.clone(), value.to_string()));
                     return Ok(AgentStep::Exit { value });
                 }
@@ -394,7 +401,7 @@ impl FlowGraph {
         validate(&self.nodes, &self.entry)
     }
 
-    pub async fn next(
+    pub(crate) async fn next(
         &self,
         factory: &dyn ClientFactory,
         ctx: Context,
@@ -404,7 +411,7 @@ impl FlowGraph {
         self.step(factory, ctx, history, None, states).await
     }
 
-    pub async fn resume(
+    pub(crate) async fn resume(
         &self,
         factory: &dyn ClientFactory,
         ctx: Context,
@@ -943,11 +950,12 @@ impl FlowBuilder {
 
     /// Registers a work node at `From`. The async closure transforms the input value into
     /// `Out` without LLM involvement.
-    pub fn work<From, Out, H>(mut self, func: H) -> Self
+    pub fn work<From, Out, Fut, H>(mut self, func: H) -> Self
     where
         From: 'static + Serialize + DeserializeOwned + JsonSchema,
         Out: 'static + Serialize + DeserializeOwned + JsonSchema,
-        H: Fn(From, Context) -> BoxFuture<'static, Result<Out, FlowError>> + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Out, FlowError>> + Send + 'static,
+        H: Fn(From, Context) -> Fut + Send + Sync + 'static,
     {
         let from_id = From::schema_name();
         if self.flow.nodes.contains_key(&from_id) {
@@ -986,7 +994,7 @@ impl FlowBuilder {
     }
 
     /// Builds the [`FlowGraph`], validating it before returning.
-    pub fn build(self) -> Result<FlowGraph, FlowError> {
+    pub(crate) fn build(self) -> Result<FlowGraph, FlowError> {
         if !self.errors.is_empty() {
             return Err(FlowError::Invalid(self.errors));
         }
@@ -1066,5 +1074,11 @@ impl<I: Flow> FlowRuntime<I> {
             }
             FlowOut::Suspend { value, tool_id } => Ok(RunOut::Suspend { value, tool_id }),
         }
+    }
+}
+
+impl<I: Flow> std::fmt::Debug for FlowRuntime<I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowRuntime").finish_non_exhaustive()
     }
 }
