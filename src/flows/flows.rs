@@ -148,7 +148,7 @@ pub enum RunOut<O> {
 pub trait Flow: 'static + JsonSchema + Serialize + DeserializeOwned + Send + Sync {
     type Output: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'static;
 
-    fn build() -> FlowBuilder;
+    fn build() -> Result<FlowGraph, FlowError>;
 
     fn node_id() -> String {
         Self::schema_name()
@@ -981,7 +981,7 @@ impl FlowBuilder {
     }
 
     /// Builds the [`FlowGraph`] with the given entry node, validating before returning.
-    pub(crate) fn build(mut self, entry: impl Into<String>) -> Result<FlowGraph, FlowError> {
+    pub fn build(mut self, entry: impl Into<String>) -> Result<FlowGraph, FlowError> {
         self.flow.entry = entry.into();
         if !self.errors.is_empty() {
             return Err(FlowError::Invalid(self.errors));
@@ -1001,7 +1001,7 @@ pub struct FlowRuntime<I: Flow> {
 
 impl<I: Flow> FlowRuntime<I> {
     pub fn new(flow: I) -> Result<Self, FlowError> {
-        let graph = I::build().build(I::node_id())?;
+        let graph = I::build()?;
         let value = serde_json::to_value(&flow).map_err(|e| {
             FlowError::SerializeError(format!("start node '{}': {e}", I::node_id()))
         })?;
@@ -1089,7 +1089,7 @@ impl<I: Flow> FlowRuntime<I> {
     /// A fresh history is created; chain `.with_history(saved_history)` to restore
     /// the full LLM conversation context.
     pub fn from_snapshot(snapshot: FlowSnapshot) -> Result<Self, FlowError> {
-        let graph = I::build().build(I::node_id())?;
+        let graph = I::build()?;
         let mut history = ClientHistory::new(None);
         history.push(Message::user(format!("Starting flow: {}", I::node_id())));
         Ok(Self {

@@ -13,7 +13,7 @@ use crate::clients::{
 };
 use crate::commons::Agent;
 use crate::context::{Context, FlowConf};
-use crate::flows::flows::{Flow, FlowBuilder, FlowError, FlowGraph, FlowRuntime, RunOut};
+use crate::flows::flows::{Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
 use crate::tools::{Tool, ToolBox, ToolError};
 
 // ── Mock client infrastructure ───────────────────────────────────────────────
@@ -112,9 +112,10 @@ struct WkB {
 
 impl Flow for WkA {
     type Output = WkB;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .work::<WkA, WkB, _, _>(|a, _| async move { Ok(WkB { val: a.val * 2 }) })
+            .build(Self::node_id())
     }
 }
 
@@ -134,7 +135,7 @@ struct WkChainOut {
 
 impl Flow for WkChainIn {
     type Output = WkChainOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .work::<WkChainIn, WkChainMid, _, _>(|a, _| async move {
                 Ok(WkChainMid { val: a.val + 1 })
@@ -142,6 +143,7 @@ impl Flow for WkChainIn {
             .work::<WkChainMid, WkChainOut, _, _>(|b, _| async move {
                 Ok(WkChainOut { val: b.val * 3 })
             })
+            .build(Self::node_id())
     }
 }
 
@@ -157,11 +159,12 @@ struct WkErrOut {
 
 impl Flow for WkErrIn {
     type Output = WkErrOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .work::<WkErrIn, WkErrOut, _, _>(|_, _| async move {
                 Err(FlowError::AgentError("deliberate error".into()))
             })
+            .build(Self::node_id())
     }
 }
 
@@ -173,9 +176,10 @@ struct WkSame {
 
 impl Flow for WkSame {
     type Output = WkSame;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .work::<WkSame, WkSame, _, _>(|a, _| async move { Ok(WkSame { val: a.val }) })
+            .build(Self::node_id())
     }
 }
 
@@ -195,10 +199,11 @@ struct WkDupOut2 {
 
 impl Flow for WkDupIn {
     type Output = WkDupOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .work::<WkDupIn, WkDupOut, _, _>(|a, _| async move { Ok(WkDupOut { val: a.val }) })
             .work::<WkDupIn, WkDupOut2, _, _>(|a, _| async move { Ok(WkDupOut2 { val: a.val }) })
+            .build(Self::node_id())
     }
 }
 
@@ -273,9 +278,10 @@ impl Agent for AgentSimpleIn {
 
 impl Flow for AgentSimpleIn {
     type Output = AgentSimpleOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<AgentSimpleIn>()
+            .build(<Self as Flow>::node_id())
     }
 }
 
@@ -321,9 +327,10 @@ impl Agent for AgentToolIn {
 
 impl Flow for AgentToolIn {
     type Output = AgentToolOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<AgentToolIn>()
+            .build(<Self as Flow>::node_id())
     }
 }
 
@@ -353,7 +360,7 @@ impl Agent for AgentWorkIn {
 
 impl Flow for AgentWorkIn {
     type Output = AgentWorkFinal;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<AgentWorkIn>()
             .work::<AgentWorkMid, AgentWorkFinal, _, _>(|m, _| async move {
@@ -361,6 +368,7 @@ impl Flow for AgentWorkIn {
                     upper: m.text.to_uppercase(),
                 })
             })
+            .build(<Self as Flow>::node_id())
     }
 }
 
@@ -386,9 +394,10 @@ impl Agent for AgentEmptyModel {
 
 impl Flow for AgentEmptyModel {
     type Output = AgentEmptyModelOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<AgentEmptyModel>()
+            .build(<Self as Flow>::node_id())
     }
 }
 
@@ -504,7 +513,7 @@ struct EitherFinal {
 
 impl Flow for EitherIn {
     type Output = EitherFinal;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .either::<EitherIn, EitherLeft, EitherRight, _>(|inp, _| {
                 if inp.route_left {
@@ -525,6 +534,7 @@ impl Flow for EitherIn {
                     from_left: false,
                 })
             })
+            .build(Self::node_id())
     }
 }
 
@@ -540,12 +550,13 @@ struct EitherSameBranchOut {
 
 impl Flow for EitherSameBranchIn {
     type Output = EitherSameBranchOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             // Both Left and Right are EitherSameBranchOut — schema names identical.
             .either::<EitherSameBranchIn, EitherSameBranchOut, EitherSameBranchOut, _>(
                 |_, _| Ok(Either::Left(EitherSameBranchOut { x: 0 })),
             )
+            .build(Self::node_id())
     }
 }
 
@@ -611,7 +622,7 @@ struct ForkOut {
 
 impl Flow for ForkIn {
     type Output = ForkOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .fork::<ForkIn, ForkBranchA, ForkBranchB, _>(|inp, _| {
                 Ok((ForkBranchA { val: inp.val }, ForkBranchB { val: inp.val * 2 }))
@@ -619,6 +630,7 @@ impl Flow for ForkIn {
             .join::<ForkBranchA, ForkBranchB, ForkOut, _>(|a, b, _| {
                 Ok(ForkOut { sum: a.val + b.val })
             })
+            .build(Self::node_id())
     }
 }
 
@@ -646,7 +658,7 @@ struct ForkWorkOut {
 
 impl Flow for ForkWorkIn {
     type Output = ForkWorkOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .fork::<ForkWorkIn, ForkWorkBranchA, ForkWorkBranchB, _>(|inp, _| {
                 Ok((ForkWorkBranchA { val: inp.val }, ForkWorkBranchB { val: inp.val }))
@@ -657,6 +669,7 @@ impl Flow for ForkWorkIn {
             .join::<ForkWorkBranchA, ForkWorkBranchBProcessed, ForkWorkOut, _>(|a, b, _| {
                 Ok(ForkWorkOut { product: a.val * b.val })
             })
+            .build(Self::node_id())
     }
 }
 
@@ -760,9 +773,10 @@ impl Agent for SuspendIn {
 
 impl Flow for SuspendIn {
     type Output = SuspendOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<SuspendIn>()
+            .build(<Self as Flow>::node_id())
     }
 }
 
@@ -876,9 +890,9 @@ struct ValBadEntryOut {
 
 impl Flow for ValBadEntry {
     type Output = ValBadEntryOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         // ValBadEntry is never registered as a node — entry key won't be found.
-        FlowGraph::builder()
+        FlowGraph::builder().build(Self::node_id())
     }
 }
 
@@ -902,7 +916,7 @@ struct ValOrphanOut {
 
 impl Flow for ValReachIn {
     type Output = ValReachOut;
-    fn build() -> FlowBuilder {
+    fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .work::<ValReachIn, ValReachOut, _, _>(|a, _| async move {
                 Ok(ValReachOut { x: a.x })
@@ -911,6 +925,7 @@ impl Flow for ValReachIn {
             .work::<ValOrphanIn, ValOrphanOut, _, _>(|a, _| async move {
                 Ok(ValOrphanOut { x: a.x })
             })
+            .build(Self::node_id())
     }
 }
 
