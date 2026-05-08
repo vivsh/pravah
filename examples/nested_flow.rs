@@ -67,7 +67,7 @@ impl Flow for ResearchQuery {
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<ResearchQuery>()
-            .build(<ResearchQuery as Flow>::node_id())
+            .build()
     }
 }
 
@@ -135,7 +135,7 @@ impl Flow for BlogRequest {
             })
             // Step 3: write the final article from the research findings.
             .agent::<ResearchResult>()
-            .build(BlogRequest::node_id())
+            .build()
     }
 }
 

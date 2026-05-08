@@ -95,7 +95,7 @@ impl Flow for RawRecord {
                 println!("[step 3] formatted report: {report}");
                 Ok(FinalRecord { id: rec.id, report })
             })
-            .build(RawRecord::node_id())
+            .build()
     }
 }
 

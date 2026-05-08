@@ -76,7 +76,7 @@ impl Flow for SummariseRequest {
                     .join("\n");
                 Ok(Report { markdown })
             })
-            .build(<SummariseRequest as Flow>::node_id())
+            .build()
     }
 }
 

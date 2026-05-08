@@ -142,7 +142,7 @@ impl Flow for ProjectRequest {
                     })
                 },
             )
-            .build(ProjectRequest::node_id())
+            .build()
     }
 }
 

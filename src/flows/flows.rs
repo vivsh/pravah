@@ -391,8 +391,12 @@ impl FlowGraph {
         Ok(())
     }
 
-    fn validate(&self) -> Result<(), FlowError> {
-        validate(&self.nodes, &self.entry)
+    /// Injects the entry point and runs full graph validation (entry + reachability).
+    /// Called by [`FlowRuntime`] after [`Flow::build`] returns the graph.
+    pub(crate) fn with_entry(mut self, entry: String) -> Result<Self, FlowError> {
+        self.entry = entry;
+        validate(&self.nodes, &self.entry)?;
+        Ok(self)
     }
 
     pub(crate) async fn next(
@@ -560,10 +564,10 @@ impl FlowGraph {
     }
 }
 
-fn validate(nodes: &HashMap<String, FlowNode>, entry: &str) -> Result<(), FlowError> {
+/// Validates per-node structural rules only — no entry or reachability checks.
+/// Called by [`FlowBuilder::build`] before the entry is known.
+fn validate_nodes(nodes: &HashMap<String, FlowNode>) -> Result<(), FlowError> {
     let mut problems: Vec<String> = Vec::new();
-
-    // --- Per-node rules ---
     let mut seen_join_groups: HashSet<String> = HashSet::new();
     for (key, node) in nodes {
         match node {
@@ -608,7 +612,6 @@ fn validate(nodes: &HashMap<String, FlowNode>, entry: &str) -> Result<(), FlowEr
                 }
             }
             FlowNode::Join(info) => {
-                // Both parent keys register the same join — only validate once per group.
                 let mut sorted_parents = info.parents.clone();
                 sorted_parents.sort();
                 let group_key = format!("{}→{}", sorted_parents.join("+"), info.target);
@@ -637,7 +640,6 @@ fn validate(nodes: &HashMap<String, FlowNode>, entry: &str) -> Result<(), FlowEr
                         ));
                     }
                 }
-                // target may be a terminal (absent from nodes) — that is valid
             }
             FlowNode::Either(info) => {
                 if info.left_name == info.right_name {
@@ -649,12 +651,20 @@ fn validate(nodes: &HashMap<String, FlowNode>, entry: &str) -> Result<(), FlowEr
             }
         }
     }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(FlowError::Invalid(problems))
+    }
+}
+
+/// Validates entry registration and graph reachability. Called by [`FlowGraph::with_entry`].
+fn validate(nodes: &HashMap<String, FlowNode>, entry: &str) -> Result<(), FlowError> {
+    let mut problems: Vec<String> = Vec::new();
 
     // --- Entry check ---
     if entry.is_empty() {
-        problems.push(
-            "flow has no entry node".to_string(),
-        );
+        problems.push("flow has no entry node".to_string());
     } else if !nodes.contains_key(entry) {
         problems.push(format!("entry '{}' is not a registered node", entry));
     }
@@ -980,13 +990,16 @@ impl FlowBuilder {
         self
     }
 
-    /// Builds the [`FlowGraph`] with the given entry node, validating before returning.
-    pub fn build(mut self, entry: impl Into<String>) -> Result<FlowGraph, FlowError> {
-        self.flow.entry = entry.into();
+    /// Validates the graph structure and returns the [`FlowGraph`].
+    ///
+    /// The entry node is not set here — it is injected later by [`FlowRuntime`] via
+    /// the crate-private `FlowGraph::with_entry`. Structural rules (duplicate nodes,
+    /// bad model URL, same-type work, fork/join shape) are checked immediately.
+    pub fn build(self) -> Result<FlowGraph, FlowError> {
         if !self.errors.is_empty() {
             return Err(FlowError::Invalid(self.errors));
         }
-        self.flow.validate()?;
+        validate_nodes(&self.flow.nodes)?;
         Ok(self.flow)
     }
 }
@@ -1001,7 +1014,7 @@ pub struct FlowRuntime<I: Flow> {
 
 impl<I: Flow> FlowRuntime<I> {
     pub fn new(flow: I) -> Result<Self, FlowError> {
-        let graph = I::build()?;
+        let graph = I::build()?.with_entry(I::node_id())?;
         let value = serde_json::to_value(&flow).map_err(|e| {
             FlowError::SerializeError(format!("start node '{}': {e}", I::node_id()))
         })?;
@@ -1089,7 +1102,7 @@ impl<I: Flow> FlowRuntime<I> {
     /// A fresh history is created; chain `.with_history(saved_history)` to restore
     /// the full LLM conversation context.
     pub fn from_snapshot(snapshot: FlowSnapshot) -> Result<Self, FlowError> {
-        let graph = I::build()?;
+        let graph = I::build()?.with_entry(I::node_id())?;
         let mut history = ClientHistory::new(None);
         history.push(Message::user(format!("Starting flow: {}", I::node_id())));
         Ok(Self {

@@ -115,7 +115,7 @@ impl Flow for WkA {
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .work::<WkA, WkB, _, _>(|a, _| async move { Ok(WkB { val: a.val * 2 }) })
-            .build(Self::node_id())
+            .build()
     }
 }
 
@@ -143,7 +143,7 @@ impl Flow for WkChainIn {
             .work::<WkChainMid, WkChainOut, _, _>(|b, _| async move {
                 Ok(WkChainOut { val: b.val * 3 })
             })
-            .build(Self::node_id())
+            .build()
     }
 }
 
@@ -164,7 +164,7 @@ impl Flow for WkErrIn {
             .work::<WkErrIn, WkErrOut, _, _>(|_, _| async move {
                 Err(FlowError::AgentError("deliberate error".into()))
             })
-            .build(Self::node_id())
+            .build()
     }
 }
 
@@ -179,7 +179,7 @@ impl Flow for WkSame {
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .work::<WkSame, WkSame, _, _>(|a, _| async move { Ok(WkSame { val: a.val }) })
-            .build(Self::node_id())
+            .build()
     }
 }
 
@@ -203,7 +203,7 @@ impl Flow for WkDupIn {
         FlowGraph::builder()
             .work::<WkDupIn, WkDupOut, _, _>(|a, _| async move { Ok(WkDupOut { val: a.val }) })
             .work::<WkDupIn, WkDupOut2, _, _>(|a, _| async move { Ok(WkDupOut2 { val: a.val }) })
-            .build(Self::node_id())
+            .build()
     }
 }
 
@@ -281,7 +281,7 @@ impl Flow for AgentSimpleIn {
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<AgentSimpleIn>()
-            .build(<Self as Flow>::node_id())
+            .build()
     }
 }
 
@@ -330,7 +330,7 @@ impl Flow for AgentToolIn {
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<AgentToolIn>()
-            .build(<Self as Flow>::node_id())
+            .build()
     }
 }
 
@@ -368,7 +368,7 @@ impl Flow for AgentWorkIn {
                     upper: m.text.to_uppercase(),
                 })
             })
-            .build(<Self as Flow>::node_id())
+            .build()
     }
 }
 
@@ -397,7 +397,7 @@ impl Flow for AgentEmptyModel {
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<AgentEmptyModel>()
-            .build(<Self as Flow>::node_id())
+            .build()
     }
 }
 
@@ -534,7 +534,7 @@ impl Flow for EitherIn {
                     from_left: false,
                 })
             })
-            .build(Self::node_id())
+            .build()
     }
 }
 
@@ -556,7 +556,7 @@ impl Flow for EitherSameBranchIn {
             .either::<EitherSameBranchIn, EitherSameBranchOut, EitherSameBranchOut, _>(
                 |_, _| Ok(Either::Left(EitherSameBranchOut { x: 0 })),
             )
-            .build(Self::node_id())
+            .build()
     }
 }
 
@@ -630,7 +630,7 @@ impl Flow for ForkIn {
             .join::<ForkBranchA, ForkBranchB, ForkOut, _>(|a, b, _| {
                 Ok(ForkOut { sum: a.val + b.val })
             })
-            .build(Self::node_id())
+            .build()
     }
 }
 
@@ -669,7 +669,7 @@ impl Flow for ForkWorkIn {
             .join::<ForkWorkBranchA, ForkWorkBranchBProcessed, ForkWorkOut, _>(|a, b, _| {
                 Ok(ForkWorkOut { product: a.val * b.val })
             })
-            .build(Self::node_id())
+            .build()
     }
 }
 
@@ -776,7 +776,7 @@ impl Flow for SuspendIn {
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<SuspendIn>()
-            .build(<Self as Flow>::node_id())
+            .build()
     }
 }
 
@@ -892,7 +892,7 @@ impl Flow for ValBadEntry {
     type Output = ValBadEntryOut;
     fn build() -> Result<FlowGraph, FlowError> {
         // ValBadEntry is never registered as a node — entry key won't be found.
-        FlowGraph::builder().build(Self::node_id())
+        FlowGraph::builder().build()
     }
 }
 
@@ -925,7 +925,7 @@ impl Flow for ValReachIn {
             .work::<ValOrphanIn, ValOrphanOut, _, _>(|a, _| async move {
                 Ok(ValOrphanOut { x: a.x })
             })
-            .build(Self::node_id())
+            .build()
     }
 }
 
