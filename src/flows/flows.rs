@@ -139,20 +139,14 @@ pub(crate) enum FlowOut {
 
 /// Typed step result returned by [`FlowRuntime`].
 #[derive(Debug)]
-pub enum RunOut<O: std::fmt::Debug> {
+pub enum RunOut<O> {
     Continue,
     Done(O),
     Suspend { value: Value, tool_id: String },
 }
 
 pub trait Flow: 'static + JsonSchema + Serialize + DeserializeOwned + Send + Sync {
-    type Output: std::fmt::Debug
-        + JsonSchema
-        + Serialize
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static;
+    type Output: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'static;
 
     fn build() -> FlowBuilder;
 
@@ -659,7 +653,7 @@ fn validate(nodes: &HashMap<String, FlowNode>, entry: &str) -> Result<(), FlowEr
     // --- Entry check ---
     if entry.is_empty() {
         problems.push(
-            "flow has no entry node — call .entry(Self::node_id()) on the builder".to_string(),
+            "flow has no entry node".to_string(),
         );
     } else if !nodes.contains_key(entry) {
         problems.push(format!("entry '{}' is not a registered node", entry));
@@ -771,13 +765,6 @@ impl FlowBuilder {
             flow: FlowGraph::new(),
             errors: Vec::new(),
         }
-    }
-
-    /// Sets the entry node key. Required for graph validation. Typically called as
-    /// `.entry(Self::node_id())` at the end of `Flow::build()`.
-    pub fn entry(mut self, key: impl Into<String>) -> Self {
-        self.flow.entry = key.into();
-        self
     }
 
     /// Registers an agent node. The node name is derived from `A::node_id()`.
@@ -993,8 +980,9 @@ impl FlowBuilder {
         self
     }
 
-    /// Builds the [`FlowGraph`], validating it before returning.
-    pub(crate) fn build(self) -> Result<FlowGraph, FlowError> {
+    /// Builds the [`FlowGraph`] with the given entry node, validating before returning.
+    pub(crate) fn build(mut self, entry: impl Into<String>) -> Result<FlowGraph, FlowError> {
+        self.flow.entry = entry.into();
         if !self.errors.is_empty() {
             return Err(FlowError::Invalid(self.errors));
         }
@@ -1013,7 +1001,7 @@ pub struct FlowRuntime<I: Flow> {
 
 impl<I: Flow> FlowRuntime<I> {
     pub fn new(flow: I) -> Result<Self, FlowError> {
-        let graph = I::build().build()?;
+        let graph = I::build().build(I::node_id())?;
         let value = serde_json::to_value(&flow).map_err(|e| {
             FlowError::SerializeError(format!("start node '{}': {e}", I::node_id()))
         })?;
@@ -1033,6 +1021,15 @@ impl<I: Flow> FlowRuntime<I> {
     /// Overrides the default [`ClientFactory`]. Useful for testing or selecting a provider.
     pub fn with_factory(mut self, factory: impl ClientFactory + 'static) -> Self {
         self.factory = Arc::new(factory);
+        self
+    }
+
+    /// Replaces the conversation history used by agent nodes.
+    ///
+    /// Call after [`FlowRuntime::from_snapshot`] to restore the LLM context from a
+    /// previously persisted [`ClientHistory`].
+    pub fn with_history(mut self, history: ClientHistory) -> Self {
+        self.history = history;
         self
     }
 
@@ -1075,10 +1072,50 @@ impl<I: Flow> FlowRuntime<I> {
             FlowOut::Suspend { value, tool_id } => Ok(RunOut::Suspend { value, tool_id }),
         }
     }
+
+    /// Captures the current execution state as an opaque [`FlowSnapshot`].
+    ///
+    /// The snapshot can be serialized and persisted. It does not include conversation
+    /// history — manage that separately and re-attach via [`FlowRuntime::with_history`].
+    pub fn snapshot(&self) -> FlowSnapshot {
+        FlowSnapshot {
+            state: self.state.clone(),
+        }
+    }
+
+    /// Reconstructs a runtime from a previously captured [`FlowSnapshot`].
+    ///
+    /// The flow graph is rebuilt from `I::build()` — closures are never persisted.
+    /// A fresh history is created; chain `.with_history(saved_history)` to restore
+    /// the full LLM conversation context.
+    pub fn from_snapshot(snapshot: FlowSnapshot) -> Result<Self, FlowError> {
+        let graph = I::build().build(I::node_id())?;
+        let mut history = ClientHistory::new(None);
+        history.push(Message::user(format!("Starting flow: {}", I::node_id())));
+        Ok(Self {
+            state: snapshot.state,
+            history,
+            graph,
+            factory: Arc::new(DefaultClientFactory),
+            _marker: std::marker::PhantomData,
+        })
+    }
 }
 
 impl<I: Flow> std::fmt::Debug for FlowRuntime<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FlowRuntime").finish_non_exhaustive()
     }
+}
+
+/// Opaque snapshot of a flow's execution state at a point in time.
+///
+/// Obtained via [`FlowRuntime::snapshot`]; restored via [`FlowRuntime::from_snapshot`].
+/// Safe to serialize with any `serde` format (JSON, MessagePack, etc.).
+///
+/// Does **not** include conversation history — manage [`ClientHistory`] separately and
+/// re-attach with [`FlowRuntime::with_history`] after reconstructing the runtime.
+#[derive(Serialize, Deserialize)]
+pub struct FlowSnapshot {
+    state: FlowState,
 }

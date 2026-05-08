@@ -304,9 +304,13 @@ impl Tool for PatchLines {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::FlowConf;
 
     fn ctx(dir: &tempfile::TempDir) -> Context {
-        Context::new(dir.path().to_owned())
+        Context::new(FlowConf {
+            working_dir: Some(dir.path().to_owned()),
+            ..Default::default()
+        })
     }
 
     /// `ReadFile` returns the file contents under the `content` key.

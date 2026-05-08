@@ -12,7 +12,7 @@ use crate::clients::{
     Provider, ToolCall,
 };
 use crate::commons::Agent;
-use crate::context::Context;
+use crate::context::{Context, FlowConf};
 use crate::flows::flows::{Flow, FlowBuilder, FlowError, FlowGraph, FlowRuntime, RunOut};
 use crate::tools::{Tool, ToolBox, ToolError};
 
@@ -79,7 +79,10 @@ fn call(name: &str, args: serde_json::Value) -> ToolCall {
 }
 
 fn ctx() -> Context {
-    Context::new(std::env::temp_dir())
+    Context::new(FlowConf {
+        working_dir: Some(std::env::temp_dir()),
+        ..Default::default()
+    })
 }
 
 // Advance until Done, asserting no unexpected errors. Returns the Done value.
@@ -112,7 +115,6 @@ impl Flow for WkA {
     fn build() -> FlowBuilder {
         FlowGraph::builder()
             .work::<WkA, WkB, _, _>(|a, _| async move { Ok(WkB { val: a.val * 2 }) })
-            .entry(Self::node_id())
     }
 }
 
@@ -140,7 +142,6 @@ impl Flow for WkChainIn {
             .work::<WkChainMid, WkChainOut, _, _>(|b, _| async move {
                 Ok(WkChainOut { val: b.val * 3 })
             })
-            .entry(Self::node_id())
     }
 }
 
@@ -161,7 +162,6 @@ impl Flow for WkErrIn {
             .work::<WkErrIn, WkErrOut, _, _>(|_, _| async move {
                 Err(FlowError::AgentError("deliberate error".into()))
             })
-            .entry(Self::node_id())
     }
 }
 
@@ -176,7 +176,6 @@ impl Flow for WkSame {
     fn build() -> FlowBuilder {
         FlowGraph::builder()
             .work::<WkSame, WkSame, _, _>(|a, _| async move { Ok(WkSame { val: a.val }) })
-            .entry(Self::node_id())
     }
 }
 
@@ -200,7 +199,6 @@ impl Flow for WkDupIn {
         FlowGraph::builder()
             .work::<WkDupIn, WkDupOut, _, _>(|a, _| async move { Ok(WkDupOut { val: a.val }) })
             .work::<WkDupIn, WkDupOut2, _, _>(|a, _| async move { Ok(WkDupOut2 { val: a.val }) })
-            .entry(Self::node_id())
     }
 }
 
@@ -278,7 +276,6 @@ impl Flow for AgentSimpleIn {
     fn build() -> FlowBuilder {
         FlowGraph::builder()
             .agent::<AgentSimpleIn>()
-            .entry(<AgentSimpleIn as Flow>::node_id())
     }
 }
 
@@ -327,7 +324,6 @@ impl Flow for AgentToolIn {
     fn build() -> FlowBuilder {
         FlowGraph::builder()
             .agent::<AgentToolIn>()
-            .entry(<AgentToolIn as Flow>::node_id())
     }
 }
 
@@ -365,7 +361,6 @@ impl Flow for AgentWorkIn {
                     upper: m.text.to_uppercase(),
                 })
             })
-            .entry(<AgentWorkIn as Flow>::node_id())
     }
 }
 
@@ -394,7 +389,6 @@ impl Flow for AgentEmptyModel {
     fn build() -> FlowBuilder {
         FlowGraph::builder()
             .agent::<AgentEmptyModel>()
-            .entry(<AgentEmptyModel as Flow>::node_id())
     }
 }
 
@@ -531,7 +525,6 @@ impl Flow for EitherIn {
                     from_left: false,
                 })
             })
-            .entry(Self::node_id())
     }
 }
 
@@ -553,7 +546,6 @@ impl Flow for EitherSameBranchIn {
             .either::<EitherSameBranchIn, EitherSameBranchOut, EitherSameBranchOut, _>(
                 |_, _| Ok(Either::Left(EitherSameBranchOut { x: 0 })),
             )
-            .entry(Self::node_id())
     }
 }
 
@@ -627,7 +619,6 @@ impl Flow for ForkIn {
             .join::<ForkBranchA, ForkBranchB, ForkOut, _>(|a, b, _| {
                 Ok(ForkOut { sum: a.val + b.val })
             })
-            .entry(Self::node_id())
     }
 }
 
@@ -666,7 +657,6 @@ impl Flow for ForkWorkIn {
             .join::<ForkWorkBranchA, ForkWorkBranchBProcessed, ForkWorkOut, _>(|a, b, _| {
                 Ok(ForkWorkOut { product: a.val * b.val })
             })
-            .entry(Self::node_id())
     }
 }
 
@@ -773,7 +763,6 @@ impl Flow for SuspendIn {
     fn build() -> FlowBuilder {
         FlowGraph::builder()
             .agent::<SuspendIn>()
-            .entry(<SuspendIn as Flow>::node_id())
     }
 }
 
@@ -875,26 +864,6 @@ async fn resume_when_not_suspended_errors() {
 
 // ── Validation / graph error tests ───────────────────────────────────────────
 
-// Missing entry: no .entry() call.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct ValMissingEntry {
-    x: i32,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct ValMissingEntryOut {
-    x: i32,
-}
-
-impl Flow for ValMissingEntry {
-    type Output = ValMissingEntryOut;
-    fn build() -> FlowBuilder {
-        FlowGraph::builder().work::<ValMissingEntry, ValMissingEntryOut, _, _>(|a, _| async move {
-            Ok(ValMissingEntryOut { x: a.x })
-        })
-        // intentionally no .entry()
-    }
-}
-
 // Entry references an unregistered node.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct ValBadEntry {
@@ -908,11 +877,8 @@ struct ValBadEntryOut {
 impl Flow for ValBadEntry {
     type Output = ValBadEntryOut;
     fn build() -> FlowBuilder {
+        // ValBadEntry is never registered as a node — entry key won't be found.
         FlowGraph::builder()
-            .work::<ValBadEntry, ValBadEntryOut, _, _>(|a, _| async move {
-                Ok(ValBadEntryOut { x: a.x })
-            })
-            .entry("NonExistentNode")
     }
 }
 
@@ -945,7 +911,6 @@ impl Flow for ValReachIn {
             .work::<ValOrphanIn, ValOrphanOut, _, _>(|a, _| async move {
                 Ok(ValOrphanOut { x: a.x })
             })
-            .entry(Self::node_id())
     }
 }
 
@@ -966,17 +931,6 @@ impl Flow for ValReachIn {
 // The easiest dead-end in practice is an Either that routes both arms to registered nodes
 // with no terminal output. Let's skip a pure dead-end scenario and test unreachable instead.
 // (dead-end detection is already tested indirectly by the same_type test.)
-
-#[tokio::test]
-async fn validation_missing_entry() {
-    let err = FlowRuntime::new(ValMissingEntry { x: 0 }).unwrap_err();
-    match err {
-        FlowError::Invalid(problems) => {
-            assert!(problems.iter().any(|p| p.contains("no entry node")));
-        }
-        other => panic!("expected Invalid, got {other:?}"),
-    }
-}
 
 #[tokio::test]
 async fn validation_entry_not_registered() {

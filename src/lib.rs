@@ -6,4 +6,4 @@ pub mod flows;
 pub mod tools;
 pub mod utils;
 
-pub use context::Context;
+pub use context::{Context, FlowConf};

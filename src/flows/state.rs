@@ -1,9 +1,11 @@
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::clients::ToolCall;
 
 /// Mutable portion of the flow engine
+#[derive(Serialize, Deserialize, Clone)]
 pub struct FlowState {
     states: IndexMap<String, Value>,
     agent_initialized: bool,

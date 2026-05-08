@@ -2,7 +2,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::deps::{Deps, DepsError};
+
+/// Configuration used to construct a [`Context`].
+///
+/// All fields are optional and default to sensible values.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct FlowConf {
+    /// Root directory for path resolution. Defaults to the current working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<PathBuf>,
+    /// Allowlist of commands that tools may execute.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
+    /// HTTP request timeout in seconds. Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_timeout_secs: Option<u64>,
+}
 
 #[derive(Clone)]
 struct ContextInner {
@@ -10,6 +28,7 @@ struct ContextInner {
     commands: Vec<String>,
     deps: Deps,
     http_client: Option<reqwest::Client>,
+    http_timeout_secs: u64,
 }
 
 /// Shared execution context threaded through every tool call and flow step.
@@ -19,14 +38,25 @@ struct ContextInner {
 #[derive(Clone)]
 pub struct Context(Arc<ContextInner>);
 
+impl Default for Context {
+    fn default() -> Self {
+        Self::new(FlowConf::default())
+    }
+}
+
 impl Context {
-    /// Creates a context rooted at `working_dir` with no commands, no deps, and no HTTP client.
-    pub fn new(working_dir: PathBuf) -> Self {
+    /// Creates a context from a [`FlowConf`].
+    pub fn new(conf: FlowConf) -> Self {
+        let working_dir = conf
+            .working_dir
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(std::env::temp_dir);
         Self(Arc::new(ContextInner {
             working_dir,
-            commands: Vec::new(),
+            commands: conf.commands,
             deps: Deps::default(),
             http_client: None,
+            http_timeout_secs: conf.http_timeout_secs.unwrap_or(30),
         }))
     }
 
@@ -66,11 +96,11 @@ impl Context {
         &self.0.deps
     }
 
-    /// Returns the shared HTTP client, or builds a default with a 30-second timeout.
+    /// Returns the shared HTTP client, or builds a default using the configured timeout.
     pub fn http_client(&self) -> reqwest::Client {
         self.0.http_client.clone().unwrap_or_else(|| {
             reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(self.0.http_timeout_secs))
                 .build()
                 .unwrap_or_default()
         })
@@ -83,3 +113,4 @@ impl Context {
         self.0.deps.require::<T>()
     }
 }
+

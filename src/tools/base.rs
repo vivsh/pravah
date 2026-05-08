@@ -289,10 +289,14 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::context::FlowConf;
     use crate::tools::fs::{ReadFile, WriteFile};
 
     fn ctx(dir: &std::path::Path) -> Context {
-        Context::new(dir.to_path_buf())
+        Context::new(FlowConf {
+            working_dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        })
     }
 
     /// Verifies that all registered tool definitions are collected with correct names.

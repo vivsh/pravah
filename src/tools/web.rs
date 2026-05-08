@@ -186,9 +186,10 @@ fn collect_text(el: ElementRef<'_>, buf: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::FlowConf;
 
     fn ctx() -> Context {
-        Context::new(std::path::PathBuf::new())
+        Context::new(FlowConf::default())
     }
 
     /// `FetchUrl` returns the response body and status code from a mock server.

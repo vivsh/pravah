@@ -53,10 +53,14 @@ impl Tool for RunCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::FlowConf;
 
     fn ctx(dir: &std::path::Path, allowed: &[&str]) -> Context {
-        Context::new(dir.to_path_buf())
-            .with_commands(allowed.iter().map(|s| s.to_string()).collect())
+        Context::new(FlowConf {
+            working_dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        })
+        .with_commands(allowed.iter().map(|s| s.to_string()).collect())
     }
 
     /// `RunCommand` executes an allowed command and captures stdout.
