@@ -223,24 +223,6 @@ impl FlowGraphDiagram {
         out
     }
 
-    // ── mermaid-text (feature-gated) ───────────────────────────────────────
-
-    /// Render to Unicode box-drawing text using the `mermaid-text` crate.
-    ///
-    /// Requires the `diagram-text` feature.
-    #[cfg(feature = "diagram-text")]
-    pub fn render_text(&self) -> Result<String, mermaid_text::Error> {
-        mermaid_text::render(&self.mermaid())
-    }
-
-    /// Render to plain ASCII using the `mermaid-text` crate.
-    ///
-    /// Requires the `diagram-text` feature.
-    #[cfg(feature = "diagram-text")]
-    pub fn render_ascii(&self) -> Result<String, mermaid_text::Error> {
-        mermaid_text::render_ascii(&self.mermaid())
-    }
-
     /// Render the graph as an indented tree showing the execution path from
     /// the entry node through all branches and convergence points.
     ///

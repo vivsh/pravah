@@ -30,7 +30,6 @@ pravah = "0.1"
 | `provider-gemini`    |    ✓    | Google Gemini API client                                                                                                      |
 | `provider-ollama`    |    ✓    | Ollama local model client                                                                                                     |
 | `provider-genai`     |    —    | Extra providers via the [`genai`](https://crates.io/crates/genai) crate                                                       |
-| `diagram-text`       |    —    | Render flow graphs as Unicode box-drawing text in the terminal (adds [`mermaid-text`](https://crates.io/crates/mermaid-text)) |
 
 To use only specific providers, disable defaults:
 

@@ -29,7 +29,7 @@
 //! - **ReviewFlow**: `LongDraft` → agent → `ReviewedDraft`
 //!
 //! ```shell
-//! cargo run --features diagram-text --example gen_diagrams
+//! cargo run --example gen_diagrams
 //! ```
 
 use either::Either;
@@ -236,10 +236,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== TREE ===");
     println!("{}", diagram.render_tree());
-    println!("=== ASCII ===");
-    println!("{}", diagram.render_ascii()?);
-    println!("=== TEXT ===");
-    println!("{}", diagram.render_text()?);
     println!("=== MERMAID ===");
     println!("{}", diagram.mermaid());
     println!("=== DOT ===");
