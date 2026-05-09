@@ -97,7 +97,9 @@ where
         let layer_size = queue.len();
         let mut layer = Vec::with_capacity(layer_size);
         for _ in 0..layer_size {
-            let id = queue.pop_front().unwrap();
+            let Some(id) = queue.pop_front() else {
+                break;
+            };
             layer.push(id.clone());
             visited += 1;
             if let Some(nexts) = succs.get(id) {
