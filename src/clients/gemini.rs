@@ -14,6 +14,17 @@ use super::{
     Role, TokenUsage, ToolCall, ToolChoice, parse_json_output, validate_tools,
 };
 
+fn format_error_chain(e: &dyn std::error::Error) -> String {
+    let mut msg = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        msg.push_str(": ");
+        msg.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    msg
+}
+
 fn build_client(url: &LlmUrl) -> Result<Gemini, ClientError> {
     let api_key = if let Some(key) = &url.api_key {
         key.clone()
@@ -21,8 +32,13 @@ fn build_client(url: &LlmUrl) -> Result<Gemini, ClientError> {
         std::env::var("GEMINI_API_KEY")
             .map_err(|_| ClientError::Llm("GEMINI_API_KEY is not set".into()))?
     };
-    let model = GeminiModel::Custom(url.model.clone());
-    Gemini::with_model(&api_key, model).map_err(|e| ClientError::Llm(e.to_string()))
+    let model_id = if url.model.starts_with("models/") {
+        url.model.clone()
+    } else {
+        format!("models/{}", url.model)
+    };
+    let model = GeminiModel::Custom(model_id);
+    Gemini::with_model(&api_key, model).map_err(|e| ClientError::Llm(format_error_chain(&e)))
 }
 
 struct GeminiClient {
@@ -250,7 +266,7 @@ impl GeminiClient {
         builder
             .execute()
             .await
-            .map_err(|e| ClientError::Llm(e.to_string()))
+            .map_err(|e| ClientError::Llm(format_error_chain(&e)))
     }
 }
 

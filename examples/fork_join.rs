@@ -110,6 +110,33 @@ impl Agent for DesignRequest {
     }
 }
 
+// ── Node handlers ─────────────────────────────────────────────────────────────
+
+fn split_project(
+    req: ProjectRequest,
+    _ctx: Context,
+) -> Result<(ResearchRequest, DesignRequest), FlowError> {
+    Ok((
+        ResearchRequest { topic: req.title },
+        DesignRequest { feature: req.description },
+    ))
+}
+
+fn merge_reports(
+    research: ResearchFindings,
+    design: DesignProposal,
+    _ctx: Context,
+) -> Result<FinalReport, FlowError> {
+    Ok(FinalReport {
+        research: research.summary,
+        design: design.approach,
+        recommendation: format!(
+            "Proceed with design. Key trade-offs: {}",
+            design.trade_offs.join("; ")
+        ),
+    })
+}
+
 // ── Flow ──────────────────────────────────────────────────────────────────────
 
 impl Flow for ProjectRequest {
@@ -117,31 +144,10 @@ impl Flow for ProjectRequest {
 
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
-            // Split the project request into two independent tracks.
-            .fork::<ProjectRequest, ResearchRequest, DesignRequest, _>(
-                |req, _ctx| {
-                    Ok((
-                        ResearchRequest { topic: req.title.clone() },
-                        DesignRequest { feature: req.description },
-                    ))
-                },
-            )
-            // Each track runs its own agent.
+            .fork(split_project)
             .agent::<ResearchRequest>()
             .agent::<DesignRequest>()
-            // Once both tracks are done, merge into the final report.
-            .join::<ResearchFindings, DesignProposal, FinalReport, _>(
-                |research, design, _ctx| {
-                    Ok(FinalReport {
-                        research: research.summary,
-                        design: design.approach,
-                        recommendation: format!(
-                            "Proceed with design. Key trade-offs: {}",
-                            design.trade_offs.join("; ")
-                        ),
-                    })
-                },
-            )
+            .join(merge_reports)
             .build()
     }
 }
@@ -150,6 +156,7 @@ impl Flow for ProjectRequest {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 
     let input = ProjectRequest {

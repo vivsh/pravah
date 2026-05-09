@@ -59,6 +59,13 @@ impl Agent for SummariseRequest {
     }
 }
 
+// ── Work node ─────────────────────────────────────────────────────────────────
+
+async fn format_bullets(bullets: BulletPoints, _ctx: Context) -> Result<Report, FlowError> {
+    let markdown = bullets.points.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n");
+    Ok(Report { markdown })
+}
+
 // ── Flow ──────────────────────────────────────────────────────────────────────
 
 impl Flow for SummariseRequest {
@@ -67,15 +74,7 @@ impl Flow for SummariseRequest {
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<SummariseRequest>()
-            .work::<BulletPoints, Report, _, _>(|bullets, _ctx| async move {
-                let markdown = bullets
-                    .points
-                    .iter()
-                    .map(|p| format!("- {p}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Ok(Report { markdown })
-            })
+            .work(format_bullets)
             .build()
     }
 }
@@ -84,6 +83,7 @@ impl Flow for SummariseRequest {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 
     let input = SummariseRequest {

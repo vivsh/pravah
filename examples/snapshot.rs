@@ -57,6 +57,30 @@ struct FinalRecord {
     report: String,
 }
 
+// ── Node handlers ─────────────────────────────────────────────────────────────
+
+async fn normalise(rec: RawRecord, _ctx: Context) -> Result<NormalisedRecord, FlowError> {
+    let value: f64 = rec
+        .raw_value
+        .trim()
+        .parse()
+        .map_err(|_| FlowError::AgentError("invalid numeric string".into()))?;
+    println!("[step 1] normalised {} → {value}", rec.raw_value);
+    Ok(NormalisedRecord { id: rec.id, value })
+}
+
+async fn enrich(rec: NormalisedRecord, _ctx: Context) -> Result<EnrichedRecord, FlowError> {
+    let category = if rec.value >= 100.0 { "high" } else if rec.value >= 50.0 { "medium" } else { "low" };
+    println!("[step 2] enriched id={} → category={category}", rec.id);
+    Ok(EnrichedRecord { id: rec.id, value: rec.value, category: category.to_string() })
+}
+
+async fn format_record(rec: EnrichedRecord, _ctx: Context) -> Result<FinalRecord, FlowError> {
+    let report = format!("Record #{}: value={:.2}, category={}", rec.id, rec.value, rec.category);
+    println!("[step 3] formatted report: {report}");
+    Ok(FinalRecord { id: rec.id, report })
+}
+
 // ── Flow ──────────────────────────────────────────────────────────────────────
 
 impl Flow for RawRecord {
@@ -64,37 +88,9 @@ impl Flow for RawRecord {
 
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
-            // Step 1 — parse and normalise the raw string value.
-            .work::<RawRecord, NormalisedRecord, _, _>(|rec, _ctx| async move {
-                let value: f64 = rec
-                    .raw_value
-                    .trim()
-                    .parse()
-                    .map_err(|_| FlowError::AgentError("invalid numeric string".into()))?;
-                println!("[step 1] normalised {} → {value}", rec.raw_value);
-                Ok(NormalisedRecord { id: rec.id, value })
-            })
-            // Step 2 — enrich with a derived category.
-            .work::<NormalisedRecord, EnrichedRecord, _, _>(|rec, _ctx| async move {
-                let category = if rec.value >= 100.0 {
-                    "high"
-                } else if rec.value >= 50.0 {
-                    "medium"
-                } else {
-                    "low"
-                };
-                println!("[step 2] enriched id={} → category={category}", rec.id);
-                Ok(EnrichedRecord { id: rec.id, value: rec.value, category: category.to_string() })
-            })
-            // Step 3 — format the final report.
-            .work::<EnrichedRecord, FinalRecord, _, _>(|rec, _ctx| async move {
-                let report = format!(
-                    "Record #{}: value={:.2}, category={}",
-                    rec.id, rec.value, rec.category
-                );
-                println!("[step 3] formatted report: {report}");
-                Ok(FinalRecord { id: rec.id, report })
-            })
+            .work(normalise)
+            .work(enrich)
+            .work(format_record)
             .build()
     }
 }
@@ -123,6 +119,7 @@ fn load_snapshot() -> Result<FlowSnapshot, Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 
     let input = RawRecord { id: 42, raw_value: "73.5".to_string() };

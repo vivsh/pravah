@@ -105,6 +105,29 @@ impl Agent for ResearchResult {
     }
 }
 
+// ── Node handlers ─────────────────────────────────────────────────────────────
+
+async fn derive_query(req: BlogRequest, _ctx: Context) -> Result<ResearchQuery, FlowError> {
+    Ok(ResearchQuery {
+        query: format!("{} (for {})", req.topic, req.audience),
+    })
+}
+
+async fn run_research(query: ResearchQuery, ctx: Context) -> Result<ResearchResult, FlowError> {
+    let mut rt = FlowRuntime::new(query)?;
+    loop {
+        match rt.next(ctx.clone()).await? {
+            RunOut::Continue => {}
+            RunOut::Done(result) => return Ok(result),
+            RunOut::Suspend { value, tool_id } => {
+                return Err(FlowError::AgentError(format!(
+                    "inner flow suspended unexpectedly at '{tool_id}': {value}"
+                )));
+            }
+        }
+    }
+}
+
 // ── Outer flow ────────────────────────────────────────────────────────────────
 
 impl Flow for BlogRequest {
@@ -112,28 +135,8 @@ impl Flow for BlogRequest {
 
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
-            // Step 1: derive a research query from the blog request.
-            .work::<BlogRequest, ResearchQuery, _, _>(|req, _ctx| async move {
-                Ok(ResearchQuery {
-                    query: format!("{} (for {})", req.topic, req.audience),
-                })
-            })
-            // Step 2: run the entire ResearchFlow to completion as a sub-flow.
-            .work::<ResearchQuery, ResearchResult, _, _>(|query, ctx| async move {
-                let mut rt = FlowRuntime::new(query)?;
-                loop {
-                    match rt.next(ctx.clone()).await? {
-                        RunOut::Continue => {}
-                        RunOut::Done(result) => return Ok(result),
-                        RunOut::Suspend { value, tool_id } => {
-                            return Err(FlowError::AgentError(format!(
-                                "inner flow suspended unexpectedly at '{tool_id}': {value}"
-                            )));
-                        }
-                    }
-                }
-            })
-            // Step 3: write the final article from the research findings.
+            .work(derive_query)
+            .work(run_research)
             .agent::<ResearchResult>()
             .build()
     }
@@ -143,6 +146,7 @@ impl Flow for BlogRequest {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 
     let input = BlogRequest {
