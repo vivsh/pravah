@@ -493,6 +493,62 @@ impl FlowGraph {
         }
     }
 
+    fn find_resume_target<'a>(
+        &'a self,
+        tool_id: &str,
+        states: &FlowState,
+    ) -> Option<(String, &'a AgentInfo)> {
+        let mut best_match: Option<(usize, String, &AgentInfo)> = None;
+
+        for state_name in states.keys() {
+            let Some(FlowNode::Agent(agent)) = self.nodes.get(state_name) else {
+                continue;
+            };
+            let prefix = format!("{}::", agent.name);
+            if !tool_id.starts_with(&prefix) {
+                continue;
+            }
+            let candidate = (agent.name.len(), state_name.clone(), agent);
+            if best_match
+                .as_ref()
+                .is_none_or(|(best_len, _, _)| candidate.0 > *best_len)
+            {
+                best_match = Some(candidate);
+            }
+        }
+
+        best_match.map(|(_, state_name, agent)| (state_name, agent))
+    }
+
+    async fn resume_suspended(
+        &self,
+        ctx: Context,
+        history: &mut ClientHistory,
+        resumption: (String, Value),
+        states: &mut FlowState,
+    ) -> Result<FlowOut, FlowError> {
+        let pending = states
+            .take_pending_calls()
+            .ok_or_else(|| FlowError::AgentError("resume without pending calls".into()))?;
+        let (current_node_id, agent) = self.find_resume_target(&resumption.0, states).ok_or_else(|| {
+            FlowError::AgentError(format!(
+                "resume target '{}' has no live agent state",
+                resumption.0
+            ))
+        })?;
+        let outcome = Self::handle_resume(
+            &agent.name,
+            &agent.tool_box,
+            ctx,
+            history,
+            &pending,
+            resumption,
+        )
+        .await?;
+        states.clear_suspension();
+        Self::agent_step_into_flow_out(outcome, &current_node_id, &agent.exit_name, states)
+    }
+
     async fn step(
         &self,
         factory: &dyn ClientFactory,
@@ -507,7 +563,14 @@ impl FlowGraph {
             (None, Some((tool_id, _))) => {
                 return Err(FlowError::UnexpectedResumption(tool_id.clone()));
             }
+            (Some(expected), Some((actual, _))) if actual != expected => {
+                return Err(FlowError::ResumeMismatchError(expected.clone()));
+            }
             _ => {}
+        }
+
+        if let Some(payload) = resumption {
+            return self.resume_suspended(ctx, history, payload, states).await;
         }
 
         let total_states = states.len();
@@ -527,39 +590,6 @@ impl FlowGraph {
                 Some(n) => n,
                 None => continue, // terminal state — skip it
             };
-
-            if let Some(payload) = resumption {
-                let pending = states
-                    .take_pending_calls()
-                    .ok_or_else(|| FlowError::AgentError("resume without pending calls".into()))?;
-
-                let agent = match current_node {
-                    FlowNode::Agent(a) => a,
-                    _ => {
-                        return Err(FlowError::AgentError(format!(
-                            "resume on non-agent node '{}'",
-                            current_node_id
-                        )));
-                    }
-                };
-
-                let outcome = Self::handle_resume(
-                    &agent.name,
-                    &agent.tool_box,
-                    ctx,
-                    history,
-                    &pending,
-                    payload,
-                )
-                .await?;
-                states.clear_suspension();
-                return Self::agent_step_into_flow_out(
-                    outcome,
-                    &current_node_id.clone(),
-                    &agent.exit_name,
-                    states,
-                );
-            }
 
             match current_node {
                 FlowNode::Agent(agent) => {
@@ -678,6 +708,12 @@ fn validate_nodes(nodes: &HashMap<String, FlowNode>) -> Result<(), FlowError> {
                     if !seen_parents.insert(p.as_str()) {
                         problems.push(format!(
                             "join (target '{}'): duplicate parent '{}'",
+                            info.target, p
+                        ));
+                    }
+                    if p == &info.target {
+                        problems.push(format!(
+                            "join (target '{}'): target matches parent '{}'",
                             info.target, p
                         ));
                     }
@@ -803,6 +839,53 @@ fn validate(nodes: &HashMap<String, FlowNode>, entry: &str) -> Result<(), FlowEr
                 ));
             }
         }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(FlowError::Invalid(problems))
+    }
+}
+
+fn collect_terminal_state_ids(nodes: &HashMap<String, FlowNode>) -> HashSet<String> {
+    nodes
+        .values()
+        .flat_map(|node| match node {
+            FlowNode::Agent(info) => vec![info.exit_name.clone()],
+            FlowNode::Work(info) => vec![info.exit_name.clone()],
+            FlowNode::Fork(info) => info.children.clone(),
+            FlowNode::Join(info) => vec![info.target.clone()],
+            FlowNode::Either(info) => vec![info.left_name.clone(), info.right_name.clone()],
+        })
+        .filter(|state_id| !nodes.contains_key(state_id))
+        .collect()
+}
+
+fn validate_runtime_output_contract(
+    nodes: &HashMap<String, FlowNode>,
+    expected_output: &str,
+) -> Result<(), FlowError> {
+    let terminals = collect_terminal_state_ids(nodes);
+    let mut sorted_terminals: Vec<String> = terminals.iter().cloned().collect();
+    sorted_terminals.sort();
+
+    let mut problems = Vec::new();
+    if sorted_terminals.len() != 1 {
+        let found = if sorted_terminals.is_empty() {
+            "<none>".to_string()
+        } else {
+            sorted_terminals.join(", ")
+        };
+        problems.push(format!(
+            "flow must have exactly one terminal state id matching output '{}', found: {}",
+            expected_output, found
+        ));
+    } else if sorted_terminals[0] != expected_output {
+        problems.push(format!(
+            "flow output '{}' does not match terminal state id '{}'",
+            expected_output, sorted_terminals[0]
+        ));
     }
 
     if problems.is_empty() {
@@ -994,6 +1077,127 @@ impl FlowBuilder {
         self
     }
 
+    /// Inlines sub-flow `F` into the outer graph by merging all its nodes with name-prefixing.
+    ///
+    /// Calls `F::build()` and inserts every inner node into this builder. Internal node keys
+    /// are prefixed with `"{entry}::"` to avoid collisions. The two boundary nodes keep their
+    /// original names so they connect naturally to the surrounding outer graph:
+    ///
+    /// - **entry** (`F::schema_name()`) — the outer flow already holds this as a state; the
+    ///   inner entry node picks it up directly.
+    /// - **exit** (`F::Output::schema_name()`) — emitted as a state for the next outer node.
+    ///
+    /// `Fork` and `Either` shim closures produce `StateNode` values whose `.name` fields are
+    /// the raw Rust schema names. Those are wrapped here to rewrite the names to their prefixed
+    /// equivalents, keeping them consistent with the renamed node keys.
+    pub fn flow<F: Flow>(mut self) -> Self {
+        let entry_id = F::schema_name();
+        let exit_id = F::Output::schema_name();
+
+        if self.flow.nodes.contains_key(&entry_id) {
+            self.errors
+                .push(format!("flow '{}': duplicate node key", entry_id));
+            return self;
+        }
+
+        let inner = match F::build() {
+            Ok(g) => g,
+            Err(e) => {
+                self.errors.push(format!("flow '{}': {e}", entry_id));
+                return self;
+            }
+        };
+
+        // Boundary nodes stay unprefixed; everything else gets "{entry_id}::" prepended.
+        let rename = |id: &str| -> String {
+            if id == entry_id || id == exit_id {
+                id.to_string()
+            } else {
+                format!("{entry_id}::{id}")
+            }
+        };
+
+        for (name, node) in inner.nodes {
+            let new_key = rename(&name);
+            if self.flow.nodes.contains_key(&new_key) {
+                self.errors.push(format!(
+                    "flow '{}': inner node '{}' conflicts with outer node after rename to '{}'",
+                    entry_id, name, new_key
+                ));
+                return self;
+            }
+            let renamed_node = match node {
+                // Work and Agent: shim writes state via node.exit_name (metadata), no wrapping needed.
+                FlowNode::Work(info) => FlowNode::Work(WorkInfo {
+                    name: new_key.clone(),
+                    exit_name: rename(&info.exit_name),
+                    func: info.func,
+                }),
+                FlowNode::Agent(info) => FlowNode::Agent(AgentInfo {
+                    name: new_key.clone(),
+                    exit_name: rename(&info.exit_name),
+                    tool_box: info.tool_box,
+                    preamble: info.preamble,
+                    model: info.model,
+                    output_schema: info.output_schema,
+                }),
+                // Join: shim takes a value slice by index and writes via node.target (metadata).
+                FlowNode::Join(info) => FlowNode::Join(JoinInfo {
+                    parents: info.parents.iter().map(|p| rename(p)).collect(),
+                    target: rename(&info.target),
+                    func: info.func,
+                }),
+                // Fork: shim produces Vec<StateNode> with names baked from A::schema_name() /
+                // B::schema_name(). Wrap it to rewrite those names to their prefixed equivalents.
+                FlowNode::Fork(mut info) => {
+                    let renamed_children: Vec<String> =
+                        info.children.iter().map(|c| rename(c)).collect();
+                    let renamed_children_for_wrap = renamed_children.clone();
+                    let original_func = info.func;
+                    info.name = new_key.clone();
+                    info.children = renamed_children;
+                    info.func = Box::new(move |value, ctx| {
+                        let mut nodes = (original_func)(value, ctx)?;
+                        for (n, new_name) in nodes.iter_mut().zip(renamed_children_for_wrap.iter()) {
+                            n.name = new_name.clone();
+                        }
+                        Ok(nodes)
+                    });
+                    FlowNode::Fork(info)
+                }
+                // Either: shim produces a StateNode with name baked from A::schema_name() or
+                // B::schema_name(). Wrap it to rewrite that name to the prefixed equivalent.
+                FlowNode::Either(mut info) => {
+                    let orig_left = info.left_name.clone();
+                    let orig_right = info.right_name.clone();
+                    let renamed_left = rename(&info.left_name);
+                    let renamed_right = rename(&info.right_name);
+                    let original_func = info.func;
+                    let rl = renamed_left.clone();
+                    let rr = renamed_right.clone();
+                    info.name = new_key.clone();
+                    info.left_name = renamed_left;
+                    info.right_name = renamed_right;
+                    info.func = Box::new(move |value, ctx| {
+                        let mut state_node = (original_func)(value, ctx)?;
+                        state_node.name = if state_node.name == orig_left {
+                            rl.clone()
+                        } else if state_node.name == orig_right {
+                            rr.clone()
+                        } else {
+                            state_node.name
+                        };
+                        Ok(state_node)
+                    });
+                    FlowNode::Either(info)
+                }
+            };
+            self.flow.nodes.insert(new_key, renamed_node);
+        }
+
+        self
+    }
+
     /// Registers a work node at `From`. The async closure transforms the input value into
     /// `Out` without LLM involvement.
     pub fn work<From, Out, Fut, H>(mut self, func: H) -> Self
@@ -1062,8 +1266,14 @@ pub struct FlowRuntime<I: Flow> {
 }
 
 impl<I: Flow> FlowRuntime<I> {
-    pub fn new(flow: I) -> Result<Self, FlowError> {
+    fn build_graph() -> Result<FlowGraph, FlowError> {
         let graph = I::build()?.with_entry(I::node_id())?;
+        validate_runtime_output_contract(&graph.nodes, &I::Output::schema_name())?;
+        Ok(graph)
+    }
+
+    pub fn new(flow: I) -> Result<Self, FlowError> {
+        let graph = Self::build_graph()?;
         let value = serde_json::to_value(&flow).map_err(|e| {
             FlowError::SerializeError(format!("start node '{}': {e}", I::node_id()))
         })?;
@@ -1151,7 +1361,7 @@ impl<I: Flow> FlowRuntime<I> {
     /// A fresh history is created; chain `.with_history(saved_history)` to restore
     /// the full LLM conversation context.
     pub fn from_snapshot(snapshot: FlowSnapshot) -> Result<Self, FlowError> {
-        let graph = I::build()?.with_entry(I::node_id())?;
+        let graph = Self::build_graph()?;
         let mut history = ClientHistory::new(None);
         history.push(Message::user(format!("Starting flow: {}", I::node_id())));
         Ok(Self {

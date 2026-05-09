@@ -439,6 +439,47 @@ mod tests {
         assert!(matches!(err, ToolError::PathEscape(_)));
     }
 
+    /// `ReadFile` rejects a symlink inside the working directory when it resolves outside it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "secret").await.unwrap();
+
+        let link_path = dir.path().join("outside-link.txt");
+        std::os::unix::fs::symlink(&outside_file, &link_path).unwrap();
+
+        let err = ReadFile {
+            path: link_path.to_str().unwrap().into(),
+        }
+        .call(ctx(&dir))
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ToolError::PathEscape(_)));
+    }
+
+    /// `ReadFile` still follows a symlink when the resolved target stays inside the working directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_allows_internal_symlink_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("data.txt");
+        fs::write(&target, "inside").await.unwrap();
+
+        let link_path = dir.path().join("inside-link.txt");
+        std::os::unix::fs::symlink(&target, &link_path).unwrap();
+
+        let out = ReadFile {
+            path: link_path.to_str().unwrap().into(),
+        }
+        .call(ctx(&dir))
+        .await
+        .unwrap();
+        assert_eq!(out.content, "inside");
+    }
+
     /// `WriteFile` rejects a path that uses `..` to escape the working directory.
     #[tokio::test]
     async fn write_file_rejects_path_traversal() {

@@ -92,6 +92,14 @@ fn build_payload(
         if options.tool_choice == ToolChoice::Required {
             payload["tool_choice"] = Value::String("required".into());
         }
+    } else if let Some(schema) = &options.output_schema {
+        payload["response_format"] = json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "agent_output",
+                "schema": schema,
+            }
+        });
     } else {
         payload["response_format"] = json!({ "type": "json_object" });
     }
@@ -281,6 +289,7 @@ fn usage_from_value(value: &Value) -> TokenUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn qwen_no_think_is_added_to_first_user_message() {
@@ -303,5 +312,27 @@ mod tests {
         );
         assert_eq!(payload["model"], "custom-local");
         assert_eq!(payload["response_format"]["type"], "json_object");
+    }
+
+    /// Structured-output mode includes the provided output schema in the Ollama payload.
+    #[test]
+    fn payload_uses_output_schema_when_present() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        });
+        let payload = build_payload(
+            "custom-local",
+            &ClientOptions::default().with_output_schema(schema.clone()),
+            &[Message::user("hi")],
+            false,
+        );
+
+        assert_eq!(payload["response_format"]["type"], "json_schema");
+        assert_eq!(payload["response_format"]["json_schema"]["name"], "agent_output");
+        assert_eq!(payload["response_format"]["json_schema"]["schema"], schema);
     }
 }

@@ -11,19 +11,19 @@ A Rust library for building typed, stepwise agentic information flows.
 Each call to `next()` does one bounded unit of work — one LLM turn, one tool
 batch, one deterministic transform, one branch, one fork, or one join.
 
-**Pravah executes flows one transaction-sized step at a time.**
-After every `next()` call, the entire flow state can be:
-
-- **persisted** — snapshot to a database, file, or message queue
-- **suspended** — pause at an approval gate or external event
-- **resumed** — restore the snapshot in any process and continue
-- **inspected** — examine typed state between steps for debugging or auditing
-- **retried** — replay from the last good snapshot on failure
-- **transferred** — hand the snapshot to a different machine, worker, or service
-
-Nothing is hidden in closures or thread-local state. The only things needed to
-continue a flow are the `FlowSnapshot` and the flow graph definition — both
-of which you own.
+> **Pravah executes flows one transaction-sized step at a time.**
+> After every `next()` call, the entire flow state can be:
+>
+> - **persisted** — snapshot to a database, file, or message queue
+> - **suspended** — pause at an approval gate or external event
+> - **resumed** — restore the snapshot in any process and continue
+> - **inspected** — examine typed state between steps for debugging or auditing
+> - **retried** — replay from the last good snapshot on failure
+> - **transferred** — hand the snapshot to a different machine, worker, or service
+>
+> Nothing is hidden in closures or thread-local state. The only things needed to
+> continue a flow are the `FlowSnapshot` and the flow graph definition — both
+> of which you own.
 
 ## Installation
 
@@ -61,7 +61,7 @@ use pravah::context::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// Types
+// ── Types ──────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct SummariseRequest { topic: String }
@@ -72,7 +72,7 @@ struct BulletPoints { points: Vec<String> }
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct Report { text: String }
 
-// Agent
+// ── Agent ──────────────────────────────────────────────────────────────────
 
 impl Agent for SummariseRequest {
     type Output = BulletPoints;
@@ -82,14 +82,14 @@ impl Agent for SummariseRequest {
     }
 }
 
-// Work node
+// ── Work node ─────────────────────────────────────────────────────────────
 
 async fn format_report(points: BulletPoints, _ctx: Context) -> Result<Report, FlowError> {
     let text = points.points.iter().map(|p| format!("• {p}")).collect::<Vec<_>>().join("\n");
     Ok(Report { text })
 }
 
-// Flow
+// ── Flow ───────────────────────────────────────────────────────────────────
 
 impl Flow for SummariseRequest {
     type Output = Report;
@@ -102,10 +102,10 @@ impl Flow for SummariseRequest {
     }
 }
 
-// Run
+// ── Run ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), FlowError> {
     let ctx = Context::new(FlowConf::default());
     let input = SummariseRequest { topic: "Rust ownership model".into() };
     let mut runtime = FlowRuntime::new(input)?;
@@ -114,7 +114,10 @@ async fn main() -> anyhow::Result<()> {
         match runtime.next(ctx.clone()).await? {
             RunOut::Continue => {}
             RunOut::Done(report) => { println!("{}", report.text); break; }
-            RunOut::Suspend { .. } => unreachable!("no suspension tools registered"),
+            RunOut::Suspend { value, tool_id } => {
+                eprintln!("Unexpected suspension at '{tool_id}': {value}");
+                break;
+            }
         }
     }
     Ok(())
@@ -156,6 +159,14 @@ The builder validates: duplicate node identities, entry not in graph,
 unreachable nodes, no path to a terminal value, invalid fork/join definitions,
 and both branches of `either` routing to the same type.
 
+Runtime construction adds two output contract checks:
+
+- the graph must resolve to exactly one distinct terminal state id
+- that terminal id must match `Flow::Output`
+
+Join validation also rejects `join::<A, B, Out>()` when `Out` is the same type
+as `A` or `B`, which would otherwise overwrite and remove the result.
+
 ## Agents
 
 ```rust
@@ -190,6 +201,15 @@ fn build() -> AgentConfig {
 With no tools, Pravah uses structured-output mode. With tools, it injects a
 typed exit sentinel so the model can submit the final value.
 
+Structured-output behavior is provider-specific:
+
+- OpenAI: native JSON Schema mode
+- Gemini: native JSON Schema mode (schema is sanitized for provider compatibility)
+- Ollama: native JSON Schema mode when `output_schema` is present; falls back to
+  generic JSON object mode otherwise
+- Anthropic: schema is provided as a strict prompt contract (best effort)
+- GenAI: JSON schema response format via the `genai` adapter
+
 ## Tools
 
 ```rust
@@ -219,6 +239,10 @@ impl Tool for ReadNote {
 `Context` carries the working directory, command allowlist, dependency
 container, and shared HTTP client.
 
+`Context::resolve` enforces path confinement: traversal outside `working_dir`
+is rejected, and symlinks are allowed only when their resolved target stays
+within `working_dir`.
+
 ## Suspend And Resume
 
 A tool returns `ToolError::suspend(value)` to pause the flow. The runtime
@@ -228,6 +252,8 @@ and a JSON response. Useful for approval gates, missing credentials, payments,
 or any action needing external confirmation.
 
 ```rust
+use serde_json::json;
+
 loop {
     match runtime.next(ctx.clone()).await? {
         RunOut::Continue => {}

@@ -73,19 +73,70 @@ impl Context {
     /// collapsed without hitting the filesystem, so this check is safe for
     /// paths that do not yet exist (e.g. write targets).
     pub fn resolve(&self, raw: &str) -> Result<PathBuf, ToolError> {
+        let working_dir = normalize_path(self.working_dir());
         let path = Path::new(raw);
-        let abs = if path.is_absolute() {
-            path.to_path_buf()
+        let requested = if path.is_absolute() {
+            normalize_path(path)
         } else {
-            self.working_dir().join(path)
+            normalize_path(&working_dir.join(path))
         };
-        let normalized = normalize_path(&abs);
-        let wd = normalize_path(self.working_dir());
-        if !normalized.starts_with(&wd) {
+        if !requested.starts_with(&working_dir) {
             return Err(ToolError::PathEscape(raw.to_owned()));
         }
-        Ok(normalized)
+        let canonical_root = canonical_working_dir(&working_dir)?;
+        let relative = requested
+            .strip_prefix(&working_dir)
+            .map_err(|_| ToolError::PathEscape(raw.to_owned()))?;
+        resolve_within_root(raw, &canonical_root, relative)
     }
+}
+
+fn canonical_working_dir(path: &Path) -> Result<PathBuf, ToolError> {
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => Ok(canonical),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(ToolError::Io(error)),
+    }
+}
+
+fn resolve_within_root(raw: &str, root: &Path, relative: &Path) -> Result<PathBuf, ToolError> {
+    let mut resolved = root.to_path_buf();
+
+    for component in relative.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Normal(part) => {
+                resolved.push(part);
+                match std::fs::symlink_metadata(&resolved) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        let canonical = std::fs::canonicalize(&resolved)?;
+                        if !canonical.starts_with(root) {
+                            return Err(ToolError::PathEscape(raw.to_owned()));
+                        }
+                        resolved = canonical;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(ToolError::Io(error)),
+                }
+            }
+            Component::RootDir => {
+                resolved = root.to_path_buf();
+            }
+            Component::Prefix(_) => {
+                return Err(ToolError::PathEscape(raw.to_owned()));
+            }
+        }
+
+        if !resolved.starts_with(root) {
+            return Err(ToolError::PathEscape(raw.to_owned()));
+        }
+    }
+
+    Ok(resolved)
 }
 
 /// Collapses `.` and `..` components without touching the filesystem.

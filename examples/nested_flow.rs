@@ -1,21 +1,21 @@
 //! # Example 3 — Nested Flow
 //!
 //! Demonstrates composing flows: an outer flow delegates part of its work to
-//! a fully independent inner flow.
+//! a fully independent inner flow using the `.flow::<F>()` builder node.
 //!
 //! ```text
 //! Outer flow
 //! ──────────────────────────────────────────────────────────────
-//! BlogRequest ──work──► ResearchQuery ──work (inner flow)──► ResearchResult ──agent──► FinalArticle (terminal)
+//! BlogRequest ──work──► ResearchQuery ──flow──► ResearchResult ──agent──► FinalArticle (terminal)
 //!
-//! Inner flow  (ResearchFlow)
+//! Inner flow  (ResearchQuery flow)
 //! ──────────────────────────────────────────────────────────────
 //! ResearchQuery ──agent──► ResearchResult (terminal)
 //! ```
 //!
-//! The `work` node that bridges the two flows runs `ResearchFlow` to
-//! completion synchronously inside its async closure.  The inner flow is
-//! completely unaware it is being hosted by the outer flow.
+//! The `.flow::<ResearchQuery>()` node runs the inner flow to completion
+//! step-by-step and forwards its typed output into the outer flow. The inner
+//! flow is completely unaware it is being hosted by the outer flow.
 //!
 //! ## Running
 //!
@@ -92,7 +92,7 @@ impl Agent for ResearchResult {
     }
 }
 
-// ── Node handlers ─────────────────────────────────────────────────────────────
+// Node handlers
 
 async fn derive_query(req: BlogRequest, _ctx: Context) -> Result<ResearchQuery, FlowError> {
     Ok(ResearchQuery {
@@ -100,22 +100,7 @@ async fn derive_query(req: BlogRequest, _ctx: Context) -> Result<ResearchQuery, 
     })
 }
 
-async fn run_research(query: ResearchQuery, ctx: Context) -> Result<ResearchResult, FlowError> {
-    let mut rt = FlowRuntime::new(query)?;
-    loop {
-        match rt.next(ctx.clone()).await? {
-            RunOut::Continue => {}
-            RunOut::Done(result) => return Ok(result),
-            RunOut::Suspend { value, tool_id } => {
-                return Err(FlowError::AgentError(format!(
-                    "inner flow suspended unexpectedly at '{tool_id}': {value}"
-                )));
-            }
-        }
-    }
-}
-
-// ── Outer flow ────────────────────────────────────────────────────────────────
+// Outer flow
 
 impl Flow for BlogRequest {
     type Output = FinalArticle;
@@ -123,7 +108,7 @@ impl Flow for BlogRequest {
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .work(derive_query)
-            .work(run_research)
+            .flow::<ResearchQuery>()
             .agent::<ResearchResult>()
             .build()
     }
