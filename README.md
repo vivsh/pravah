@@ -4,7 +4,7 @@
 [![docs.rs](https://img.shields.io/docsrs/pravah)](https://docs.rs/pravah)
 [![License](https://img.shields.io/crates/l/pravah)](LICENSE-MIT)
 
-*Pravah* (प्रवाह, *pruh-VAH*) — Sanskrit/Hindi for "flow" or "current".
+_Pravah_ (प्रवाह, _pruh-VAH_) — Sanskrit/Hindi for "flow" or "current".
 
 A Rust library for building typed, stepwise agentic information flows.
 
@@ -13,6 +13,105 @@ moves information from one typed node to the next. Each call to `next()` does
 one bounded unit of work: one LLM turn, one tool batch, one deterministic
 transform, one branch, one fork, or one join. The caller decides when to
 persist state and how to resume it.
+
+## Installation
+
+```toml
+[dependencies]
+pravah = "0.1"
+```
+
+### Features
+
+| Feature              | Default | Description                                                                                                                   |
+| -------------------- | :-----: | ----------------------------------------------------------------------------------------------------------------------------- |
+| `provider-openai`    |    ✓    | OpenAI-compatible API client                                                                                                  |
+| `provider-anthropic` |    ✓    | Anthropic Claude API client                                                                                                   |
+| `provider-gemini`    |    ✓    | Google Gemini API client                                                                                                      |
+| `provider-ollama`    |    ✓    | Ollama local model client                                                                                                     |
+| `provider-genai`     |    —    | Extra providers via the [`genai`](https://crates.io/crates/genai) crate                                                       |
+| `diagram-text`       |    —    | Render flow graphs as Unicode box-drawing text in the terminal (adds [`mermaid-text`](https://crates.io/crates/mermaid-text)) |
+
+To use only specific providers, disable defaults:
+
+```toml
+pravah = { version = "0.1", default-features = false, features = ["provider-openai"] }
+```
+
+## Getting Started
+
+This minimal example defines a two-node flow: an agent that produces bullet
+points from a request, and a work node that assembles them into a final report.
+
+```rust
+use pravah::flows::{Agent, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
+use pravah::context::{Context, FlowConf};
+use pravah::tools::ToolBox;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct SummariseRequest { topic: String }
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct BulletPoints { points: Vec<String> }
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct Report { text: String }
+
+// ── Agent ──────────────────────────────────────────────────────────────────
+
+impl Agent for SummariseRequest {
+    type Output = BulletPoints;
+
+    fn preamble() -> String { "Summarise the topic as concise bullet points.".into() }
+    fn model_url() -> String { "openai://gpt-4o-mini".into() }
+    fn tool_box() -> ToolBox { ToolBox::builder().build() }
+}
+
+// ── Work node ─────────────────────────────────────────────────────────────
+
+async fn format_report(points: BulletPoints, _ctx: Context) -> Result<Report, FlowError> {
+    let text = points.points.iter().map(|p| format!("• {p}")).collect::<Vec<_>>().join("\n");
+    Ok(Report { text })
+}
+
+// ── Flow ───────────────────────────────────────────────────────────────────
+
+impl Flow for SummariseRequest {
+    type Output = Report;
+
+    fn build() -> Result<FlowGraph, FlowError> {
+        FlowGraph::builder()
+            .agent::<SummariseRequest>()
+            .work(format_report)
+            .build()
+    }
+}
+
+// ── Run ────────────────────────────────────────────────────────────────────
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let ctx = Context::new(FlowConf::default());
+    let input = SummariseRequest { topic: "Rust ownership model".into() };
+    let mut runtime = FlowRuntime::new(input)?;
+
+    loop {
+        match runtime.next(ctx.clone()).await? {
+            RunOut::Continue => {}
+            RunOut::Done(report) => { println!("{}", report.text); break; }
+            RunOut::Suspend { .. } => unreachable!("no suspension tools registered"),
+        }
+    }
+    Ok(())
+}
+```
+
+See the [`examples/`](examples/) directory for runnable examples covering
+linear flows, fork/join, nested flows, and snapshot-based resumption.
 
 ## The Core Idea
 
@@ -105,6 +204,10 @@ container, and shared HTTP client.
 ```rust
 use pravah::flows::{Flow, FlowError, FlowGraph};
 
+async fn plan_to_answer(plan: Plan, _ctx: Context) -> Result<FinalAnswer, FlowError> {
+    Ok(FinalAnswer { text: plan.steps.join("\n") })
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct FinalAnswer { text: String }
 
@@ -114,10 +217,8 @@ impl Flow for PlannerInput {
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
             .agent::<PlannerInput>()
-            .work::<Plan, FinalAnswer, _, _>(|plan, _| async move {
-                Ok(FinalAnswer { text: plan.steps.join("\n") })
-            })
-            .build(Self::node_id())
+            .work(plan_to_answer)
+            .build()
     }
 }
 ```
@@ -169,6 +270,47 @@ A flow has the same shape as a node: typed input, stepwise execution, typed
 output. Use nested flows to keep large agent systems modular — a planning flow
 can contain a research sub-flow, a coding flow can contain a review-and-fix
 sub-flow. The same node-identity rule applies at each graph boundary.
+
+### Example: Article Production Pipeline
+
+Combines every node type — fork, join, work, either, agent, and two nested flows:
+
+```text
+ArticleRequest
+  ├─fork─┬─ ResearchTask  ──agent──► ResearchNotes  ─┐
+         └─ AudienceTask  ──agent──► AudienceProfile ─┤join
+                                                       ▼
+                                                 ContentBrief
+                                                 │work
+                                           OutlineRequest
+                                    (nested OutlineFlow) │work
+                                                         ▼
+                                                      Outline
+                                                ┌──either──┐
+                                          QuickDraft     LongDraft
+                                          (agent)   (nested ReviewFlow)
+                                              │              │work
+                                              │         ReviewedDraft
+                                              │           (agent)
+                                              └──────────────┘
+                                                     ▼
+                                              FinalArticle ◉
+```
+
+ASCII art rendered from `FlowGraphDiagram::for_flow::<ArticleRequest>()?.render_ascii()`:
+
+```
++----+      +------------*------------+  fork+------------------------+  agent+-----------------------------+  join+-----------------------+  work+-------------------------+  work+----------*---------+        +--------------------+   work +-------------------------+  agent+---------------------+
+|(  )|----->| "ArticleRequest (fork)" |--fork| "AudienceTask (agent)" |------>|( "AudienceProfile  (join)" )|----->| "ContentBrief (work)" |----->| "OutlineRequest (work)" |----->| "Outline (either)" |---either "LongDraft (work)" |------->| "ReviewedDraft (agent)" |-----+>|( "FinalArticle  ◉" )|
++----+      +------------*------------+-----++------------------------+       +-----------------------------+     >+-----------------------+      +-------------------------+      +----------*---------+-------++--------------------+        +-------------------------+     +>+---------------------+
+                                            |                                                                     |                                                                                         either                                          --------------------+
+                                            |                                                                     |                                                                                             |                                           |         agent
+                                            |+------------------------+  agent+---------------------------+   join|                                                                                             |+----------------------+                   |
+                                            >| "ResearchTask (agent)" |------>|( "ResearchNotes  (join)" )|-------+                                                                                             >| "QuickDraft (agent)" |-------------------+
+                                             +------------------------+       +---------------------------+                                                                                                      +----------------------+
+```
+
+![Article production pipeline](assets/nested_flow.svg)
 
 ## Clients
 

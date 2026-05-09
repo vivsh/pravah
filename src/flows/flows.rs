@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::flows::diagram::{build_diagram, DiagramNodeKind, FlowGraphDiagram, NodeDesc};
 use crate::flows::state::FlowState;
 use crate::{
     clients::{
@@ -170,6 +171,53 @@ impl FlowGraph {
 
     pub fn builder() -> FlowBuilder {
         FlowBuilder::new()
+    }
+
+    /// Produce a [`FlowGraphDiagram`] snapshot of this graph's topology.
+    ///
+    /// Called internally by [`FlowGraphDiagram::for_flow`]. Use that method
+    /// from outside the crate.
+    pub(crate) fn diagram(&self) -> FlowGraphDiagram {
+        let descs: Vec<NodeDesc> = self
+            .nodes
+            .iter()
+            .map(|(key, node)| {
+                let (kind, succs): (DiagramNodeKind, Vec<(String, &'static str)>) = match node {
+                    FlowNode::Agent(info) => (
+                        DiagramNodeKind::Agent,
+                        vec![(info.exit_name.clone(), "agent")],
+                    ),
+                    FlowNode::Work(info) => (
+                        DiagramNodeKind::Work,
+                        vec![(info.exit_name.clone(), "work")],
+                    ),
+                    FlowNode::Fork(info) => (
+                        DiagramNodeKind::Fork,
+                        info.children
+                            .iter()
+                            .map(|c| (c.clone(), "fork"))
+                            .collect(),
+                    ),
+                    FlowNode::Join(info) => (
+                        DiagramNodeKind::Join,
+                        vec![(info.target.clone(), "join")],
+                    ),
+                    FlowNode::Either(info) => (
+                        DiagramNodeKind::Either,
+                        vec![
+                            (info.left_name.clone(), "either"),
+                            (info.right_name.clone(), "either"),
+                        ],
+                    ),
+                };
+                NodeDesc {
+                    id: key.clone(),
+                    kind,
+                    succs,
+                }
+            })
+            .collect();
+        build_diagram(self.entry.clone(), descs)
     }
 
     pub(crate) fn is_terminal(&self, state_name: &str) -> bool {

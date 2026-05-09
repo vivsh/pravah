@@ -1,6 +1,6 @@
 [package]
 name = "pravah"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Typed, stepwise agentic information flows for Rust"
 license = "MIT OR Apache-2.0"
@@ -15,6 +15,7 @@ provider-anthropic = []
 provider-gemini = ["dep:gemini-rust"]
 provider-ollama = []
 provider-genai = ["dep:genai"]
+diagram-text = ["dep:mermaid-text"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -29,6 +30,7 @@ scraper = "0.22"
 dom_smoothie = "0.17.0"
 genai = { version = "0.5.3", optional = true }
 gemini-rust = { version = "1.7.1", optional = true }
+mermaid-text = { version = "0.11", optional = true }
 tracing = "0.1"
 indexmap = { version = "2.14.0", features = ["serde"] }
 either = { version = "1.15.0", features = ["serde"] }
@@ -37,3 +39,4 @@ futures = "0.3.32"
 [dev-dependencies]
 tempfile = "3.27.0"
 mockito = "1"
+dotenvy = "0.15"
