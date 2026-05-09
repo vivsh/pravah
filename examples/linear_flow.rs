@@ -16,8 +16,7 @@
 //! GEMINI_API_KEY=<key> cargo run --example linear_flow
 //! ```
 
-use pravah::flows::{Agent, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
-use pravah::tools::ToolBox;
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -44,18 +43,12 @@ struct Report {
 impl Agent for SummariseRequest {
     type Output = BulletPoints;
 
-    fn preamble() -> String {
-        "You are a concise summariser. Extract the key points from the text \
-         the user sends and return them as a JSON array of short strings."
-            .to_string()
-    }
-
-    fn model_url() -> String {
-        "gemini://gemini-2.5-flash-lite".to_string()
-    }
-
-    fn tool_box() -> ToolBox {
-        ToolBox::builder().build()
+    fn build() -> AgentConfig {
+        AgentConfig::new(
+            "You are a concise summariser. Extract the key points from the text \
+             the user sends and return them as a JSON array of short strings.",
+            "gemini://gemini-2.5-flash-lite",
+        )
     }
 }
 

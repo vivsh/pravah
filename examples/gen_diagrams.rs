@@ -33,9 +33,8 @@
 //! ```
 
 use either::Either;
-use pravah::flows::{Agent, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
 use pravah::flows::FlowGraphDiagram;
-use pravah::tools::ToolBox;
 use pravah::Context;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -93,9 +92,7 @@ struct FinalArticle { title: String, body: String }
 
 impl Agent for OutlineRequest {
     type Output = Outline;
-    fn preamble() -> String { "Generate a structured outline with sections.".into() }
-    fn model_url() -> String { "gemini://gemini-2.5-flash-lite".into() }
-    fn tool_box() -> ToolBox { ToolBox::builder().build() }
+    fn build() -> AgentConfig { AgentConfig::new("Generate a structured outline with sections.", "gemini://gemini-2.5-flash-lite") }
 }
 
 impl Flow for OutlineRequest {
@@ -109,9 +106,7 @@ impl Flow for OutlineRequest {
 
 impl Agent for LongDraft {
     type Output = ReviewedDraft;
-    fn preamble() -> String { "Review the draft for quality, accuracy, and structure.".into() }
-    fn model_url() -> String { "gemini://gemini-2.5-flash-lite".into() }
-    fn tool_box() -> ToolBox { ToolBox::builder().build() }
+    fn build() -> AgentConfig { AgentConfig::new("Review the draft for quality, accuracy, and structure.", "gemini://gemini-2.5-flash-lite") }
 }
 
 impl Flow for LongDraft {
@@ -125,30 +120,22 @@ impl Flow for LongDraft {
 
 impl Agent for ResearchTask {
     type Output = ResearchNotes;
-    fn preamble() -> String { "Research the topic and gather key facts and sources.".into() }
-    fn model_url() -> String { "gemini://gemini-2.5-flash-lite".into() }
-    fn tool_box() -> ToolBox { ToolBox::builder().build() }
+    fn build() -> AgentConfig { AgentConfig::new("Research the topic and gather key facts and sources.", "gemini://gemini-2.5-flash-lite") }
 }
 
 impl Agent for AudienceTask {
     type Output = AudienceProfile;
-    fn preamble() -> String { "Analyse the target audience and determine tone and reading level.".into() }
-    fn model_url() -> String { "gemini://gemini-2.5-flash-lite".into() }
-    fn tool_box() -> ToolBox { ToolBox::builder().build() }
+    fn build() -> AgentConfig { AgentConfig::new("Analyse the target audience and determine tone and reading level.", "gemini://gemini-2.5-flash-lite") }
 }
 
 impl Agent for QuickDraft {
     type Output = FinalArticle;
-    fn preamble() -> String { "Write a concise, punchy article from the quick draft.".into() }
-    fn model_url() -> String { "gemini://gemini-2.5-flash-lite".into() }
-    fn tool_box() -> ToolBox { ToolBox::builder().build() }
+    fn build() -> AgentConfig { AgentConfig::new("Write a concise, punchy article from the quick draft.", "gemini://gemini-2.5-flash-lite") }
 }
 
 impl Agent for ReviewedDraft {
     type Output = FinalArticle;
-    fn preamble() -> String { "Polish the reviewed draft into a publication-ready article.".into() }
-    fn model_url() -> String { "gemini://gemini-2.5-flash-lite".into() }
-    fn tool_box() -> ToolBox { ToolBox::builder().build() }
+    fn build() -> AgentConfig { AgentConfig::new("Polish the reviewed draft into a publication-ready article.", "gemini://gemini-2.5-flash-lite") }
 }
 
 // ── Outer flow node handlers ───────────────────────────────────────────────────

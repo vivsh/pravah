@@ -842,11 +842,12 @@ impl FlowBuilder {
                 return self;
             }
         };
+        let config = A::build();
         let agent_info = AgentInfo {
             name: name.clone(),
-            tool_box: A::tool_box().with_agent::<A>(),
-            preamble: A::preamble(),
-            model: A::model_url(),
+            tool_box: config.tool_box.with_agent::<A>(),
+            preamble: config.preamble,
+            model: config.model_url,
             exit_name: A::Output::schema_name(),
             output_schema,
         };

@@ -8,11 +8,22 @@ _Pravah_ (प्रवाह, _pruh-VAH_) — Sanskrit/Hindi for "flow" or "curr
 
 A Rust library for building typed, stepwise agentic information flows.
 
-Pravah is not a general workflow engine. A flow is a single-threaded graph that
-moves information from one typed node to the next. Each call to `next()` does
-one bounded unit of work: one LLM turn, one tool batch, one deterministic
-transform, one branch, one fork, or one join. The caller decides when to
-persist state and how to resume it.
+Each call to `next()` does one bounded unit of work — one LLM turn, one tool
+batch, one deterministic transform, one branch, one fork, or one join.
+
+> **Pravah executes flows one transaction-sized step at a time.**
+> After every `next()` call, the entire flow state can be:
+>
+> - **persisted** — snapshot to a database, file, or message queue
+> - **suspended** — pause at an approval gate or external event
+> - **resumed** — restore the snapshot in any process and continue
+> - **inspected** — examine typed state between steps for debugging or auditing
+> - **retried** — replay from the last good snapshot on failure
+> - **transferred** — hand the snapshot to a different machine, worker, or service
+>
+> Nothing is hidden in closures or thread-local state. The only things needed to
+> continue a flow are the `FlowSnapshot` and the flow graph definition — both
+> of which you own.
 
 ## Installation
 
@@ -21,15 +32,13 @@ persist state and how to resume it.
 pravah = "0.1"
 ```
 
-### Features
-
-| Feature              | Default | Description                                                                                                                   |
-| -------------------- | :-----: | ----------------------------------------------------------------------------------------------------------------------------- |
-| `provider-openai`    |    ✓    | OpenAI-compatible API client                                                                                                  |
-| `provider-anthropic` |    ✓    | Anthropic Claude API client                                                                                                   |
-| `provider-gemini`    |    ✓    | Google Gemini API client                                                                                                      |
-| `provider-ollama`    |    ✓    | Ollama local model client                                                                                                     |
-| `provider-genai`     |    —    | Extra providers via the [`genai`](https://crates.io/crates/genai) crate                                                       |
+| Feature              | Default | Description                                                             |
+| -------------------- | :-----: | ----------------------------------------------------------------------- |
+| `provider-openai`    |    ✓    | OpenAI-compatible API client                                            |
+| `provider-anthropic` |    ✓    | Anthropic Claude API client                                             |
+| `provider-gemini`    |    ✓    | Google Gemini API client                                                |
+| `provider-ollama`    |    ✓    | Ollama local model client                                               |
+| `provider-genai`     |    —    | Extra providers via the [`genai`](https://crates.io/crates/genai) crate |
 
 To use only specific providers, disable defaults:
 
@@ -37,15 +46,18 @@ To use only specific providers, disable defaults:
 pravah = { version = "0.1", default-features = false, features = ["provider-openai"] }
 ```
 
+Model URLs select the backend at runtime: `openai://gpt-4o`,
+`anthropic://claude-sonnet-4-5`, `gemini://gemini-2.5-flash-lite`,
+`ollama://localhost:11434/qwen3:8b`. Inject a custom `ClientFactory` for
+testing, recording/replay, or hosted gateways.
+
 ## Getting Started
 
-This minimal example defines a two-node flow: an agent that produces bullet
-points from a request, and a work node that assembles them into a final report.
+A two-node flow: an agent produces bullet points, a work node formats them into a report.
 
 ```rust
-use pravah::flows::{Agent, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
 use pravah::context::{Context, FlowConf};
-use pravah::tools::ToolBox;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -65,9 +77,9 @@ struct Report { text: String }
 impl Agent for SummariseRequest {
     type Output = BulletPoints;
 
-    fn preamble() -> String { "Summarise the topic as concise bullet points.".into() }
-    fn model_url() -> String { "openai://gpt-4o-mini".into() }
-    fn tool_box() -> ToolBox { ToolBox::builder().build() }
+    fn build() -> AgentConfig {
+        AgentConfig::new("Summarise the topic as concise bullet points.", "openai://gpt-4o-mini")
+    }
 }
 
 // ── Work node ─────────────────────────────────────────────────────────────
@@ -112,17 +124,22 @@ async fn main() -> anyhow::Result<()> {
 See the [`examples/`](examples/) directory for runnable examples covering
 linear flows, fork/join, nested flows, and snapshot-based resumption.
 
-## The Core Idea
+## Core Concepts
 
-**Within a single flow graph, each input type identifies exactly one node.**
+**Each input type identifies exactly one node within a flow graph.**
 
-`PlanInput` can be the input for one agent node, one work node, one branch
-node, one fork node, or one join participant — never more than one. The builder
-rejects duplicates. When a value of type `PlanInput` is present in flow state,
-there is exactly one node that can consume it. This keeps routing unambiguous
-and state checkpointable between steps.
+`PlanInput` can be the input for one agent, one work node, one branch, one
+fork, or one join participant — never more than one. The builder rejects
+duplicates. When a value of that type is present in flow state there is exactly
+one node that can consume it, keeping routing unambiguous and state
+checkpointable between steps.
 
-## Node Types
+Rust types are the contract at every boundary: input structs define the LLM
+message shape, output types define the result schema, tool structs define
+callable arguments. State is stored as JSON internally so it can be
+serialized, but user code stays typed.
+
+### Node Types
 
 | Builder method           | What it does                                    |
 | ------------------------ | ----------------------------------------------- |
@@ -132,24 +149,19 @@ and state checkpointable between steps.
 | `fork::<From, A, B>()`   | Splits one value into two active branches       |
 | `join::<A, B, Out>()`    | Combines two branches once both are ready       |
 
-Fork and join model information shape, not parallelism. A single-threaded
-runner represents non-linear graphs where information splits and recombines.
+Fork and join model information shape, not parallelism — the runner is
+single-threaded.
 
-## Why Types Matter
-
-Pravah uses Rust types as the contract at every boundary: agent input structs
-define the first user message shape, output types define the result schema,
-tool structs define LLM-callable arguments, and all handlers receive typed
-values. State is stored as JSON internally so it can be serialized, but user
-code stays typed.
+The builder validates: duplicate node identities, entry not in graph,
+unreachable nodes, no path to a terminal value, invalid fork/join definitions,
+and both branches of `either` routing to the same type.
 
 ## Agents
 
 ```rust
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use pravah::flows::Agent;
-use pravah::tools::ToolBox;
+use pravah::flows::{Agent, AgentConfig};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct PlannerInput { goal: String }
@@ -160,9 +172,18 @@ struct Plan { steps: Vec<String> }
 impl Agent for PlannerInput {
     type Output = Plan;
 
-    fn preamble() -> String { "You are a careful planning agent.".into() }
-    fn model_url() -> String { "gemini://gemini-2.5-flash-lite".into() }
-    fn tool_box() -> ToolBox { ToolBox::builder().build() }
+    fn build() -> AgentConfig {
+        AgentConfig::new("You are a careful planning agent.", "gemini://gemini-2.5-flash-lite")
+    }
+}
+```
+
+To attach tools, call `.with_tools()`:
+
+```rust
+fn build() -> AgentConfig {
+    AgentConfig::new("You are a careful planning agent.", "gemini://gemini-2.5-flash-lite")
+        .with_tools(ToolBox::builder().tool::<ReadNote>().build())
 }
 ```
 
@@ -198,43 +219,15 @@ impl Tool for ReadNote {
 `Context` carries the working directory, command allowlist, dependency
 container, and shared HTTP client.
 
-## Building A Flow
+## Suspend And Resume
+
+A tool returns `ToolError::suspend(value)` to pause the flow. The runtime
+surfaces a suspension payload and a tool id. Persist state, show the request
+to a user, wait for a webhook — then call `resume()` with the matching tool id
+and a JSON response. Useful for approval gates, missing credentials, payments,
+or any action needing external confirmation.
 
 ```rust
-use pravah::flows::{Flow, FlowError, FlowGraph};
-
-async fn plan_to_answer(plan: Plan, _ctx: Context) -> Result<FinalAnswer, FlowError> {
-    Ok(FinalAnswer { text: plan.steps.join("\n") })
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-struct FinalAnswer { text: String }
-
-impl Flow for PlannerInput {
-    type Output = FinalAnswer;
-
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
-            .agent::<PlannerInput>()
-            .work(plan_to_answer)
-            .build()
-    }
-}
-```
-
-The builder validates: duplicate node identities, entry not in graph,
-unreachable nodes, no path to a terminal value, invalid fork/join definitions,
-and both branches of an either routing to the same type.
-
-## Running A Flow
-
-```rust
-use pravah::context::{Context, FlowConf};
-use pravah::flows::{FlowRuntime, RunOut};
-
-let ctx = Context::new(FlowConf { working_dir: Some(std::env::current_dir()?), ..Default::default() });
-let mut runtime = FlowRuntime::new(PlannerInput { goal: "Write a migration plan".into() })?;
-
 loop {
     match runtime.next(ctx.clone()).await? {
         RunOut::Continue => {}
@@ -246,14 +239,6 @@ loop {
     }
 }
 ```
-
-## Suspend And Resume
-
-A tool returns `ToolError::suspend(value)` to pause the flow. The runtime
-surfaces a suspension payload and a tool id. The caller can persist state,
-show the request to a user, wait for a webhook — then call `resume()` with the
-matching tool id and a JSON response. Useful for approval gates, missing
-credentials, payments, or any action needing external confirmation.
 
 ## Persistence
 
@@ -295,20 +280,6 @@ The tree below is the output of `FlowGraphDiagram::for_flow::<ArticleRequest>()?
 `↩` marks nodes that converge from multiple branches (already shown above).
 
 ![Article production pipeline](assets/nested_flow.svg)
-
-## Clients
-
-Provider-agnostic by default. Model URLs select the backend:
-
-- `gemini://gemini-2.5-flash-lite`
-- `openai://gpt-4o`
-- `anthropic://claude-sonnet-4-5`
-- `ollama://localhost:11434/qwen3:8b`
-
-Default features include OpenAI, Anthropic, Gemini, and Ollama. An optional
-`provider-genai` feature adds an experimental adapter for extra providers.
-Inject a custom `ClientFactory` for testing, recording/replay, or hosted
-gateways.
 
 ## When To Use Pravah
 

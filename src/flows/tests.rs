@@ -11,7 +11,7 @@ use crate::clients::{
     Client, ClientError, ClientFactory, ClientOptions, ClientOutput, ClientResponse, Message,
     Provider, ToolCall,
 };
-use crate::commons::Agent;
+use crate::commons::{Agent, AgentConfig};
 use crate::context::{Context, FlowConf};
 use crate::flows::flows::{Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
 use crate::tools::{Tool, ToolBox, ToolError};
@@ -268,11 +268,8 @@ struct AgentSimpleOut {
 
 impl Agent for AgentSimpleIn {
     type Output = AgentSimpleOut;
-    fn preamble() -> String {
-        "test agent".into()
-    }
-    fn model_url() -> String {
-        "openai://test-model".into()
+    fn build() -> AgentConfig {
+        AgentConfig::new("test agent", "openai://test-model")
     }
 }
 
@@ -314,14 +311,9 @@ impl Tool for EchoTool {
 
 impl Agent for AgentToolIn {
     type Output = AgentToolOut;
-    fn preamble() -> String {
-        "tool agent".into()
-    }
-    fn model_url() -> String {
-        "openai://test-model".into()
-    }
-    fn tool_box() -> ToolBox {
-        ToolBox::builder().tool::<EchoTool>().build()
+    fn build() -> AgentConfig {
+        AgentConfig::new("tool agent", "openai://test-model")
+            .with_tools(ToolBox::builder().tool::<EchoTool>().build())
     }
 }
 
@@ -350,11 +342,8 @@ struct AgentWorkFinal {
 
 impl Agent for AgentWorkIn {
     type Output = AgentWorkMid;
-    fn preamble() -> String {
-        "test".into()
-    }
-    fn model_url() -> String {
-        "openai://test-model".into()
+    fn build() -> AgentConfig {
+        AgentConfig::new("test", "openai://test-model")
     }
 }
 
@@ -384,11 +373,8 @@ struct AgentEmptyModelOut {
 
 impl Agent for AgentEmptyModel {
     type Output = AgentEmptyModelOut;
-    fn preamble() -> String {
-        "test".into()
-    }
-    fn model_url() -> String {
-        String::new() // empty — should fail validation
+    fn build() -> AgentConfig {
+        AgentConfig::new("test", "") // empty model_url — should fail validation
     }
 }
 
@@ -760,14 +746,9 @@ impl Tool for ApprovalTool {
 
 impl Agent for SuspendIn {
     type Output = SuspendOut;
-    fn preamble() -> String {
-        "approval agent".into()
-    }
-    fn model_url() -> String {
-        "openai://test-model".into()
-    }
-    fn tool_box() -> ToolBox {
-        ToolBox::builder().tool::<ApprovalTool>().build()
+    fn build() -> AgentConfig {
+        AgentConfig::new("approval agent", "openai://test-model")
+            .with_tools(ToolBox::builder().tool::<ApprovalTool>().build())
     }
 }
 

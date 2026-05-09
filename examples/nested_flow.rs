@@ -23,8 +23,7 @@
 //! GEMINI_API_KEY=<key> cargo run --example nested_flow
 //! ```
 
-use pravah::flows::{Agent, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
-use pravah::tools::ToolBox;
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -46,18 +45,12 @@ struct ResearchResult {
 impl Agent for ResearchQuery {
     type Output = ResearchResult;
 
-    fn preamble() -> String {
-        "You are a research assistant. Answer the user's query with a concise \
-         paragraph of factual findings."
-            .to_string()
-    }
-
-    fn model_url() -> String {
-        "gemini://gemini-2.5-flash-lite".to_string()
-    }
-
-    fn tool_box() -> ToolBox {
-        ToolBox::builder().build()
+    fn build() -> AgentConfig {
+        AgentConfig::new(
+            "You are a research assistant. Answer the user's query with a concise \
+             paragraph of factual findings.",
+            "gemini://gemini-2.5-flash-lite",
+        )
     }
 }
 
@@ -90,18 +83,12 @@ struct FinalArticle {
 impl Agent for ResearchResult {
     type Output = FinalArticle;
 
-    fn preamble() -> String {
-        "You are a blog writer. Using the research findings provided, write a \
-         short, engaging blog post with a title and two paragraphs."
-            .to_string()
-    }
-
-    fn model_url() -> String {
-        "gemini://gemini-2.5-flash-lite".to_string()
-    }
-
-    fn tool_box() -> ToolBox {
-        ToolBox::builder().build()
+    fn build() -> AgentConfig {
+        AgentConfig::new(
+            "You are a blog writer. Using the research findings provided, write a \
+             short, engaging blog post with a title and two paragraphs.",
+            "gemini://gemini-2.5-flash-lite",
+        )
     }
 }
 

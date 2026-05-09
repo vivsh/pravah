@@ -23,8 +23,7 @@
 //! GEMINI_API_KEY=<key> cargo run --example fork_join
 //! ```
 
-use pravah::flows::{Agent, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
-use pravah::tools::ToolBox;
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -77,36 +76,24 @@ struct FinalReport {
 impl Agent for ResearchRequest {
     type Output = ResearchFindings;
 
-    fn preamble() -> String {
-        "You are a research analyst. Given a topic, produce a concise summary \
-         and a short list of relevant references."
-            .to_string()
-    }
-
-    fn model_url() -> String {
-        "gemini://gemini-2.5-flash-lite".to_string()
-    }
-
-    fn tool_box() -> ToolBox {
-        ToolBox::builder().build()
+    fn build() -> AgentConfig {
+        AgentConfig::new(
+            "You are a research analyst. Given a topic, produce a concise summary \
+             and a short list of relevant references.",
+            "gemini://gemini-2.5-flash-lite",
+        )
     }
 }
 
 impl Agent for DesignRequest {
     type Output = DesignProposal;
 
-    fn preamble() -> String {
-        "You are a software architect. Given a feature description, propose an \
-         implementation approach and list the main trade-offs."
-            .to_string()
-    }
-
-    fn model_url() -> String {
-        "gemini://gemini-2.5-flash-lite".to_string()
-    }
-
-    fn tool_box() -> ToolBox {
-        ToolBox::builder().build()
+    fn build() -> AgentConfig {
+        AgentConfig::new(
+            "You are a software architect. Given a feature description, propose an \
+             implementation approach and list the main trade-offs.",
+            "gemini://gemini-2.5-flash-lite",
+        )
     }
 }
 
