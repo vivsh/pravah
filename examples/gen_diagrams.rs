@@ -234,6 +234,8 @@ impl Flow for ArticleRequest {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let diagram = FlowGraphDiagram::for_flow::<ArticleRequest>()?;
 
+    println!("=== TREE ===");
+    println!("{}", diagram.render_tree());
     println!("=== ASCII ===");
     println!("{}", diagram.render_ascii()?);
     println!("=== TEXT ===");

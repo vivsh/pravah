@@ -1,1 +1,198 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="2708.333" height="902.77765" viewBox="0 0 2708.333 900.1919" style="aspect-ratio: 3.000000;"><rect x="0" y="0" width="2708.333" height="900.1919" fill="#FFFFFF"/><defs><marker id="arrow-0" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="1" stroke-dasharray="1,0"/></marker><marker id="arrow-start-0" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="1" stroke-dasharray="1,0"/></marker></defs><path id="edge-0" class="edgePath" data-edge-id="edge-0" d="M 29.000,597.040 L 36.350,597.040 L 87.650,671.014 L 95.000,671.014" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><path id="edge-1" class="edgePath" data-edge-id="edge-1" d="M 2459.388,359.995 L 2534.499,359.995" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-1" data-label-kind="center" x="2469.10" y="199.72" width="55.68" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-1" data-label-kind="center"><text x="2496.94" y="217.92" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="2496.94" dy="0.00">agent</tspan></text></g><path id="edge-2" class="edgePath" data-edge-id="edge-2" d="M 635.667,357.948 L 649.317,357.948 L 697.127,392.786 L 710.777,392.786" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-2" data-label-kind="center" x="645.38" y="507.24" width="55.68" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-2" data-label-kind="center"><text x="673.22" y="525.44" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="673.22" dy="0.00">agent</tspan></text></g><path id="edge-3" class="edgePath" data-edge-id="edge-3" d="M 1578.139,598.463 L 1644.847,598.463" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-3" data-label-kind="center" x="1588.32" y="600.46" width="46.34" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-3" data-label-kind="center"><text x="1611.49" y="618.66" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="1611.49" dy="0.00">work</tspan></text></g><path id="edge-4" class="edgePath" data-edge-id="edge-4" d="M 258.246,892.192 L 275.746,892.192 L 371.454,763.442 L 388.954,763.442" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-4" data-label-kind="center" x="229.92" y="860.16" width="46.34" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-4" data-label-kind="center"><text x="253.09" y="878.36" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="253.09" dy="0.00">fork</tspan></text></g><path id="edge-5" class="edgePath" data-edge-id="edge-5" d="M 274.246,376.109 L 291.746,376.109 L 371.454,431.675 L 388.954,431.675" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-5" data-label-kind="center" x="357.03" y="433.67" width="46.34" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-5" data-label-kind="center"><text x="380.20" y="451.87" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="380.20" dy="0.00">fork</tspan></text></g><path id="edge-6" class="edgePath" data-edge-id="edge-6" d="M 2155.303,764.617 L 2504.849,764.617 L 2504.849,433.775 L 2534.499,433.775" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-6" data-label-kind="center" x="2301.06" y="585.00" width="55.68" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-6" data-label-kind="center"><text x="2328.90" y="603.20" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="2328.90" dy="0.00">agent</tspan></text></g><path id="edge-7" class="edgePath" data-edge-id="edge-7" d="M 1795.749,819.748 L 1813.249,819.748 L 1852.998,689.888 L 1934.012,689.888 L 1927.261,764.617" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-7" data-label-kind="center" x="1861.00" y="777.98" width="65.01" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-7" data-label-kind="center"><text x="1893.51" y="796.18" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="1893.51" dy="0.00">either</tspan></text></g><path id="edge-8" class="edgePath" data-edge-id="edge-8" d="M 1811.749,451.117 L 1804.998,544.279 L 1886.012,544.279 L 1909.761,432.850 L 1927.261,432.850" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-8" data-label-kind="center" x="1813.00" y="427.78" width="65.01" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-8" data-label-kind="center"><text x="1845.51" y="445.98" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="1845.51" dy="0.00">either</tspan></text></g><path id="edge-9" class="edgePath" data-edge-id="edge-9" d="M 951.297,392.786 L 964.947,392.786 L 1004.355,527.193 L 1018.005,527.193" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-9" data-label-kind="center" x="934.95" y="362.39" width="46.34" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-9" data-label-kind="center"><text x="958.12" y="380.59" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="958.12" dy="0.00">join</tspan></text></g><path id="edge-10" class="edgePath" data-edge-id="edge-10" d="M 932.626,802.888 L 946.276,802.888 L 1004.355,669.024 L 1018.005,669.024" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-10" data-label-kind="center" x="988.01" y="638.62" width="46.34" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-10" data-label-kind="center"><text x="1011.18" y="656.82" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="1011.18" dy="0.00">join</tspan></text></g><path id="edge-11" class="edgePath" data-edge-id="edge-11" d="M 1255.382,598.301 L 1322.091,598.301" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-11" data-label-kind="center" x="1265.57" y="600.30" width="46.34" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-11" data-label-kind="center"><text x="1288.74" y="618.50" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="1288.74" dy="0.00">work</tspan></text></g><path id="edge-12" class="edgePath" data-edge-id="edge-12" d="M 635.667,837.168 L 649.317,837.168 L 697.127,802.888 L 710.777,802.888" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-12" data-label-kind="center" x="645.38" y="659.76" width="55.68" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-12" data-label-kind="center"><text x="673.22" y="677.96" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="673.22" dy="0.00">agent</tspan></text></g><path id="edge-13" class="edgePath" data-edge-id="edge-13" d="M 2136.632,359.532 L 2203.340,359.532" fill="none" stroke="#2F3B4D" stroke-width="2"    stroke-linecap="round" stroke-linejoin="round" /><rect data-edge-id="edge-13" data-label-kind="center" x="2146.81" y="361.53" width="46.34" height="28.40" rx="2" ry="2" fill="rgba(248,250,252, 0.92)" fill-opacity="0.00" stroke="#7B88A8" stroke-opacity="0.00" stroke-width="0.8"/><g class="edgeLabel" data-edge-id="edge-13" data-label-kind="center"><text x="2169.99" y="379.73" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="2169.99" dy="0.00">work</tspan></text></g><polygon points="200.62,36.86 322.25,158.49 200.62,280.11 79.00,158.49" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="200.62" y="162.49" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="200.62" dy="0.00">ArticleRequest (fork)</tspan></text><rect x="710.78" y="302.93" width="240.52" height="39.00" rx="19.50" ry="19.50" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="831.04" y="326.43" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="831.04" dy="0.00">AudienceProfile  (join)</tspan></text><rect x="388.95" y="233.54" width="246.71" height="54.00" rx="3" ry="3" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="512.31" y="264.54" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="512.31" dy="0.00">AudienceTask (agent)</tspan></text><rect x="1018.01" y="473.70" width="237.38" height="54.00" rx="3" ry="3" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="1136.69" y="504.70" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="1136.69" dy="0.00">ContentBrief (work)</tspan></text><rect x="2534.50" y="270.20" width="165.83" height="39.00" rx="19.50" ry="19.50" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="2617.42" y="293.70" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="2617.42" dy="0.00">FinalArticle  ◉</tspan></text><rect x="1927.26" y="234.71" width="209.37" height="54.00" rx="3" ry="3" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="2031.95" y="265.71" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="2031.95" dy="0.00">LongDraft (work)</tspan></text><polygon points="1744.30,140.31 1843.75,239.76 1744.30,339.21 1644.85,239.76" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="1744.30" y="243.76" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="1744.30" dy="0.00">Outline (either)</tspan></text><rect x="1322.09" y="473.94" width="256.05" height="54.00" rx="3" ry="3" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="1450.11" y="504.94" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="1450.11" dy="0.00">OutlineRequest (work)</tspan></text><rect x="1927.26" y="713.93" width="228.04" height="54.00" rx="3" ry="3" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="2041.28" y="744.93" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="2041.28" dy="0.00">QuickDraft (agent)</tspan></text><rect x="710.78" y="713.03" width="221.85" height="39.00" rx="19.50" ry="19.50" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="821.70" y="736.53" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="821.70" dy="0.00">ResearchNotes  (join)</tspan></text><rect x="388.95" y="712.76" width="246.71" height="54.00" rx="3" ry="3" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="512.31" y="743.76" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="512.31" dy="0.00">ResearchTask (agent)</tspan></text><rect x="2203.34" y="235.53" width="256.05" height="54.00" rx="3" ry="3" fill="#ECECFF" stroke="#7B88A8" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><text x="2331.36" y="266.53" text-anchor="middle" font-family="trebuchet ms,verdana,arial,sans-serif" font-size="16" fill="#333333"><tspan x="2331.36" dy="0.00">ReviewedDraft (agent)</tspan></text><circle cx="18.50" cy="559.16" r="10.50" fill="#7B88A8" stroke="#FFFFFF" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/><circle cx="18.50" cy="559.16" r="6.50" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="1.2" stroke-linejoin="round" stroke-linecap="round"/><g transform="translate(95.00 671.01) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(2534.50 359.99) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(710.78 392.79) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(1644.85 598.46) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(388.95 763.44) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(388.95 431.67) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(2534.50 433.78) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(1927.26 764.62) rotate(95.16)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(1927.26 432.85) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(1018.01 527.19) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(1018.01 669.02) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(1322.09 598.30) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(710.78 802.89) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g><g transform="translate(2203.34 359.53) rotate(0.00)"><polygon points="0,0 -10.40,6.24 -10.40,-6.24" fill="#2F3B4D" stroke="#2F3B4D" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></g></svg>
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 14.1.5 (20260411.2331)
+ -->
+<!-- Pages: 1 -->
+<svg width="2100pt" height="182pt"
+ viewBox="0.00 0.00 2100.00 182.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1.2758 1.2758) rotate(0) translate(4 138.44)">
+<polygon fill="white" stroke="none" points="-4,4 -4,-138.44 1642.03,-138.44 1642.03,4 -4,4"/>
+<!-- _start -->
+<g id="node1" class="node">
+<title>_start</title>
+<ellipse fill="black" stroke="black" cx="10.8" cy="-70.45" rx="10.8" ry="10.8"/>
+</g>
+<!-- ArticleRequest -->
+<g id="node3" class="node">
+<title>ArticleRequest</title>
+<polygon fill="none" stroke="black" points="155.6,-111.45 58.6,-70.45 155.6,-29.45 252.6,-70.45 155.6,-111.45"/>
+<text xml:space="preserve" text-anchor="middle" x="155.6" y="-73.65" font-family="Times,serif" font-size="14.00">ArticleRequest</text>
+<text xml:space="preserve" text-anchor="middle" x="155.6" y="-57.15" font-family="Times,serif" font-size="14.00">(fork)</text>
+</g>
+<!-- _start&#45;&gt;ArticleRequest -->
+<g id="edge1" class="edge">
+<title>_start&#45;&gt;ArticleRequest</title>
+<path fill="none" stroke="black" d="M22.07,-70.45C28.16,-70.45 36.56,-70.45 46.21,-70.45"/>
+<polygon fill="black" stroke="black" points="46.06,-73.95 56.06,-70.45 46.06,-66.95 46.06,-73.95"/>
+</g>
+<!-- LongDraft -->
+<g id="node2" class="node">
+<title>LongDraft</title>
+<path fill="none" stroke="black" d="M1229.89,-117.95C1229.89,-117.95 1180.89,-117.95 1180.89,-117.95 1174.89,-117.95 1168.89,-111.95 1168.89,-105.95 1168.89,-105.95 1168.89,-88.95 1168.89,-88.95 1168.89,-82.95 1174.89,-76.95 1180.89,-76.95 1180.89,-76.95 1229.89,-76.95 1229.89,-76.95 1235.89,-76.95 1241.89,-82.95 1241.89,-88.95 1241.89,-88.95 1241.89,-105.95 1241.89,-105.95 1241.89,-111.95 1235.89,-117.95 1229.89,-117.95"/>
+<text xml:space="preserve" text-anchor="middle" x="1205.39" y="-100.65" font-family="Times,serif" font-size="14.00">LongDraft</text>
+<text xml:space="preserve" text-anchor="middle" x="1205.39" y="-84.15" font-family="Times,serif" font-size="14.00">(work)</text>
+</g>
+<!-- ReviewedDraft -->
+<g id="node11" class="node">
+<title>ReviewedDraft</title>
+<path fill="none" stroke="black" d="M1441.89,-118.95C1441.89,-118.95 1367.39,-118.95 1367.39,-118.95 1361.39,-118.95 1355.39,-112.95 1355.39,-106.95 1355.39,-106.95 1355.39,-89.95 1355.39,-89.95 1355.39,-83.95 1361.39,-77.95 1367.39,-77.95 1367.39,-77.95 1441.89,-77.95 1441.89,-77.95 1447.89,-77.95 1453.89,-83.95 1453.89,-89.95 1453.89,-89.95 1453.89,-106.95 1453.89,-106.95 1453.89,-112.95 1447.89,-118.95 1441.89,-118.95"/>
+<text xml:space="preserve" text-anchor="middle" x="1404.64" y="-101.65" font-family="Times,serif" font-size="14.00">ReviewedDraft</text>
+<text xml:space="preserve" text-anchor="middle" x="1404.64" y="-85.15" font-family="Times,serif" font-size="14.00">(agent)</text>
+</g>
+<!-- LongDraft&#45;&gt;ReviewedDraft -->
+<g id="edge2" class="edge">
+<title>LongDraft&#45;&gt;ReviewedDraft</title>
+<path fill="none" stroke="black" d="M1242.11,-97.63C1270.41,-97.77 1310.58,-97.97 1343.77,-98.14"/>
+<polygon fill="black" stroke="black" points="1343.66,-101.64 1353.68,-98.19 1343.7,-94.64 1343.66,-101.64"/>
+<text xml:space="preserve" text-anchor="middle" x="1298.64" y="-101.29" font-family="Times,serif" font-size="14.00">work</text>
+</g>
+<!-- AudienceTask -->
+<g id="node5" class="node">
+<title>AudienceTask</title>
+<path fill="none" stroke="black" d="M393.1,-122.95C393.1,-122.95 323.1,-122.95 323.1,-122.95 317.1,-122.95 311.1,-116.95 311.1,-110.95 311.1,-110.95 311.1,-93.95 311.1,-93.95 311.1,-87.95 317.1,-81.95 323.1,-81.95 323.1,-81.95 393.1,-81.95 393.1,-81.95 399.1,-81.95 405.1,-87.95 405.1,-93.95 405.1,-93.95 405.1,-110.95 405.1,-110.95 405.1,-116.95 399.1,-122.95 393.1,-122.95"/>
+<text xml:space="preserve" text-anchor="middle" x="358.1" y="-105.65" font-family="Times,serif" font-size="14.00">AudienceTask</text>
+<text xml:space="preserve" text-anchor="middle" x="358.1" y="-89.15" font-family="Times,serif" font-size="14.00">(agent)</text>
+</g>
+<!-- ArticleRequest&#45;&gt;AudienceTask -->
+<g id="edge4" class="edge">
+<title>ArticleRequest&#45;&gt;AudienceTask</title>
+<path fill="none" stroke="black" d="M227.01,-81.68C250.75,-85.47 276.96,-89.65 299.59,-93.27"/>
+<polygon fill="black" stroke="black" points="298.8,-96.69 309.23,-94.81 299.9,-89.77 298.8,-96.69"/>
+<text xml:space="preserve" text-anchor="middle" x="281.85" y="-95.3" font-family="Times,serif" font-size="14.00">fork</text>
+</g>
+<!-- ResearchTask -->
+<g id="node9" class="node">
+<title>ResearchTask</title>
+<path fill="none" stroke="black" d="M391.97,-61.95C391.97,-61.95 324.22,-61.95 324.22,-61.95 318.22,-61.95 312.22,-55.95 312.22,-49.95 312.22,-49.95 312.22,-32.95 312.22,-32.95 312.22,-26.95 318.22,-20.95 324.22,-20.95 324.22,-20.95 391.97,-20.95 391.97,-20.95 397.97,-20.95 403.97,-26.95 403.97,-32.95 403.97,-32.95 403.97,-49.95 403.97,-49.95 403.97,-55.95 397.97,-61.95 391.97,-61.95"/>
+<text xml:space="preserve" text-anchor="middle" x="358.1" y="-44.65" font-family="Times,serif" font-size="14.00">ResearchTask</text>
+<text xml:space="preserve" text-anchor="middle" x="358.1" y="-28.15" font-family="Times,serif" font-size="14.00">(agent)</text>
+</g>
+<!-- ArticleRequest&#45;&gt;ResearchTask -->
+<g id="edge3" class="edge">
+<title>ArticleRequest&#45;&gt;ResearchTask</title>
+<path fill="none" stroke="black" d="M228.99,-59.98C252.58,-56.56 278.41,-52.83 300.66,-49.61"/>
+<polygon fill="black" stroke="black" points="301.04,-53.09 310.43,-48.2 300.04,-46.16 301.04,-53.09"/>
+<text xml:space="preserve" text-anchor="middle" x="281.85" y="-56.55" font-family="Times,serif" font-size="14.00">fork</text>
+</g>
+<!-- AudienceProfile -->
+<g id="node4" class="node">
+<title>AudienceProfile</title>
+<ellipse fill="none" stroke="black" cx="544.24" cy="-105.45" rx="73.89" ry="28.99"/>
+<text xml:space="preserve" text-anchor="middle" x="544.24" y="-108.65" font-family="Times,serif" font-size="14.00">AudienceProfile</text>
+<text xml:space="preserve" text-anchor="middle" x="544.24" y="-92.15" font-family="Times,serif" font-size="14.00">(join)</text>
+</g>
+<!-- ContentBrief -->
+<g id="node6" class="node">
+<title>ContentBrief</title>
+<path fill="none" stroke="black" d="M749.64,-87.95C749.64,-87.95 687.14,-87.95 687.14,-87.95 681.14,-87.95 675.14,-81.95 675.14,-75.95 675.14,-75.95 675.14,-58.95 675.14,-58.95 675.14,-52.95 681.14,-46.95 687.14,-46.95 687.14,-46.95 749.64,-46.95 749.64,-46.95 755.64,-46.95 761.64,-52.95 761.64,-58.95 761.64,-58.95 761.64,-75.95 761.64,-75.95 761.64,-81.95 755.64,-87.95 749.64,-87.95"/>
+<text xml:space="preserve" text-anchor="middle" x="718.39" y="-70.65" font-family="Times,serif" font-size="14.00">ContentBrief</text>
+<text xml:space="preserve" text-anchor="middle" x="718.39" y="-54.15" font-family="Times,serif" font-size="14.00">(work)</text>
+</g>
+<!-- AudienceProfile&#45;&gt;ContentBrief -->
+<g id="edge5" class="edge">
+<title>AudienceProfile&#45;&gt;ContentBrief</title>
+<path fill="none" stroke="black" d="M609.34,-91.3C627.22,-87.35 646.45,-83.1 663.67,-79.3"/>
+<polygon fill="black" stroke="black" points="664.17,-82.78 673.18,-77.21 662.66,-75.94 664.17,-82.78"/>
+<text xml:space="preserve" text-anchor="middle" x="646.64" y="-88.51" font-family="Times,serif" font-size="14.00">join</text>
+</g>
+<!-- AudienceTask&#45;&gt;AudienceProfile -->
+<g id="edge6" class="edge">
+<title>AudienceTask&#45;&gt;AudienceProfile</title>
+<path fill="none" stroke="black" d="M405.57,-103.2C421.8,-103.47 440.57,-103.77 458.92,-104.07"/>
+<polygon fill="black" stroke="black" points="458.7,-107.57 468.75,-104.23 458.81,-100.57 458.7,-107.57"/>
+<text xml:space="preserve" text-anchor="middle" x="437.72" y="-107.15" font-family="Times,serif" font-size="14.00">agent</text>
+</g>
+<!-- OutlineRequest -->
+<g id="node7" class="node">
+<title>OutlineRequest</title>
+<path fill="none" stroke="black" d="M913.39,-87.95C913.39,-87.95 837.39,-87.95 837.39,-87.95 831.39,-87.95 825.39,-81.95 825.39,-75.95 825.39,-75.95 825.39,-58.95 825.39,-58.95 825.39,-52.95 831.39,-46.95 837.39,-46.95 837.39,-46.95 913.39,-46.95 913.39,-46.95 919.39,-46.95 925.39,-52.95 925.39,-58.95 925.39,-58.95 925.39,-75.95 925.39,-75.95 925.39,-81.95 919.39,-87.95 913.39,-87.95"/>
+<text xml:space="preserve" text-anchor="middle" x="875.39" y="-70.65" font-family="Times,serif" font-size="14.00">OutlineRequest</text>
+<text xml:space="preserve" text-anchor="middle" x="875.39" y="-54.15" font-family="Times,serif" font-size="14.00">(work)</text>
+</g>
+<!-- ContentBrief&#45;&gt;OutlineRequest -->
+<g id="edge7" class="edge">
+<title>ContentBrief&#45;&gt;OutlineRequest</title>
+<path fill="none" stroke="black" d="M761.74,-67.45C777.77,-67.45 796.34,-67.45 813.73,-67.45"/>
+<polygon fill="black" stroke="black" points="813.43,-70.95 823.43,-67.45 813.43,-63.95 813.43,-70.95"/>
+<text xml:space="preserve" text-anchor="middle" x="793.51" y="-70.65" font-family="Times,serif" font-size="14.00">work</text>
+</g>
+<!-- Outline -->
+<g id="node10" class="node">
+<title>Outline</title>
+<polygon fill="none" stroke="black" points="1045.64,-108.45 989.14,-67.45 1045.64,-26.45 1102.14,-67.45 1045.64,-108.45"/>
+<text xml:space="preserve" text-anchor="middle" x="1045.64" y="-70.65" font-family="Times,serif" font-size="14.00">Outline</text>
+<text xml:space="preserve" text-anchor="middle" x="1045.64" y="-54.15" font-family="Times,serif" font-size="14.00">(either)</text>
+</g>
+<!-- OutlineRequest&#45;&gt;Outline -->
+<g id="edge8" class="edge">
+<title>OutlineRequest&#45;&gt;Outline</title>
+<path fill="none" stroke="black" d="M925.5,-67.45C941.65,-67.45 959.9,-67.45 977.17,-67.45"/>
+<polygon fill="black" stroke="black" points="976.84,-70.95 986.84,-67.45 976.84,-63.95 976.84,-70.95"/>
+<text xml:space="preserve" text-anchor="middle" x="957.26" y="-70.65" font-family="Times,serif" font-size="14.00">work</text>
+</g>
+<!-- ResearchNotes -->
+<g id="node8" class="node">
+<title>ResearchNotes</title>
+<ellipse fill="none" stroke="black" cx="544.24" cy="-29.45" rx="68.59" ry="28.99"/>
+<text xml:space="preserve" text-anchor="middle" x="544.24" y="-32.65" font-family="Times,serif" font-size="14.00">ResearchNotes</text>
+<text xml:space="preserve" text-anchor="middle" x="544.24" y="-16.15" font-family="Times,serif" font-size="14.00">(join)</text>
+</g>
+<!-- ResearchNotes&#45;&gt;ContentBrief -->
+<g id="edge9" class="edge">
+<title>ResearchNotes&#45;&gt;ContentBrief</title>
+<path fill="none" stroke="black" d="M605.45,-42.74C624.4,-46.92 645.19,-51.51 663.66,-55.59"/>
+<polygon fill="black" stroke="black" points="662.82,-58.99 673.34,-57.72 664.33,-52.15 662.82,-58.99"/>
+<text xml:space="preserve" text-anchor="middle" x="646.64" y="-57.27" font-family="Times,serif" font-size="14.00">join</text>
+</g>
+<!-- ResearchTask&#45;&gt;ResearchNotes -->
+<g id="edge10" class="edge">
+<title>ResearchTask&#45;&gt;ResearchNotes</title>
+<path fill="none" stroke="black" d="M404.15,-38.51C422.38,-37.32 443.99,-35.91 464.66,-34.57"/>
+<polygon fill="black" stroke="black" points="464.76,-38.07 474.51,-33.92 464.31,-31.08 464.76,-38.07"/>
+<text xml:space="preserve" text-anchor="middle" x="437.72" y="-40.42" font-family="Times,serif" font-size="14.00">agent</text>
+</g>
+<!-- Outline&#45;&gt;LongDraft -->
+<g id="edge12" class="edge">
+<title>Outline&#45;&gt;LongDraft</title>
+<path fill="none" stroke="black" d="M1091,-75.88C1111.68,-79.82 1136.31,-84.5 1157.32,-88.5"/>
+<polygon fill="black" stroke="black" points="1156.61,-91.92 1167.08,-90.35 1157.91,-85.05 1156.61,-91.92"/>
+<text xml:space="preserve" text-anchor="middle" x="1135.51" y="-90.09" font-family="Times,serif" font-size="14.00">either</text>
+</g>
+<!-- QuickDraft -->
+<g id="node12" class="node">
+<title>QuickDraft</title>
+<path fill="none" stroke="black" d="M1325.39,-64.95C1325.39,-64.95 1271.89,-64.95 1271.89,-64.95 1265.89,-64.95 1259.89,-58.95 1259.89,-52.95 1259.89,-52.95 1259.89,-35.95 1259.89,-35.95 1259.89,-29.95 1265.89,-23.95 1271.89,-23.95 1271.89,-23.95 1325.39,-23.95 1325.39,-23.95 1331.39,-23.95 1337.39,-29.95 1337.39,-35.95 1337.39,-35.95 1337.39,-52.95 1337.39,-52.95 1337.39,-58.95 1331.39,-64.95 1325.39,-64.95"/>
+<text xml:space="preserve" text-anchor="middle" x="1298.64" y="-47.65" font-family="Times,serif" font-size="14.00">QuickDraft</text>
+<text xml:space="preserve" text-anchor="middle" x="1298.64" y="-31.15" font-family="Times,serif" font-size="14.00">(agent)</text>
+</g>
+<!-- Outline&#45;&gt;QuickDraft -->
+<g id="edge11" class="edge">
+<title>Outline&#45;&gt;QuickDraft</title>
+<path fill="none" stroke="black" d="M1096.52,-62.87C1140.62,-58.83 1204.57,-52.97 1248.45,-48.95"/>
+<polygon fill="black" stroke="black" points="1248.56,-52.46 1258.2,-48.06 1247.92,-45.49 1248.56,-52.46"/>
+<text xml:space="preserve" text-anchor="middle" x="1135.51" y="-63.48" font-family="Times,serif" font-size="14.00">either</text>
+</g>
+<!-- FinalArticle -->
+<g id="node13" class="node">
+<title>FinalArticle</title>
+<ellipse fill="none" stroke="black" cx="1578.58" cy="-59.45" rx="55.45" ry="55.45"/>
+<ellipse fill="none" stroke="black" cx="1578.58" cy="-59.45" rx="59.45" ry="59.45"/>
+<text xml:space="preserve" text-anchor="middle" x="1578.58" y="-54.4" font-family="Times,serif" font-size="14.00">FinalArticle</text>
+</g>
+<!-- ReviewedDraft&#45;&gt;FinalArticle -->
+<g id="edge13" class="edge">
+<title>ReviewedDraft&#45;&gt;FinalArticle</title>
+<path fill="none" stroke="black" d="M1453.99,-87.48C1471.1,-83.6 1490.68,-79.16 1509.14,-74.97"/>
+<polygon fill="black" stroke="black" points="1509.7,-78.43 1518.67,-72.81 1508.15,-71.61 1509.7,-78.43"/>
+<text xml:space="preserve" text-anchor="middle" x="1486.51" y="-85.64" font-family="Times,serif" font-size="14.00">agent</text>
+</g>
+<!-- QuickDraft&#45;&gt;FinalArticle -->
+<g id="edge14" class="edge">
+<title>QuickDraft&#45;&gt;FinalArticle</title>
+<path fill="none" stroke="black" d="M1337.7,-46.5C1381.35,-48.86 1453.83,-52.77 1507.71,-55.68"/>
+<polygon fill="black" stroke="black" points="1507.22,-59.15 1517.4,-56.2 1507.6,-52.16 1507.22,-59.15"/>
+<text xml:space="preserve" text-anchor="middle" x="1404.64" y="-55.79" font-family="Times,serif" font-size="14.00">agent</text>
+</g>
+</g>
+</svg>

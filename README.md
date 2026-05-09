@@ -273,42 +273,27 @@ sub-flow. The same node-identity rule applies at each graph boundary.
 
 ### Example: Article Production Pipeline
 
-Combines every node type — fork, join, work, either, agent, and two nested flows:
+Combines every node type — fork, join, work, either, agent, and two nested flows.
+The tree below is the output of `FlowGraphDiagram::for_flow::<ArticleRequest>()?.render_tree()`:
 
 ```text
-ArticleRequest
-  ├─fork─┬─ ResearchTask  ──agent──► ResearchNotes  ─┐
-         └─ AudienceTask  ──agent──► AudienceProfile ─┤join
-                                                       ▼
-                                                 ContentBrief
-                                                 │work
-                                           OutlineRequest
-                                    (nested OutlineFlow) │work
-                                                         ▼
-                                                      Outline
-                                                ┌──either──┐
-                                          QuickDraft     LongDraft
-                                          (agent)   (nested ReviewFlow)
-                                              │              │work
-                                              │         ReviewedDraft
-                                              │           (agent)
-                                              └──────────────┘
-                                                     ▼
-                                              FinalArticle ◉
+● ArticleRequest (fork)
+  ├── [fork] AudienceTask (agent)
+  │   └── [agent] AudienceProfile (join)
+  │       └── [join] ContentBrief (work)
+  │           └── [work] OutlineRequest (work)
+  │               └── [work] Outline (either)
+  │                   ├── [either] LongDraft (work)
+  │                   │   └── [work] ReviewedDraft (agent)
+  │                   │       └── [agent] FinalArticle ◉
+  │                   └── [either] QuickDraft (agent)
+  │                       └── [agent] FinalArticle ◉ ↩
+  └── [fork] ResearchTask (agent)
+      └── [agent] ResearchNotes (join)
+          └── [join] ContentBrief (work) ↩
 ```
 
-ASCII art rendered from `FlowGraphDiagram::for_flow::<ArticleRequest>()?.render_ascii()`:
-
-```
-+----+      +------------*------------+  fork+------------------------+  agent+-----------------------------+  join+-----------------------+  work+-------------------------+  work+----------*---------+        +--------------------+   work +-------------------------+  agent+---------------------+
-|(  )|----->| "ArticleRequest (fork)" |--fork| "AudienceTask (agent)" |------>|( "AudienceProfile  (join)" )|----->| "ContentBrief (work)" |----->| "OutlineRequest (work)" |----->| "Outline (either)" |---either "LongDraft (work)" |------->| "ReviewedDraft (agent)" |-----+>|( "FinalArticle  ◉" )|
-+----+      +------------*------------+-----++------------------------+       +-----------------------------+     >+-----------------------+      +-------------------------+      +----------*---------+-------++--------------------+        +-------------------------+     +>+---------------------+
-                                            |                                                                     |                                                                                         either                                          --------------------+
-                                            |                                                                     |                                                                                             |                                           |         agent
-                                            |+------------------------+  agent+---------------------------+   join|                                                                                             |+----------------------+                   |
-                                            >| "ResearchTask (agent)" |------>|( "ResearchNotes  (join)" )|-------+                                                                                             >| "QuickDraft (agent)" |-------------------+
-                                             +------------------------+       +---------------------------+                                                                                                      +----------------------+
-```
+`↩` marks nodes that converge from multiple branches (already shown above).
 
 ![Article production pipeline](assets/nested_flow.svg)
 
