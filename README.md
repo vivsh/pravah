@@ -11,19 +11,19 @@ A Rust library for building typed, stepwise agentic information flows.
 Each call to `next()` does one bounded unit of work — one LLM turn, one tool
 batch, one deterministic transform, one branch, one fork, or one join.
 
-> **Pravah executes flows one transaction-sized step at a time.**
-> After every `next()` call, the entire flow state can be:
->
-> - **persisted** — snapshot to a database, file, or message queue
-> - **suspended** — pause at an approval gate or external event
-> - **resumed** — restore the snapshot in any process and continue
-> - **inspected** — examine typed state between steps for debugging or auditing
-> - **retried** — replay from the last good snapshot on failure
-> - **transferred** — hand the snapshot to a different machine, worker, or service
->
-> Nothing is hidden in closures or thread-local state. The only things needed to
-> continue a flow are the `FlowSnapshot` and the flow graph definition — both
-> of which you own.
+**Pravah executes flows one transaction-sized step at a time.**
+After every `next()` call, the entire flow state can be:
+
+- **persisted** — snapshot to a database, file, or message queue
+- **suspended** — pause at an approval gate or external event
+- **resumed** — restore the snapshot in any process and continue
+- **inspected** — examine typed state between steps for debugging or auditing
+- **retried** — replay from the last good snapshot on failure
+- **transferred** — hand the snapshot to a different machine, worker, or service
+
+Nothing is hidden in closures or thread-local state. The only things needed to
+continue a flow are the `FlowSnapshot` and the flow graph definition — both
+of which you own.
 
 ## Installation
 
@@ -61,7 +61,7 @@ use pravah::context::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ── Types ──────────────────────────────────────────────────────────────────
+// Types
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct SummariseRequest { topic: String }
@@ -72,7 +72,7 @@ struct BulletPoints { points: Vec<String> }
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct Report { text: String }
 
-// ── Agent ──────────────────────────────────────────────────────────────────
+// Agent
 
 impl Agent for SummariseRequest {
     type Output = BulletPoints;
@@ -82,14 +82,14 @@ impl Agent for SummariseRequest {
     }
 }
 
-// ── Work node ─────────────────────────────────────────────────────────────
+// Work node
 
 async fn format_report(points: BulletPoints, _ctx: Context) -> Result<Report, FlowError> {
     let text = points.points.iter().map(|p| format!("• {p}")).collect::<Vec<_>>().join("\n");
     Ok(Report { text })
 }
 
-// ── Flow ───────────────────────────────────────────────────────────────────
+// Flow
 
 impl Flow for SummariseRequest {
     type Output = Report;
@@ -102,7 +102,7 @@ impl Flow for SummariseRequest {
     }
 }
 
-// ── Run ────────────────────────────────────────────────────────────────────
+// Run
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
