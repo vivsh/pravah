@@ -166,9 +166,13 @@ async fn nested_work_flow_all_steps_complete() {
 
     // outer work: NwOuter → NwInner
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
-    // inner work 1: NwInner → NwMid (prefixed key "NwInner::NwMid" internally)
+    // sub-flow node: push frame, seed inner state
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+    // inner work 1: NwInner → NwMid
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
     // inner work 2: NwMid → NwInnerOut
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+    // inner Done: pop frame, write NwInnerOut to parent
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
     // outer work: NwInnerOut → NwFinal
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
@@ -369,13 +373,17 @@ impl Flow for NfOuter {
 #[tokio::test]
 async fn nested_fork_join_correct_output() {
     let mut rt = FlowRuntime::new(NfOuter { val: 4 }).unwrap();
-    // outer work
+    // outer work: NfOuter → NfIn
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
-    // fork (names rewritten to NfIn::NfA, NfIn::NfB)
+    // sub-flow node: push frame, seed inner state
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
-    // join fires (both prefixed parents present)
+    // fork: NfIn → NfA + NfB
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
-    // outer work
+    // join: NfA + NfB → NfOut
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+    // inner Done: pop frame, write NfOut to parent
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+    // outer work: NfOut → NfFinal
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
     match rt.next(ctx()).await.unwrap() {
         RunOut::Done(out) => assert_eq!(out, NfFinal { result: 13 }),
@@ -446,7 +454,7 @@ impl Flow for NaOuter {
     }
 }
 
-/// Agent inside a nested flow: the inlined agent node receives and exits correctly.
+/// Agent inside a nested flow: the framed agent node receives and exits correctly.
 /// The mock returns structured output; the outer work node uppercases it.
 #[tokio::test]
 async fn nested_agent_flow_produces_correct_output() {
@@ -459,7 +467,11 @@ async fn nested_agent_flow_produces_correct_output() {
 
     // outer work: NaOuter → NaIn
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+    // sub-flow node: push frame, seed inner state
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
     // agent: NaIn → NaOut (structured output, no tool calls)
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+    // inner Done: pop frame, write NaOut to parent
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
     // outer work: NaOut → NaFinal (uppercase)
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
@@ -656,9 +668,10 @@ async fn resume_targets_suspended_agent_when_join_state_is_first() {
         .unwrap()
         .with_factory(factory);
 
-    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
-    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
-    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue)); // fork
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue)); // work left
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue)); // work right
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue)); // agent dispatch → approve_resume pending
 
     let tool_id = match rt.next(ctx()).await.unwrap() {
         RunOut::Suspend { tool_id, .. } => tool_id,
@@ -669,10 +682,12 @@ async fn resume_targets_suspended_agent_when_join_state_is_first() {
         .resume(ctx(), (tool_id, json!({"approved": true})))
         .await
         .unwrap();
-    assert!(matches!(after_resume, RunOut::Continue));
+    assert!(matches!(after_resume, RunOut::Continue)); // resume injected into history
 
-    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
-    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue)); // agent re-dispatch → submit pending
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue)); // submit tool sets submitted_value
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue)); // agent reads submitted_value → exit
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue)); // join
     match rt.next(ctx()).await.unwrap() {
         RunOut::Done(out) => assert_eq!(out, ResumeForkOut { total: 13 }),
         other => panic!("expected Done, got {other:?}"),

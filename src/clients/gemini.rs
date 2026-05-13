@@ -364,6 +364,8 @@ mod tests {
                 },
                 content: String::new(),
                 usage: None,
+                agent_id: String::new(),
+                session_id: String::new(),
             },
             Message {
                 role: Role::Tool {
@@ -371,6 +373,8 @@ mod tests {
                 },
                 content: r#"{"temp":22}"#.into(),
                 usage: None,
+                agent_id: String::new(),
+                session_id: String::new(),
             },
         ];
         let msgs = build_gemini_messages(&history);
@@ -390,13 +394,17 @@ mod tests {
                 },
                 content: String::new(),
                 usage: None,
+                agent_id: String::new(),
+                session_id: String::new(),
             },
             Message {
                 role: Role::Tool {
                     call_id: "c1".into(),
                 },
-                content: r#"{"files":[]}"#.into(),
+                content: r#"{"files":[]}"}"#.into(),
                 usage: None,
+                agent_id: String::new(),
+                session_id: String::new(),
             },
         ];
         let msgs = build_gemini_messages(&history);

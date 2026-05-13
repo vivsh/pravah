@@ -280,6 +280,38 @@ impl ToolBox {
         self.tools.is_empty()
     }
 
+    /// Returns the number of registered tools.
+    pub(crate) fn len(&self) -> usize {
+        self.tools.len()
+    }
+
+    /// Returns the name of the tool at position `i`.
+    ///
+    /// # Panics
+    /// Panics if `i >= len()`.
+    pub(crate) fn name_at(&self, i: usize) -> &str {
+        self.tools[i].name()
+    }
+
+    /// Invokes the tool at position `i` by index, using `call_id` as the LLM-assigned
+    /// call identifier and `args` as the raw JSON arguments.
+    pub(crate) async fn call_at_index(
+        &self,
+        i: usize,
+        call_id: &str,
+        args: Value,
+        ctx: Context,
+    ) -> Result<ToolOutput, ToolError> {
+        let tool = &self.tools[i];
+        let call = ToolCall {
+            id: call_id.to_owned(),
+            name: tool.name().to_owned(),
+            args: args.clone(),
+            thought_signatures: None,
+        };
+        tool.call_raw(ctx, args).await.map(|value| ToolOutput { call, value })
+    }
+
     /// Appends a pre-boxed tool. `pub(crate)` so only `commons` can inject the sentinel.
     pub(crate) fn push_erased(&mut self, tool: Box<dyn ErasedTool>) {
         self.tools.push(tool);

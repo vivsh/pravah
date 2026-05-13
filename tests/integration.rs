@@ -311,7 +311,10 @@ async fn simple_suspend_and_resume_completes() {
         .unwrap()
         .with_factory(factory);
 
-    // Step 1: agent runs → tool suspends
+    // Step 1: LLM call 1 → gate tool dispatched → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+
+    // Step 2: gate tool executes → Suspend
     let out = rt.next(ctx()).await.expect("next() failed");
     let tool_id = match out {
         RunOut::Suspend { tool_id, .. } => tool_id,
@@ -319,18 +322,23 @@ async fn simple_suspend_and_resume_completes() {
     };
     assert!(tool_id.contains("gate"), "tool_id should mention 'gate': {tool_id}");
 
-    // Resume with reviewer payload
+    // Resume with reviewer payload → tool count → 0 → Continue
     let after_resume = rt
         .resume(ctx(), (tool_id, json!({"approved": true})))
         .await
         .expect("resume() failed");
-    // Tool batch finishes (Complete) → Continue; agent needs another LLM turn
     assert!(
         matches!(after_resume, RunOut::Continue),
         "expected Continue after resume, got {after_resume:?}"
     );
 
-    // Step 2: LLM call 2 → submit → agent exits → Continue (exit state set)
+    // Step 3: LLM call 2 → submit dispatched → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+
+    // Step 4: submit executes (Exit value) → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+
+    // Step 5: exit value flushed → exit state set → Continue
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
 
     // Terminal → Done
@@ -349,7 +357,8 @@ async fn simple_suspend_next_without_resume_errors() {
         .unwrap()
         .with_factory(factory);
 
-    rt.next(ctx()).await.unwrap(); // → Suspend
+    rt.next(ctx()).await.unwrap(); // Step 1: gate dispatched → Continue
+    rt.next(ctx()).await.unwrap(); // Step 2: gate executes → Suspend
 
     let err = rt.next(ctx()).await.unwrap_err();
     assert!(
@@ -367,7 +376,8 @@ async fn simple_resume_with_wrong_tool_id_errors() {
         .unwrap()
         .with_factory(factory);
 
-    rt.next(ctx()).await.unwrap(); // → Suspend
+    rt.next(ctx()).await.unwrap(); // Step 1: gate dispatched → Continue
+    rt.next(ctx()).await.unwrap(); // Step 2: gate executes → Suspend
 
     let err = rt
         .resume(ctx(), ("WrongAgent::wrong_tool".into(), json!({})))
@@ -417,8 +427,11 @@ async fn nested_suspend_and_resume_completes() {
     // Step 1: work node (SetupIn→TaskIn) → Continue
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
 
-    // Step 2: agent runs → check tool → suspends
-    let out = rt.next(ctx()).await.expect("step 2 failed");
+    // Step 2: agent LLM call 1 → check tool dispatched → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+
+    // Step 3: check tool executes → Suspend
+    let out = rt.next(ctx()).await.expect("step 3 failed");
     let tool_id = match out {
         RunOut::Suspend { tool_id, .. } => tool_id,
         other => panic!("expected Suspend after agent step, got {other:?}"),
@@ -435,10 +448,16 @@ async fn nested_suspend_and_resume_completes() {
         "expected Continue after resume, got {after_resume:?}"
     );
 
-    // Step 3: LLM call 2 → submit → agent exits → Continue
+    // Step 4: LLM call 2 → submit dispatched → Continue
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
 
-    // Step 4: ReviewIn work node runs → Continue
+    // Step 5: submit executes (Exit value) → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+
+    // Step 6: exit value flushed → ReviewIn state set → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+
+    // Step 7: ReviewIn work node runs → Continue
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
 
     // Terminal → Done (ReviewOut.summary is uppercased ReviewIn.result)
@@ -463,14 +482,16 @@ async fn nested_suspend_state_is_preserved_through_resume() {
         .unwrap()
         .with_factory(factory);
 
-    rt.next(ctx()).await.unwrap(); // work
-    let step2 = rt.next(ctx()).await.unwrap(); // agent → suspend
-    let tool_id = match step2 {
+    rt.next(ctx()).await.unwrap(); // SetupIn work → Continue
+    rt.next(ctx()).await.unwrap(); // agent LLM call 1 → check dispatched → Continue
+    let tool_id = match rt.next(ctx()).await.unwrap() { // check executes → Suspend
         RunOut::Suspend { tool_id, .. } => tool_id,
         other => panic!("{other:?}"),
     };
-    rt.resume(ctx(), (tool_id, json!(null))).await.unwrap();
-    rt.next(ctx()).await.unwrap(); // agent second LLM turn → exit → Continue
+    rt.resume(ctx(), (tool_id, json!(null))).await.unwrap(); // tool count → 0 → Continue
+    rt.next(ctx()).await.unwrap(); // LLM call 2 → submit dispatched → Continue
+    rt.next(ctx()).await.unwrap(); // submit executes (Exit) → Continue
+    rt.next(ctx()).await.unwrap(); // exit value flushed → ReviewIn set → Continue
     rt.next(ctx()).await.unwrap(); // ReviewIn work → Continue
 
     match rt.next(ctx()).await.unwrap() {

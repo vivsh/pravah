@@ -32,6 +32,7 @@ tracing = "0.1"
 indexmap = { version = "2.14.0", features = ["serde"] }
 either = { version = "1.15.0", features = ["serde"] }
 futures = "0.3.32"
+uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

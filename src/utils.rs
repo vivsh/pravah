@@ -126,10 +126,11 @@ where
 
 /// Cosine similarity between two equal-length vectors.
 ///
-/// Returns `0.0` if either vector is zero-length (all zeros).
-/// Panics in debug mode if the slices have different lengths.
+/// Returns `0.0` if either vector is zero-length (all zeros) or if the slices differ in length.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(), "cosine_similarity: length mismatch");
+    if a.len() != b.len() {
+        return 0.0;
+    }
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -142,9 +143,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 /// Euclidean distance between two equal-length vectors.
 ///
-/// Panics in debug mode if the slices have different lengths.
+/// Returns `0.0` if the slices differ in length.
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(), "euclidean_distance: length mismatch");
+    if a.len() != b.len() {
+        return 0.0;
+    }
     a.iter()
         .zip(b)
         .map(|(x, y)| (x - y).powi(2))

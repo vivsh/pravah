@@ -417,11 +417,17 @@ async fn agent_tool_then_exit_via_submit() {
     })
     .unwrap()
     .with_factory(factory);
-    // Agent runs: echo tool → Continue (tool result pushed, needs another LLM call)
+    // Step 1: LLM call 1 → echo tool dispatched as state → Continue
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
-    // Agent runs again: submit → exit → Continue (exit state set)
+    // Step 2: echo tool executes → Waiting{0, None} → Continue
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
-    // Terminal state → Done
+    // Step 3: LLM call 2 → submit tool dispatched → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+    // Step 4: submit executes (Exit value) → Waiting{0, Some(v)} → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+    // Step 5: Waiting{0, Some(v)} flushed → exit state set → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+    // Step 6: Terminal state → Done
     match rt.next(ctx()).await.unwrap() {
         RunOut::Done(out) => assert_eq!(out.answer, "42"),
         other => panic!("expected Done, got {other:?}"),
@@ -439,6 +445,7 @@ async fn agent_unknown_tool_errors() {
     })
     .unwrap()
     .with_factory(factory);
+    // LLM call dispatches an unknown tool → validated at dispatch time → AgentError immediately.
     let err = rt.next(ctx()).await.unwrap_err();
     assert!(matches!(err, FlowError::AgentError(ref s) if s.contains("nonexistent_tool")));
 }
@@ -775,23 +782,30 @@ async fn suspend_and_resume_completes() {
     .unwrap()
     .with_factory(factory);
 
-    // Step 1: agent init → LLM call 1 → suspend
-    let suspend_out = rt.next(ctx()).await.unwrap();
-    let tool_id = match suspend_out {
+    // Step 1: LLM call 1 → request_approval dispatched → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+
+    // Step 2: request_approval tool executes → Suspend
+    let tool_id = match rt.next(ctx()).await.unwrap() {
         RunOut::Suspend { tool_id, .. } => tool_id,
         other => panic!("expected Suspend, got {other:?}"),
     };
     assert!(tool_id.contains("request_approval"));
 
-    // Resume: inject approval response
+    // Resume: inject approval response → tool count → 0 → Continue
     let resume_out = rt.resume(ctx(), (tool_id, json!({"approved": true}))).await.unwrap();
-    // After resume, tool batch finishes (Complete) → Continue (agent needs another LLM turn)
     assert!(matches!(resume_out, RunOut::Continue));
 
-    // Step 2: LLM call 2 → submit → exit → Continue (exit state set)
+    // Step 3: LLM call 2 → submit dispatched → Continue
     assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
 
-    // Terminal → Done
+    // Step 4: submit executes (Exit value) → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+
+    // Step 5: exit value flushed → exit state set → Continue
+    assert!(matches!(rt.next(ctx()).await.unwrap(), RunOut::Continue));
+
+    // Step 6: Terminal → Done
     match rt.next(ctx()).await.unwrap() {
         RunOut::Done(out) => assert_eq!(out.approved_by, "alice"),
         other => panic!("expected Done, got {other:?}"),
@@ -810,7 +824,8 @@ async fn resume_with_wrong_tool_id_errors() {
     .unwrap()
     .with_factory(factory);
 
-    rt.next(ctx()).await.unwrap(); // → Suspend
+    rt.next(ctx()).await.unwrap(); // Step 1: tool dispatched → Continue
+    rt.next(ctx()).await.unwrap(); // Step 2: tool executes → Suspend
 
     let err = rt
         .resume(ctx(), ("wrong::tool_id".into(), json!({})))
@@ -831,7 +846,8 @@ async fn next_when_suspended_errors() {
     .unwrap()
     .with_factory(factory);
 
-    rt.next(ctx()).await.unwrap(); // → Suspend
+    rt.next(ctx()).await.unwrap(); // Step 1: tool dispatched → Continue
+    rt.next(ctx()).await.unwrap(); // Step 2: tool executes → Suspend
 
     let err = rt.next(ctx()).await.unwrap_err();
     assert!(matches!(err, FlowError::ResumeRequired(_)));

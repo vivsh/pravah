@@ -26,6 +26,8 @@ pub enum DiagramNodeKind {
     Fork,
     Join,
     Either,
+    /// An embedded sub-flow node.
+    Flow,
     /// A node that is the target of an edge but has no definition in the graph
     /// (i.e. the flow terminates there).
     Terminal,
@@ -39,6 +41,7 @@ impl DiagramNodeKind {
             Self::Fork => "fork",
             Self::Join => "join",
             Self::Either => "either",
+            Self::Flow => "flow",
             Self::Terminal => "terminal",
         }
     }
@@ -148,6 +151,12 @@ impl FlowGraphDiagram {
                 DiagramNodeKind::Terminal => {
                     format!("    {}([\"{}  ◉\"])", safe_id, node.id)
                 }
+                DiagramNodeKind::Flow => {
+                    format!(
+                        "    {}[\"\\[{} (flow)\\]\"]",
+                        safe_id, node.id
+                    )
+                }
             };
             out.push_str(&decl);
             out.push('\n');
@@ -202,6 +211,10 @@ impl FlowGraphDiagram {
                 DiagramNodeKind::Terminal => {
                     format!("label=\"{}\" shape=doublecircle", node.id)
                 }
+                DiagramNodeKind::Flow => format!(
+                    "label=\"{}\\n(flow)\" shape=box3d",
+                    node.id
+                ),
             };
             out.push_str(&format!("    {} [{}];\n", safe_id, attrs));
         }
@@ -314,6 +327,7 @@ fn tree_write_node(
         Some(DiagramNodeKind::Fork) => " (fork)",
         Some(DiagramNodeKind::Join) => " (join)",
         Some(DiagramNodeKind::Either) => " (either)",
+        Some(DiagramNodeKind::Flow) => " (flow)",
         Some(DiagramNodeKind::Terminal) => " ◉",
         None => "",
     };
