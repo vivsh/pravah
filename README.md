@@ -6,7 +6,8 @@
 
 _Pravah_ (प्रवाह, _pruh-VAH_) — Sanskrit/Hindi for "flow" or "current".
 
-A Rust library for building typed, stepwise agentic information flows.
+A Rust library for building **stepwise, transactional data-flow pipelines** with
+first-class support for agentic programming.
 
 Each call to `next()` does one bounded unit of work — one LLM turn, one tool
 batch, one deterministic transform, one branch, one fork, or one join.
@@ -56,7 +57,7 @@ testing, recording/replay, or hosted gateways.
 A two-node flow: an agent produces bullet points, a work node formats them into a report.
 
 ```rust
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
 use pravah::context::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -112,9 +113,9 @@ async fn main() -> Result<(), FlowError> {
 
     loop {
         match runtime.next(ctx.clone()).await? {
-            RunOut::Continue => {}
-            RunOut::Done(report) => { println!("{}", report.text); break; }
-            RunOut::Suspend { value, tool_id } => {
+            FlowStep::Continue => {}
+            FlowStep::Done(report) => { println!("{}", report.text); break; }
+            FlowStep::Suspend { value, tool_id } => {
                 eprintln!("Unexpected suspension at '{tool_id}': {value}");
                 break;
             }
@@ -151,6 +152,7 @@ serialized, but user code stays typed.
 | `either::<From, A, B>()` | Routes to one of two typed branches             |
 | `fork::<From, A, B>()`   | Splits one value into two active branches       |
 | `join::<A, B, Out>()`    | Combines two branches once both are ready       |
+| `flow::<F>()`            | Embeds another `Flow` as a node                 |
 
 Fork and join model information shape, not parallelism — the runner is
 single-threaded.
@@ -245,23 +247,25 @@ within `working_dir`.
 
 ## Suspend And Resume
 
-A tool returns `ToolError::suspend(value)` to pause the flow. The runtime
-surfaces a suspension payload and a tool id. Persist state, show the request
-to a user, wait for a webhook — then call `resume()` with the matching tool id
-and a JSON response. Useful for approval gates, missing credentials, payments,
-or any action needing external confirmation.
+A tool returns `Err(ToolError::Suspend)` to pause the flow. The runtime
+surfaces the tool's input args (what the LLM passed to the tool) as the
+suspension `value`, together with a `tool_id`. Persist state, show the
+request to a user, wait for a webhook — then call `resume()` with the
+matching `tool_id` and a JSON output. Useful for approval gates, missing
+credentials, payments, or any action needing external confirmation.
 
 ```rust
 use serde_json::json;
 
 loop {
     match runtime.next(ctx.clone()).await? {
-        RunOut::Continue => {}
-        RunOut::Suspend { value, tool_id } => {
-            // Persist state, collect external input, then:
+        FlowStep::Continue => {}
+        FlowStep::Suspend { value, tool_id } => {
+            // `value` is the tool's input args from the LLM.
+            // Collect external output, then:
             runtime.resume(ctx.clone(), (tool_id, json!({ "approved": true }))).await?;
         }
-        RunOut::Done(output) => { println!("{}", output.text); break; }
+        FlowStep::Done(output) => { println!("{}", output.text); break; }
     }
 }
 ```

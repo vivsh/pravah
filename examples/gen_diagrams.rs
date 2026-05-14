@@ -33,7 +33,7 @@
 //! ```
 
 use either::Either;
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
 use pravah::flows::FlowGraphDiagram;
 use pravah::Context;
 use schemars::JsonSchema;
@@ -165,9 +165,9 @@ async fn run_outline_flow(req: OutlineRequest, ctx: Context) -> Result<Outline, 
     let mut rt = FlowRuntime::new(req)?;
     loop {
         match rt.next(ctx.clone()).await? {
-            RunOut::Continue => {}
-            RunOut::Done(result) => return Ok(result),
-            RunOut::Suspend { value, tool_id } => {
+            FlowStep::Continue => {}
+            FlowStep::Done(result) => return Ok(result),
+            FlowStep::Suspend { value, tool_id } => {
                 return Err(FlowError::AgentError(format!("outline flow suspended at {tool_id}: {value}")));
             }
         }
@@ -186,9 +186,9 @@ async fn run_review_flow(draft: LongDraft, ctx: Context) -> Result<ReviewedDraft
     let mut rt = FlowRuntime::new(draft)?;
     loop {
         match rt.next(ctx.clone()).await? {
-            RunOut::Continue => {}
-            RunOut::Done(result) => return Ok(result),
-            RunOut::Suspend { value, tool_id } => {
+            FlowStep::Continue => {}
+            FlowStep::Done(result) => return Ok(result),
+            FlowStep::Suspend { value, tool_id } => {
                 return Err(FlowError::AgentError(format!("review flow suspended at {tool_id}: {value}")));
             }
         }
@@ -219,7 +219,7 @@ impl Flow for ArticleRequest {
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let diagram = FlowGraphDiagram::for_flow::<ArticleRequest>()?;
+    let diagram = FlowGraphDiagram::from_flow::<ArticleRequest>()?;
 
     println!("=== TREE ===");
     println!("{}", diagram.render_tree());

@@ -23,7 +23,7 @@
 //! GEMINI_API_KEY=<key> cargo run --example nested_flow
 //! ```
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -130,12 +130,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         match runtime.next(ctx.clone()).await? {
-            RunOut::Continue => {}
-            RunOut::Done(article) => {
+            FlowStep::Continue => {}
+            FlowStep::Done(article) => {
                 println!("# {}\n\n{}", article.title, article.body);
                 break;
             }
-            RunOut::Suspend { value, tool_id } => {
+            FlowStep::Suspend { value, tool_id } => {
                 eprintln!("Unexpected suspension at '{tool_id}': {value}");
                 break;
             }

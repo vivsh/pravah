@@ -14,7 +14,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::flows::{Flow, FlowError};
+use crate::flows::FlowGraph;
+use crate::flows::flows::FlowNode;
+
+use super::errors::FlowError;
+use super::flows::Flow;
 
 // ── Public data model ──────────────────────────────────────────────────────
 
@@ -77,9 +81,9 @@ impl FlowGraphDiagram {
     ///
     /// Calls `F::build()`, validates the graph, and snapshots the topology.
     /// No LLM calls are made.
-    pub fn for_flow<F: Flow>() -> Result<Self, FlowError> {
-        let graph = F::build()?.with_entry(F::node_id())?;
-        Ok(graph.diagram())
+    pub fn from_flow<F: Flow>() -> Result<Self, FlowError> {
+        let graph = FlowGraph::from_flow::<F>()?;
+        Ok(diagram_from_graph(&graph))
     }
 
     /// Construct a new diagram. Called by [`FlowGraph::diagram`].
@@ -143,19 +147,13 @@ impl FlowGraphDiagram {
                 }
                 // Stadium for join / terminal
                 DiagramNodeKind::Join => {
-                    format!(
-                        "    {}([\"{}  (join)\"])",
-                        safe_id, node.id
-                    )
+                    format!("    {}([\"{}  (join)\"])", safe_id, node.id)
                 }
                 DiagramNodeKind::Terminal => {
                     format!("    {}([\"{}  ◉\"])", safe_id, node.id)
                 }
                 DiagramNodeKind::Flow => {
-                    format!(
-                        "    {}[\"\\[{} (flow)\\]\"]",
-                        safe_id, node.id
-                    )
+                    format!("    {}[\"\\[{} (flow)\\]\"]", safe_id, node.id)
                 }
             };
             out.push_str(&decl);
@@ -211,10 +209,7 @@ impl FlowGraphDiagram {
                 DiagramNodeKind::Terminal => {
                     format!("label=\"{}\" shape=doublecircle", node.id)
                 }
-                DiagramNodeKind::Flow => format!(
-                    "label=\"{}\\n(flow)\" shape=box3d",
-                    node.id
-                ),
+                DiagramNodeKind::Flow => format!("label=\"{}\\n(flow)\" shape=box3d", node.id),
             };
             out.push_str(&format!("    {} [{}];\n", safe_id, attrs));
         }
@@ -267,8 +262,11 @@ impl FlowGraphDiagram {
             succs.sort_by_key(|(_, to)| *to);
         }
 
-        let node_kind: HashMap<&str, &DiagramNodeKind> =
-            self.nodes.iter().map(|n| (n.id.as_str(), &n.kind)).collect();
+        let node_kind: HashMap<&str, &DiagramNodeKind> = self
+            .nodes
+            .iter()
+            .map(|n| (n.id.as_str(), &n.kind))
+            .collect();
 
         let mut visited: HashSet<String> = HashSet::new();
         let mut out = String::new();
@@ -295,7 +293,13 @@ impl FlowGraphDiagram {
 /// Mermaid identifiers must be alphanumeric + underscore only.
 fn mermaid_id(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -345,7 +349,10 @@ fn tree_write_node(
             Some(l) if !l.is_empty() => format!("[{}] ", l),
             _ => String::new(),
         };
-        out.push_str(&format!("{}{}{}{}\n", prefix, connector, edge_part, display));
+        out.push_str(&format!(
+            "{}{}{}{}\n",
+            prefix, connector, edge_part, display
+        ));
     }
 
     if repeated {
@@ -432,4 +439,57 @@ pub(crate) fn build_diagram(entry: String, descs: Vec<NodeDesc>) -> FlowGraphDia
     }
 
     FlowGraphDiagram::new(entry, nodes, edges)
+}
+
+fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
+    let descs: Vec<NodeDesc> = graph
+        .nodes
+        .iter()
+        .filter_map(|(key, node)| {
+            let key_str = graph.interner.name_of(*key).to_string();
+            let (kind, succs): (DiagramNodeKind, Vec<(String, &'static str)>) = match node {
+                FlowNode::Agent(info) => (
+                    DiagramNodeKind::Agent,
+                    vec![(graph.interner.name_of(info.exit).to_string(), "agent")],
+                ),
+                FlowNode::Work(info) => (
+                    DiagramNodeKind::Work,
+                    vec![(graph.interner.name_of(info.exit_name).to_string(), "work")],
+                ),
+                FlowNode::Fork(info) => (
+                    DiagramNodeKind::Fork,
+                    info.children
+                        .iter()
+                        .map(|&c| (graph.interner.name_of(c).to_string(), "fork"))
+                        .collect(),
+                ),
+                FlowNode::Join(info) => (
+                    DiagramNodeKind::Join,
+                    vec![(graph.interner.name_of(info.target).to_string(), "join")],
+                ),
+                FlowNode::Either(info) => (
+                    DiagramNodeKind::Either,
+                    vec![
+                        (graph.interner.name_of(info.left_name).to_string(), "either"),
+                        (graph.interner.name_of(info.right_name).to_string(), "either"),
+                    ],
+                ),
+                FlowNode::Flow(inner) => {
+                    let exit = inner
+                        .exit;
+                    let exit_str = inner.interner.name_of(exit).to_string();
+                    (DiagramNodeKind::Flow, vec![(exit_str, "flow")])
+                }
+                // Tool nodes are implementation details not shown in diagrams.
+                FlowNode::Tool(_) => return None,
+            };
+            Some(NodeDesc {
+                id: key_str,
+                kind,
+                succs,
+            })
+        })
+        .collect();
+    let entry_str = graph.interner.name_of(graph.entry).to_string();
+    build_diagram(entry_str, descs)
 }

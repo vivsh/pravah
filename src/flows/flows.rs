@@ -1,10 +1,5 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
-use uuid::Uuid;
-
-fn new_session_id() -> String {
-    Uuid::now_v7().to_string()
-}
 
 use either::Either;
 use futures::future::BoxFuture;
@@ -12,22 +7,20 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use thiserror::Error;
 
-use crate::flows::diagram::{build_diagram, DiagramNodeKind, FlowGraphDiagram, NodeDesc};
-use crate::flows::errors::{AgentError, BuildError};
-use crate::flows::phase::{AgentContinuation, Phase};
-use crate::flows::state::FlowState;
+use super::history::FlowHistory;
+use crate::flows::NodeId;
+use crate::flows::errors::{BuildError, FlowError};
+use crate::flows::interner::Interner;
+use crate::flows::phase::Phase;
+use crate::flows::state::{Callable, FlowState};
+use crate::flows::validation::{validate, validate_nodes};
 use crate::{
-    clients::{
-        ClientFactory, ClientOptions, DefaultClientFactory, Message, Role, ToolCall, ToolChoice,
-    },
-    clients::ClientOutput,
+    clients::{ClientFactory, ClientOptions, ClientOutput, Message, Role, ToolCall},
     commons::Agent,
     context::Context,
     tools::{ToolBox, ToolError},
 };
-use super::history::FlowHistory;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct StateNode {
@@ -35,99 +28,52 @@ pub(crate) struct StateNode {
     value: serde_json::Value,
 }
 
-#[derive(Debug, Error)]
-pub enum FlowError {
-    #[error("Node not found: {0}")]
-    NotFound(String),
-
-    #[error("Snapshot load error: {0}")]
-    SnapLoadError(String),
-
-    #[error("Snapshot store error: {0}")]
-    SnapStoreError(String),
-
-    #[error("Build error: {0}")]
-    BuildError(String),
-
-    #[error("Serialize error: {0}")]
-    SerializeError(String),
-
-    #[error("Deserialize error: {0}")]
-    DeserializeError(String),
-
-    #[error("Failed to resume due to mismatch between suspend and resume payloads for tool '{0}'")]
-    ResumeMismatchError(String),
-
-    #[error("Flow is suspended at '{0}' — call resume() with a resumption payload, not next()")]
-    ResumeRequired(String),
-
-    #[error("Flow is not suspended — unexpected resumption payload supplied for '{0}'")]
-    UnexpectedResumption(String),
-
-    #[error("Agent error: {0}")]
-    AgentError(String),
-
-    #[error("Flow deadlock: states [{0}] are waiting but no join is ready")]
-    Deadlock(String),
-
-    #[error("Flow graph is invalid:\n{}", .0.join("\n"))]
-    Invalid(Vec<String>),
-
-    #[error("Internal error: {0}")]
-    Internal(String),
-}
-
-/// Recorded for each outstanding `FlowNode::Tool` in the state map.
-#[derive(Serialize, Deserialize)]
-struct PendingCall {
-    id: String,
-    args: Value,
-}
-
-struct AgentInfo {
-    name: String,
+pub(crate) struct AgentInfo {
+    pub(crate) id: NodeId,
     tool_box: Arc<ToolBox>,
     preamble: String,
-    model: String,
-    exit_name: String,
+    pub(crate) model: String,
+    pub(crate) exit: NodeId,
     output_schema: Value,
 }
 
 /// Metadata for a single tool exposed by an agent, stored as a graph node so the
 /// flow engine can dispatch it independently rather than inlining all tool calls.
-struct ToolInfo {
-    /// State-map key used for this tool: `"AgentName::tool_name"`.
-    name: String,
+pub(crate) struct ToolInfo {
+    /// State-map key used for this tool: interned `"AgentName::tool_name"`.
+    pub(crate) name: NodeId,
     /// Agent state key to return to after the tool completes (agent's input key).
-    agent_name: String,
+    agent_name: NodeId,
+    /// Agent output key — written on `ToolError::Exit` to signal the frame is done.
+    agent_exit: NodeId,
     /// Zero-based index into `tool_box.tools`.
     tool_index: usize,
     /// Shared toolbox owned by the parent agent.
     tool_box: Arc<ToolBox>,
 }
 
-struct EitherInfo {
-    name: String,
-    left_name: String,
-    right_name: String,
-    func: Box<dyn Fn(&Value, Context) -> Result<StateNode, FlowError> + Send + Sync>,
+pub(crate) struct EitherInfo {
+    pub(crate) name: NodeId,
+    pub(crate) left_name: NodeId,
+    pub(crate) right_name: NodeId,
+    func: Box<dyn Fn(&Value, Context) -> Result<(NodeId, Value), FlowError> + Send + Sync>,
 }
 
-struct ForkInfo {
-    name: String,
-    children: Vec<String>,
+pub(crate) struct ForkInfo {
+    pub(crate) name: NodeId,
+    pub(crate) children: Vec<NodeId>,
     func: Box<dyn Fn(&Value, Context) -> Result<Vec<StateNode>, FlowError> + Send + Sync>,
 }
 
-struct JoinInfo {
-    parents: Vec<String>,
-    target: String,
+pub(crate) struct JoinInfo {
+    pub(crate) parents: Vec<NodeId>,
+    pub(crate) target: NodeId,
     func: Arc<dyn Fn(&[Value], Context) -> Result<StateNode, FlowError> + Send + Sync>,
 }
 
-struct WorkInfo {
-    name: String,
-    exit_name: String,
+pub(crate) struct WorkInfo {
+    pub(crate) name: NodeId,
+    pub(crate) exit_name: NodeId,
     func:
         Box<dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, FlowError>> + Send + Sync>,
 }
@@ -143,31 +89,31 @@ pub(crate) fn node<A: JsonSchema + Serialize>(input: A) -> Result<StateNode, Flo
     })
 }
 
-enum FlowNode {
-    Agent(AgentInfo),
+pub(crate) enum FlowNode {
+    Agent(Arc<AgentInfo>),
     Either(EitherInfo),
     Fork(ForkInfo),
     Join(JoinInfo),
     Work(WorkInfo),
     /// An embedded sub-flow. Boxed to break the recursive type-size cycle.
-    Flow(Box<FlowGraph>),
+    Flow(Arc<FlowGraph>),
     /// A single tool dispatched by a parent agent. Not statically reachable from the
     /// entry node; it enters the state map when the agent issues a tool call.
     Tool(ToolInfo),
 }
 
-pub(crate) enum FlowOut {
-    Continue,
-    Done(Value),
-    Suspend { value: Value, tool_id: String },
+#[derive(Debug, Serialize, Deserialize)]
+pub enum AgentContinuation {
+    Dispatch,       // history loaded, ready to dispatch to LLM
+    PendingTool,    // tool calls issued; waiting for tool nodes to complete
 }
 
 /// Typed step result returned by [`FlowRuntime`].
 #[derive(Debug)]
-pub enum RunOut<O> {
+pub enum FlowStep {
     Continue,
-    Done(O),
-    Suspend { value: Value, tool_id: String },
+    Done(Value),
+    Suspend { value: Value },
 }
 
 pub trait Flow: 'static + JsonSchema + Serialize + DeserializeOwned + Send + Sync {
@@ -181,21 +127,32 @@ pub trait Flow: 'static + JsonSchema + Serialize + DeserializeOwned + Send + Syn
 }
 
 pub struct FlowGraph {
-    nodes: HashMap<String, FlowNode>,
-    entry: String,
-    /// Input schema name when this graph is embedded as a sub-flow; `""` for the root graph.
-    pub(crate) name: String,
-    /// Output schema name written to the parent frame when this sub-flow completes; `""` for root.
-    pub(crate) exit_name: String,
+    pub(crate) nodes: HashMap<NodeId, FlowNode>,
+
+    pub(crate) entry: NodeId,    
+    pub(crate) exit: NodeId,
+
+    pub (crate) parent_exit: Option<NodeId>,
+
+    /// Input node id when this graph is embedded as a sub-flow; `None` for the root graph.
+    pub(crate) parent_entry: Option<NodeId>,
+
+    /// Forward intern map: string name → NodeId.
+    pub(crate) interner: Interner,
+    pub(crate) callable_index: usize,
 }
 
-impl FlowGraph {
+impl FlowGraph {    
+
     fn new() -> Self {
         Self {
             nodes: HashMap::new(),
-            entry: String::new(),
-            name: String::new(),
-            exit_name: String::new(),
+            entry: NodeId(0),
+            parent_entry: None,
+            parent_exit: None,
+            exit: NodeId(0),
+            interner: Interner::new(),
+            callable_index: 0,
         }
     }
 
@@ -203,69 +160,18 @@ impl FlowGraph {
         FlowBuilder::new()
     }
 
-    /// Produce a [`FlowGraphDiagram`] snapshot of this graph's topology.
-    ///
-    /// Called internally by [`FlowGraphDiagram::for_flow`]. Use that method
-    /// from outside the crate.
-    pub(crate) fn diagram(&self) -> FlowGraphDiagram {
-        let descs: Vec<NodeDesc> = self
-            .nodes
-            .iter()
-            .filter_map(|(key, node)| {
-                let (kind, succs): (DiagramNodeKind, Vec<(String, &'static str)>) = match node {
-                    FlowNode::Agent(info) => (
-                        DiagramNodeKind::Agent,
-                        vec![(info.exit_name.clone(), "agent")],
-                    ),
-                    FlowNode::Work(info) => (
-                        DiagramNodeKind::Work,
-                        vec![(info.exit_name.clone(), "work")],
-                    ),
-                    FlowNode::Fork(info) => (
-                        DiagramNodeKind::Fork,
-                        info.children
-                            .iter()
-                            .map(|c| (c.clone(), "fork"))
-                            .collect(),
-                    ),
-                    FlowNode::Join(info) => (
-                        DiagramNodeKind::Join,
-                        vec![(info.target.clone(), "join")],
-                    ),
-                    FlowNode::Either(info) => (
-                        DiagramNodeKind::Either,
-                        vec![
-                            (info.left_name.clone(), "either"),
-                            (info.right_name.clone(), "either"),
-                        ],
-                    ),
-                    FlowNode::Flow(inner) => (
-                        DiagramNodeKind::Flow,
-                        vec![(inner.exit_name.clone(), "flow")],
-                    ),
-                    // Tool nodes are implementation details not shown in diagrams.
-                    FlowNode::Tool(_) => return None,
-                };
-                Some(NodeDesc {
-                    id: key.clone(),
-                    kind,
-                    succs,
-                })
-            })
-            .collect();
-        build_diagram(self.entry.clone(), descs)
-    }
-
-    pub(crate) fn is_terminal(&self, state_name: &str) -> bool {
-        !self.nodes.contains_key(state_name)
+    pub fn from_flow<F: Flow>() -> Result<Self, FlowError> {
+        let entry = F::node_id();
+        let exit = F::Output::schema_name();
+        F::build()?.with_entry(entry, exit)
     }
 
     /// A join node is ready to execute when all its parent nodes have produced values.
     /// Can only be tested at runtime, not build time, because parent nodes may be dynamically generated agents.
     /// join target can be a terminal and may not be present in the node map at build time.
-    fn can_join(&self, node_id: &str, state: &FlowState) -> bool {
-        if let Some(FlowNode::Join(join_info)) = self.nodes.get(node_id) {
-            join_info.parents.iter().all(|p| state.contains_state(p))
+    fn can_join(&self, node_id: NodeId, state: &FlowState) -> bool {
+        if let Some(FlowNode::Join(join_info)) = self.nodes.get(&node_id) {
+            join_info.parents.iter().all(|&p| state.contains_state(p))
         } else {
             false
         }
@@ -276,22 +182,24 @@ impl FlowGraph {
         ctx: Context,
         states: &mut FlowState,
     ) -> Result<(), FlowError> {
-        let state = states.get_state(&node.name).ok_or_else(|| {
+        let state = states.get_state(node.name).ok_or_else(|| {
             FlowError::NotFound(format!(
                 "work node '{}' has not produced a value",
-                node.name
+                node.name.0
             ))
         })?;
         let output = (node.func)(&state, ctx).await?;
-        states.set_state(node.exit_name.as_str(), output, Some(&node.name));
+        if !states.set_state(node.exit_name, output, Some(node.name)) {
+            return Err(FlowError::Internal("handle_work: frame stack empty".into()));
+        }
         Ok(())
     }
 
     fn handle_fork(node: &ForkInfo, ctx: Context, states: &mut FlowState) -> Result<(), FlowError> {
-        let state = states.get_state(&node.name).ok_or_else(|| {
+        let state = states.get_state(node.name).ok_or_else(|| {
             FlowError::NotFound(format!(
                 "fork parent '{}' has not produced a value",
-                node.name
+                node.name.0
             ))
         })?;
 
@@ -299,91 +207,44 @@ impl FlowGraph {
         if children.len() != node.children.len() {
             return Err(BuildError::NodeConflict(format!(
                 "fork node '{}' produced {} child states but has {} child nodes",
-                node.name,
+                node.name.0,
                 children.len(),
                 node.children.len()
-            )).into());
+            ))
+            .into());
         }
-        for child in children {
-            states.set_state(&child.name, child.value, None);
+        for (child_node, &child_id) in children.iter().zip(&node.children) {
+            if !states.set_state(child_id, child_node.value.clone(), None) {
+                return Err(FlowError::Internal("handle_fork: frame stack empty".into()));
+            }
         }
-        states.remove_state(node.name.as_str());
+        if !states.remove_state(node.name) {
+            return Err(FlowError::Internal("handle_fork: frame stack empty on remove".into()));
+        }
 
         Ok(())
     }
 
     fn handle_join(node: &JoinInfo, ctx: Context, states: &mut FlowState) -> Result<(), FlowError> {
         let mut inputs = Vec::with_capacity(node.parents.len());
-        for p in &node.parents {
+        for &p in &node.parents {
             let value = states.get_state(p).ok_or_else(|| {
-                FlowError::NotFound(format!("join parent '{}' has not produced a value", p))
+                FlowError::NotFound(format!("join parent '{}' has not produced a value", p.0))
             })?;
             inputs.push(value.clone());
         }
         let output = (node.func)(&inputs, ctx)?;
-        states.set_state(&node.target, output.value, None);
+        if !states.set_state(node.target, output.value, None) {
+            return Err(FlowError::Internal("handle_join: frame stack empty".into()));
+        }
 
-        for p in &node.parents {
-            states.remove_state(p.as_str());
+        for &p in &node.parents {
+            if !states.remove_state(p) {
+                return Err(FlowError::Internal("handle_join: frame stack empty on remove".into()));
+            }
         }
 
         Ok(())
-    }
-
-    /// Calls the LLM and returns the new `Phase` for the agent.
-    ///
-    /// - `Phase::Entry`: pushes `initial_message` as the first user turn, then calls the LLM.
-    /// - `Phase::Continue(Waiting{0, None})`: all tools done, no submit — re-calls LLM (multi-turn).
-    /// - Any other phase: callers must not invoke this function.
-    ///
-    /// Returns `Phase::Continue(ToolsDispatched{calls})` or `Phase::Exit(value)`.
-    async fn handle_agent(
-        agent: &AgentInfo,
-        phase: &Phase,
-        initial_message: Option<&str>,
-        factory: &dyn ClientFactory,
-        history: &mut FlowHistory,
-        session_id: &str,
-    ) -> Result<Phase, AgentError> {
-        // Phase::Entry: push the initial user message before calling the LLM.
-        if matches!(phase, Phase::Entry) {
-            let msg = initial_message.ok_or_else(|| {
-                AgentError::Llm("initial_message missing for Phase::Entry".to_string())
-            })?;
-            history.push(Message::user(msg.to_string()).with_context(&agent.name, session_id));
-        }
-        let options = if agent.tool_box.is_empty() {
-            ClientOptions::default()
-                .with_preamble(&agent.preamble)
-                .with_output_schema(agent.output_schema.clone())
-                .with_tool_choice(ToolChoice::Disabled)
-        } else {
-            ClientOptions::default()
-                .with_preamble(&agent.preamble)
-                .with_tools(agent.tool_box.definitions())
-        };
-        let client = factory
-            .create(&agent.model, options)
-            .map_err(|e| AgentError::Llm(e.to_string()))?;
-        let resp = client
-            .execute(&history.for_session(session_id))
-            .await
-            .map_err(|e| AgentError::Llm(e.to_string()))?;
-        match resp.output {
-            ClientOutput::ToolCalls { thought, calls } => {
-                history.push(Message {
-                    role: Role::AssistantToolCalls { calls: calls.clone() },
-                    content: thought.unwrap_or_default(),
-                    usage: resp.usage,
-                    agent_id: agent.name.clone(),
-                    session_id: session_id.to_owned(),
-                });
-                let cont = serde_json::to_value(AgentContinuation::ToolsDispatched { calls })
-                    .map_err(|e| AgentError::Serialize(e.to_string()))?;
-                Ok(Phase::Continue(cont))
-            }
-            ClientOutput::Output(value) => Ok(Phase::Exit(value)),
-        }
     }
 
     fn handle_either(
@@ -391,22 +252,27 @@ impl FlowGraph {
         ctx: Context,
         states: &mut FlowState,
     ) -> Result<(), FlowError> {
-        let state = states.get_state(&either.name).ok_or_else(|| {
+        let state = states.get_state(either.name).ok_or_else(|| {
             FlowError::NotFound(format!(
                 "either parent '{}' has not produced a value",
-                either.name
+                either.name.0
             ))
         })?;
-        let output = (either.func)(&state, ctx)?;
-        states.set_state(&output.name, output.value, Some(&either.name));
+        let (out_id, out_val) = (either.func)(&state, ctx)?;
+        if !states.set_state(out_id, out_val, Some(either.name)) {
+            return Err(FlowError::Internal("handle_either: frame stack empty".into()));
+        }
         Ok(())
     }
 
     /// Injects the entry point and runs full graph validation (entry + reachability).
     /// Called by [`FlowRuntime`] after [`Flow::build`] returns the graph.
-    pub(crate) fn with_entry(mut self, entry: String) -> Result<Self, FlowError> {
-        self.entry = entry;
-        validate(&self.nodes, &self.entry)?;
+    fn with_entry(mut self, entry: String, exit: String) -> Result<Self, FlowError> {
+        let entry_id = self.interner.intern(&entry);
+        let exit_id = self.interner.intern(&exit);
+        self.entry = entry_id;
+        self.exit = exit_id;
+        validate(&self.nodes, entry_id, &self)?;
         Ok(self)
     }
 
@@ -417,8 +283,9 @@ impl FlowGraph {
         history: &mut FlowHistory,
         session_id: &str,
         states: &mut FlowState,
-    ) -> Result<FlowOut, FlowError> {
-        self.step(factory, ctx, history, session_id, None, states).await
+    ) -> Result<FlowStep, FlowError> {
+        self.step(factory, ctx, history, session_id, None, states)
+            .await
     }
 
     pub(crate) async fn resume(
@@ -427,41 +294,328 @@ impl FlowGraph {
         ctx: Context,
         history: &mut FlowHistory,
         session_id: &str,
-        resumption: (String, Value),
+        resumption: Value,
         states: &mut FlowState,
-    ) -> Result<FlowOut, FlowError> {
+    ) -> Result<FlowStep, FlowError> {
         self.step(factory, ctx, history, session_id, Some(resumption), states)
             .await
     }
 
-    /// Checks whether all current states are terminal (Done) or stuck (Deadlock).
-    /// When inside a sub-flow frame, a Done pops the frame and writes the result to the parent.
-    fn resolve_done_or_deadlock(&self, states: &mut FlowState) -> Result<FlowOut, FlowError> {
-        if states.keys().all(|k| self.is_terminal(k)) {
-            let value = states
-                .keys()
-                .next()
-                .and_then(|k| states.get_state(k))
-                .cloned()
-                .unwrap_or(Value::Null);
-            if states.frame_depth() > 1 {
-                let depth = states.frame_depth();
-                let exit_name = states
-                    .frame_exit_name_at(depth - 1)
-                    .ok_or_else(|| FlowError::Internal("pop: sub-frame has no exit_name".into()))?
-                    .to_string();
-                states.pop_frame();
-                states.set_state(&exit_name, value, None);
-                return Ok(FlowOut::Continue);
+    fn handle_tool<'a>(
+        node: &'a ToolInfo,
+        flow: &'a FlowGraph,
+        ctx: Context,
+        history: &'a mut FlowHistory,
+        session_id: &'a str,
+        states: &'a mut FlowState,
+    ) -> BoxFuture<'a, Result<FlowStep, FlowError>> {
+        Box::pin(async move {
+            let call_json = states
+                .get_state(node.name)
+                .ok_or_else(|| {
+                    FlowError::NotFound(format!(
+                        "tool '{}': call state missing",
+                        flow.interner.name_of(node.name),
+                    ))
+                })?
+                .clone();
+            let call: ToolCall = serde_json::from_value(call_json)
+                .map_err(|e| FlowError::DeserializeError(format!("tool call: {e}")))?;
+            match node.tool_box.call_at_index(node.tool_index, &call.id, call.args.clone(), ctx).await {
+                Ok(output) => {
+                    history.push(
+                        Message::tool_output(call.id, output.value.to_string())
+                            .with_context(&call.name, session_id),
+                    );
+                    if !states.remove_state(node.name) {
+                        return Err(FlowError::Internal("handle_tool: frame stack empty on remove".into()));
+                    }
+                    Ok(FlowStep::Continue)
+                }
+                Err(ToolError::Exit(value)) => {
+                    Self::handle_tool_exit(node, flow, &call, value, history, session_id, states)
+                }
+                Err(ToolError::Suspend) => {
+                    // Keep ToolCall JSON in src so `step` can recover call.id on resume.
+                    states.suspend(node.name, node.agent_name);
+                    Ok(FlowStep::Suspend { value: call.args })
+                }
+                Err(e) => Err(FlowError::AgentError(format!("tool '{}': {e}", call.name))),
             }
-            return Ok(FlowOut::Done(value));
-        }
-        let stuck: Vec<&str> = states
+        })
+    }
+
+    /// Handles the `submit` sentinel (`ToolError::Exit`).
+    ///
+    /// - Records the structured output as a tool-result history entry.
+    /// - Cancels sibling tool calls from the same LLM turn that have not yet executed,
+    ///   writing a `"cancelled"` result for each so history stays well-formed for all providers.
+    /// - Writes the output value to `agent_exit` and marks the agent frame done via
+    ///   `Phase::Continue(None)`.
+    fn handle_tool_exit(
+        node: &ToolInfo,
+        flow: &FlowGraph,
+        call: &ToolCall,
+        value: Value,
+        history: &mut FlowHistory,
+        session_id: &str,
+        states: &mut FlowState,
+    ) -> Result<FlowStep, FlowError> {
+        let content = serde_json::to_string(&value)
+            .map_err(|e| FlowError::SerializeError(e.to_string()))?;
+        history.push(
+            Message::tool_output(call.id.clone(), content)
+                .with_context(&call.name, session_id),
+        );
+        let siblings: Vec<(NodeId, Value)> = states
             .keys()
-            .filter(|k| !self.is_terminal(k))
-            .map(String::as_str)
+            .filter(|&k| {
+                matches!(flow.nodes.get(&k), Some(FlowNode::Tool(t)) if t.agent_name == node.agent_name)
+            })
+            .filter_map(|k| states.get_state(k).map(|v| (k, v.clone())))
             .collect();
-        Err(FlowError::Deadlock(stuck.join(", ")))
+        for (k, call_json) in siblings {
+            let sibling: ToolCall = serde_json::from_value(call_json)
+                .map_err(|e| FlowError::DeserializeError(format!("sibling tool call: {e}")))? ;
+            history.push(
+                Message::tool_output(sibling.id, "cancelled: submit was issued".to_string())
+                    .with_context(&sibling.name, session_id),
+            );
+            if !states.remove_state(k) {
+                return Err(FlowError::Internal("handle_tool_exit: frame stack empty on sibling remove".into()));
+            }
+        }
+        if !states.set_state(node.agent_exit, value, None) {
+            return Err(FlowError::Internal("handle_tool_exit: frame stack empty on set_state".into()));
+        }
+        if !states.set_phase(Phase::Continue(None)) {
+            return Err(FlowError::Internal("handle_tool_exit: frame stack empty on set_phase".into()));
+        }
+        Ok(FlowStep::Continue)
+    }
+
+    fn handle_parent_agent(
+        node: &AgentInfo,
+        flow: &FlowGraph,
+        states: &mut FlowState,
+    ) -> Result<FlowStep, FlowError> {
+        let parent_entry = node.id;
+        let parent_exit = node.exit;
+
+        let callable = Callable{
+            parent_entry,
+            parent_exit,
+            exit: parent_exit,
+            entry: parent_entry,
+            index: flow.callable_index, 
+        };
+
+        states.call_enter(callable);
+        if !states.set_phase(Phase::Entry) {
+            return Err(FlowError::Internal("handle_parent_agent: frame stack empty after call_enter".into()));
+        }
+
+        Ok(FlowStep::Continue)
+    }
+
+    async fn handle_child_agent(
+        node: &AgentInfo,
+        flow: &FlowGraph,
+        factory: &dyn ClientFactory,
+        ctx: Context,
+        history: &mut FlowHistory,
+        session_id: &str,
+        states: &mut FlowState,
+    ) -> Result<FlowStep, FlowError> {
+        let phase = states.phase().cloned().ok_or_else(|| {
+            FlowError::Internal("handle_child_agent called without a phase".to_string())
+        })?;
+
+        match phase {
+            Phase::Entry => {
+                // First dispatch: record the agent's input as a user message then call LLM.
+                let input = states
+                    .get_state(node.id)
+                    .ok_or_else(|| {
+                        FlowError::NotFound(format!(
+                            "agent '{}': input state missing",
+                            flow.interner.name_of(node.id)
+                        ))
+                    })?
+                    .clone();
+
+                let agent_name = flow.interner.name_of(node.id);
+                history.push(
+                    Message::from_json(Role::User, &input)
+                        .map_err(|e| FlowError::SerializeError(e.to_string()))?
+                        .with_context(agent_name, session_id),
+                );
+
+                // Advance phase: Entry is consumed once the user message is in history.
+                // Any future re-entry will find Continue(Dispatch) and skip re-pushing.
+                let dispatch_val = serde_json::to_value(AgentContinuation::Dispatch)
+                    .map_err(|e| FlowError::SerializeError(e.to_string()))?;
+                if !states.set_phase(Phase::Continue(Some(dispatch_val))) {
+                    return Err(FlowError::Internal("handle_child_agent Entry: frame stack empty on set_phase".into()));
+                }
+
+                Self::dispatch_agent(node, flow, factory, history, session_id, states).await
+            }
+
+            Phase::Continue(val) => {
+                let cont = match val {
+                    Some(v) => Some(
+                        serde_json::from_value::<AgentContinuation>(v)
+                            .map_err(|e| FlowError::DeserializeError(format!("agent continuation: {e}")))?,
+                    ),
+                    None => None,
+                };
+                match cont {
+                    Some(AgentContinuation::PendingTool) => {
+                        // Move the agent key to the end of the state map so step_inner
+                        // reaches tool states (at lower indices) before re-entering this agent.
+                        let input_val = states.get_state(node.id).cloned();
+                        if !states.remove_state(node.id) {
+                            return Err(FlowError::Internal("handle_child_agent PendingTool: frame stack empty on remove".into()));
+                        }
+                        if let Some(v) = input_val {
+                            if !states.set_state(node.id, v, None) {
+                                return Err(FlowError::Internal("handle_child_agent PendingTool: frame stack empty on re-insert".into()));
+                            }
+                        }
+                        // If tool states still occupy the map, let step_inner dispatch them first.
+                        let any_tools = states
+                            .keys()
+                            .any(|k| matches!(flow.nodes.get(&k), Some(FlowNode::Tool(_))));
+                        if any_tools {
+                            return Ok(FlowStep::Continue);
+                        }
+                        // All tool results are now in history — re-dispatch to LLM.
+                        Self::dispatch_agent(node, flow, factory, history, session_id, states).await
+                    }
+                    // Explicit Dispatch: call LLM.
+                    Some(AgentContinuation::Dispatch) => {
+                        Self::dispatch_agent(node, flow, factory, history, session_id, states).await
+                    }
+                    // None: agent output written to exit slot; call_exit will pop the frame.
+                    None => Ok(FlowStep::Continue),
+                }
+            }
+        }
+    }
+
+    /// Calls the LLM once and handles both structured-output and tool-call responses.
+    ///
+    /// **Structured output path** (`ClientOutput::Output`):
+    /// - Pushes an assistant message to history.
+    /// - Writes the output value to `node.exit`, retires `node.id` from the state map.
+    /// - Sets phase to `Continue(None)` signalling the frame is ready for `call_exit`.
+    ///
+    /// **Tool-call path** (`ClientOutput::ToolCalls`):
+    /// - Pushes an `AssistantToolCalls` message to history.
+    /// - Moves the agent's input slot to the *end* of the state map so that step_inner
+    ///   reaches pending tool states (which come first) before triggering this agent again.
+    /// - Writes each pending `ToolCall` as a JSON value under its interned tool `NodeId`.
+    /// - Sets phase to `Continue(PendingTool(calls))`.
+    async fn dispatch_agent(
+        node: &AgentInfo,
+        flow: &FlowGraph,
+        factory: &dyn ClientFactory,
+        history: &mut FlowHistory,
+        session_id: &str,
+        states: &mut FlowState,
+    ) -> Result<FlowStep, FlowError> {
+        let agent_name = flow.interner.name_of(node.id).to_string();
+
+        let options = ClientOptions::default()
+            .with_preamble(node.preamble.clone())
+            .with_tools(node.tool_box.definitions())
+            .with_output_schema(node.output_schema.clone())
+            .with_name(agent_name.clone());
+
+        let client = factory
+            .create(&node.model, options)
+            .map_err(|e| FlowError::AgentError(e.to_string()))?;
+
+        history
+            .validate()
+            .map_err(|e| FlowError::AgentError(e.to_string()))?;
+
+        let response = client
+            .execute(history.as_slice())
+            .await
+            .map_err(|e| FlowError::AgentError(e.to_string()))?;
+
+        match response.output {
+            ClientOutput::Output(val) => {
+                let content = serde_json::to_string(&val)
+                    .map_err(|e| FlowError::SerializeError(e.to_string()))?;
+                let mut msg = Message::assistant(content).with_context(&agent_name, session_id);
+                if let Some(usage) = response.usage {
+                    msg = msg.with_usage(usage);
+                }
+                history.push(msg);
+
+                // Retire the input slot, write the output slot.
+                if !states.set_state(node.exit, val, Some(node.id)) {
+                    return Err(FlowError::Internal("dispatch_agent Output: frame stack empty on set_state".into()));
+                }
+                // Phase::Continue(None): agent is done; call_exit will pop this frame.
+                if !states.set_phase(Phase::Continue(None)) {
+                    return Err(FlowError::Internal("dispatch_agent Output: frame stack empty on set_phase".into()));
+                }
+
+                Ok(FlowStep::Continue)
+            }
+
+            ClientOutput::ToolCalls { thought, calls } => {
+                history.push(Message {
+                    role: Role::AssistantToolCalls { calls: calls.clone() },
+                    content: thought.unwrap_or_default(),
+                    usage: response.usage,
+                    agent_id: agent_name.clone(),
+                    session_id: session_id.to_owned(),
+                });
+
+                // Validate: reject unknown tool names and duplicate calls.
+                let mut seen_ids = std::collections::HashSet::new();
+                for call in &calls {
+                    let tool_key = format!("{}::{}", agent_name, call.name);
+                    let tool_id = flow.interner.fwd.get(&tool_key).copied().ok_or_else(|| {
+                        FlowError::AgentError(format!(
+                            "agent '{}': LLM called unknown tool '{}'",
+                            agent_name, call.name
+                        ))
+                    })?;
+                    if !seen_ids.insert(tool_id) {
+                        return Err(FlowError::AgentError(format!(
+                            "agent '{}': duplicate tool call '{}'",
+                            agent_name, call.name
+                        )));
+                    }
+                }
+
+                // Insert each pending tool call under its interned NodeId.
+                for call in &calls {
+                    let tool_key = format!("{}::{}", agent_name, call.name);
+                    let tool_id = *flow.interner.fwd.get(&tool_key).unwrap(); // safe: validated above
+                    let call_val = serde_json::to_value(call)
+                        .map_err(|e| FlowError::SerializeError(e.to_string()))?;
+                    if !states.set_state(tool_id, call_val, None) {
+                        return Err(FlowError::Internal("dispatch_agent ToolCalls: frame stack empty on set_state".into()));
+                    }
+                }
+
+                if !states.set_phase(Phase::Continue(Some(
+                    serde_json::to_value(AgentContinuation::PendingTool)
+                        .map_err(|e| FlowError::SerializeError(e.to_string()))?,
+                ))) {
+                    return Err(FlowError::Internal("dispatch_agent ToolCalls: frame stack empty on set_phase".into()));
+                }
+
+                Ok(FlowStep::Continue)
+            }
+        }
     }
 
     /// Dispatches one step on `self` (the currently active graph for the top frame).
@@ -471,9 +625,8 @@ impl FlowGraph {
         ctx: Context,
         history: &mut FlowHistory,
         session_id: &str,
-        resumption: Option<(String, Value)>,
         states: &mut FlowState,
-    ) -> Result<FlowOut, FlowError> {
+    ) -> Result<FlowStep, FlowError> {
         let total_states = states.len();
         for state_index in 0..total_states {
             let current_node_id = states
@@ -481,275 +634,60 @@ impl FlowGraph {
                 .ok_or_else(|| {
                     FlowError::NotFound("current node has not produced a value".to_string())
                 })?
-                .0
-                .clone();
+                .0;
             let current_node = match self.nodes.get(&current_node_id) {
                 Some(n) => n,
                 None => continue,
             };
             match current_node {
                 FlowNode::Agent(agent) => {
-                    // Flush a completed exit phase inline — no extra step boundary.
-                    if let Some(Phase::Exit(value)) = states.phase().cloned() {
-                        states.set_phase(Phase::Entry);
-                        states.set_state(&agent.exit_name, value, Some(&current_node_id));
-                        return Ok(FlowOut::Continue);
-                    }
-
-                    // Inspect the current continuation (if any).
-                    if let Some(Phase::Continue(raw)) = states.phase().cloned() {
-                        let cont: AgentContinuation =
-                            serde_json::from_value(raw).map_err(|e| {
-                                FlowError::from(AgentError::Deserialize(format!("agent continuation: {e}")))
-                            })?;
-                        match cont {
-                            AgentContinuation::ToolsDispatched { .. } => {
-                                // Should never be persisted — always converted inline. Treat as
-                                // programmer error.
-                                return Err(FlowError::from(AgentError::Llm(
-                                    "ToolsDispatched persisted in frame — this is a bug".to_string(),
-                                )));
-                            }
-                            AgentContinuation::Waiting { count, submitted } => {
-                                if count > 0 {
-                                    // Still awaiting tool completions.
-                                    continue;
-                                }
-                                if let Some(v) = submitted {
-                                    // submit tool fired — flush to exit state inline.
-                                    states.set_phase(Phase::Entry);
-                                    states.set_state(
-                                        &agent.exit_name,
-                                        v,
-                                        Some(&current_node_id),
-                                    );
-                                    return Ok(FlowOut::Continue);
-                                }
-                                // All tools done, no submit — fall through to re-call LLM.
-                            }
-                        }
-                    }
-
-                    // Phase::Entry or Waiting{0, None}: call the LLM.
-                    let initial_msg = if matches!(states.phase(), Some(Phase::Entry)) {
-                        Some(
-                            states
-                                .get_state(&current_node_id)
-                                .ok_or_else(|| {
-                                    FlowError::NotFound(
-                                        "initial state node has not produced a value".to_string(),
-                                    )
-                                })?
-                                .to_string(),
-                        )
+                    if let Some(_phase) = states.phase() {
+                        return Self::handle_child_agent(agent, self, factory, ctx, history, session_id, states).await;
                     } else {
-                        None
-                    };
-                    let current_phase = states
-                        .phase()
-                        .ok_or_else(|| FlowError::Internal("handle_agent: empty frame stack".into()))?;
-                    let next_phase = Self::handle_agent(
-                        agent,
-                        current_phase,
-                        initial_msg.as_deref(),
-                        factory,
-                        history,
-                        session_id,
-                    )
-                    .await?;
-                    // ToolsDispatched: convert inline — never persist to the frame.
-                    if let Phase::Continue(ref raw) = next_phase {
-                        let cont: AgentContinuation =
-                            serde_json::from_value(raw.clone()).map_err(|e| {
-                                FlowError::from(AgentError::Deserialize(format!("agent continuation: {e}")))
-                            })?;
-                        if let AgentContinuation::ToolsDispatched { calls } = cont {
-                            // Validate all tool names before pushing any states.
-                            for call in &calls {
-                                let key = format!("{}::{}", agent.name, call.name);
-                                if !self.nodes.contains_key(&key) {
-                                    return Err(FlowError::from(AgentError::ToolUnknown(format!(
-                                        "unknown tool '{}' called by agent '{}'",
-                                        call.name, agent.name
-                                    ))));
-                                }
-                            }
-                            for call in &calls {
-                                let key = format!("{}::{}", agent.name, call.name);
-                                let pv = serde_json::to_value(PendingCall {
-                                    id: call.id.clone(),
-                                    args: call.args.clone(),
-                                })
-                                .map_err(|e| {
-                                    FlowError::from(AgentError::Serialize(format!("pending call: {e}")))
-                                })?;
-                                states.set_state(&key, pv, None);
-                            }
-                            let waiting =
-                                serde_json::to_value(AgentContinuation::Waiting {
-                                    count: calls.len(),
-                                    submitted: None,
-                                })
-                                .map_err(|e| FlowError::from(AgentError::Serialize(e.to_string())))?;
-                            states.set_phase(Phase::Continue(waiting));
-                            return Ok(FlowOut::Continue);
-                        }
-                    }
-                    // Phase::Exit: flush inline.
-                    if let Phase::Exit(value) = next_phase {
-                        states.set_phase(Phase::Entry);
-                        states.set_state(&agent.exit_name, value, Some(&current_node_id));
-                        return Ok(FlowOut::Continue);
-                    }
-                    // Should not reach here — handle_agent always returns Continue or Exit.
-                    return Err(FlowError::from(AgentError::Llm("unexpected phase from handle_agent".to_string())));
-                }
-                FlowNode::Tool(info) => {
-                    let raw_pending = states
-                        .get_state(&info.name)
-                        .ok_or_else(|| {
-                            FlowError::NotFound(format!(
-                                "tool state '{}' missing",
-                                info.name
-                            ))
-                        })?
-                        .clone();
-                    let pending: PendingCall =
-                        serde_json::from_value(raw_pending).map_err(|e| {
-                            FlowError::from(AgentError::Deserialize(format!(
-                                "pending call '{}': {e}",
-                                info.name
-                            )))
-                        })?;
-                    let call_id = pending.id;
-                    let args = pending.args;
-
-                    // Helper: read the current Waiting continuation from the agent's phase.
-                    let read_waiting = |states: &FlowState| -> Result<(usize, Option<Value>), FlowError> {
-                        let Some(Phase::Continue(raw)) = states.phase().cloned() else {
-                            return Err(FlowError::from(AgentError::Llm(
-                                "tool dispatched outside Phase::Continue".to_string(),
-                            )));
-                        };
-                        let cont: AgentContinuation =
-                            serde_json::from_value(raw).map_err(|e| {
-                                FlowError::from(AgentError::Deserialize(format!(
-                                    "agent continuation: {e}"
-                                )))
-                            })?;
-                        let AgentContinuation::Waiting { count, submitted } = cont else {
-                            return Err(FlowError::from(AgentError::Llm(
-                                "tool dispatched in ToolsDispatched phase".to_string(),
-                            )));
-                        };
-                        Ok((count, submitted))
-                    };
-
-                    // Inject an externally-supplied resume payload instead of executing.
-                    if let Some((ref resume_id, ref resume_val)) = resumption {
-                        if resume_id == &info.name {
-                            history.push(
-                                Message::tool_output(call_id, resume_val.to_string())
-                                    .with_context(&info.agent_name, session_id),
-                            );
-                            states.clear_suspension();
-                            let (count, submitted) = read_waiting(states)?;
-                            let new_cont = serde_json::to_value(AgentContinuation::Waiting {
-                                count: count.saturating_sub(1),
-                                submitted,
-                            })
-                            .map_err(|e| FlowError::from(AgentError::Serialize(e.to_string())))?;
-                            states.set_phase(Phase::Continue(new_cont));
-                            states.remove_state(&info.name);
-                            return Ok(FlowOut::Continue);
-                        }
-                    }
-
-                    let result = info
-                        .tool_box
-                        .call_at_index(info.tool_index, &call_id, args, ctx.clone())
-                        .await;
-                    match result {
-                        Ok(output) => {
-                            history.push(
-                                Message::tool_output(
-                                    output.call.id,
-                                    output.value.to_string(),
-                                )
-                                .with_context(&info.agent_name, session_id),
-                            );
-                            let (count, submitted) = read_waiting(states)?;
-                            let new_cont = serde_json::to_value(AgentContinuation::Waiting {
-                                count: count.saturating_sub(1),
-                                submitted,
-                            })
-                            .map_err(|e| FlowError::from(AgentError::Serialize(e.to_string())))?;
-                            states.set_phase(Phase::Continue(new_cont));
-                            states.remove_state(&info.name);
-                            return Ok(FlowOut::Continue);
-                        }
-                        Err(ToolError::Exit(value)) => {
-                            history.push(
-                                Message::tool_output(call_id, value.to_string())
-                                    .with_context(&info.agent_name, session_id),
-                            );
-                            let (count, _) = read_waiting(states)?;
-                            let new_cont = serde_json::to_value(AgentContinuation::Waiting {
-                                count: count.saturating_sub(1),
-                                submitted: Some(value),
-                            })
-                            .map_err(|e| FlowError::from(AgentError::Serialize(e.to_string())))?;
-                            states.set_phase(Phase::Continue(new_cont));
-                            states.remove_state(&info.name);
-                            return Ok(FlowOut::Continue);
-                        }
-                        Err(ToolError::Suspend(value)) => {
-                            // Phase stays Continue(Waiting) — tool slot stays in states.
-                            states.suspend(&info.name);
-                            return Ok(FlowOut::Suspend {
-                                value,
-                                tool_id: info.name.clone(),
-                            });
-                        }
-                        Err(error) => {
-                            return Err(FlowError::from(AgentError::ToolFailed(format!("Tool error: {error}"))));
-                        }
+                        return Self::handle_parent_agent(agent, self, states);
                     }
                 }
+                FlowNode::Tool(info) => return Self::handle_tool(info, self, ctx, history, session_id, states).await,
                 FlowNode::Either(either) => {
                     Self::handle_either(either, ctx, states)?;
-                    return Ok(FlowOut::Continue);
+                    return Ok(FlowStep::Continue);
                 }
                 FlowNode::Fork(info) => {
                     Self::handle_fork(info, ctx, states)?;
-                    return Ok(FlowOut::Continue);
+                    return Ok(FlowStep::Continue);
                 }
                 FlowNode::Join(info) => {
-                    if !self.can_join(&current_node_id, states) {
+                    if !self.can_join(current_node_id, states) {
                         continue;
                     }
                     Self::handle_join(info, ctx, states)?;
-                    return Ok(FlowOut::Continue);
+                    return Ok(FlowStep::Continue);
                 }
                 FlowNode::Work(info) => {
                     Self::handle_work(info, ctx, states).await?;
-                    return Ok(FlowOut::Continue);
+                    return Ok(FlowStep::Continue);
                 }
                 FlowNode::Flow(inner) => {
-                    let input_val = states.get_state(&inner.name).cloned().ok_or_else(|| {
-                        FlowError::NotFound(format!(
-                            "sub-flow '{}' has no input value",
-                            inner.name
-                        ))
+                    let parent_exit = inner.parent_exit.ok_or_else(|| {
+                        FlowError::Internal("inner flow missing parent exit".to_string())
                     })?;
-                    states.remove_state(&inner.name);
-                    states.push_frame(&inner.name, &inner.exit_name);
-                    states.set_state(&inner.name, input_val, None);
-                    return Ok(FlowOut::Continue);
+
+                    let callable = Callable{
+                        parent_entry: current_node_id,
+                        parent_exit,
+                        exit: inner.exit,
+                        entry: inner.entry,
+                        index: inner.callable_index,
+                    };  
+
+                    states.call_enter(callable);
+
+                    return Ok(FlowStep::Continue);
                 }
             }
         }
-        self.resolve_done_or_deadlock(states)
+
+        Ok(FlowStep::Continue)
     }
 
     /// Entry point for a step. Resolves the active inner graph from the frame stack,
@@ -760,316 +698,45 @@ impl FlowGraph {
         ctx: Context,
         history: &mut FlowHistory,
         session_id: &str,
-        resumption: Option<(String, Value)>,
+        mut resumption: Option<Value>,
         states: &mut FlowState,
-    ) -> Result<FlowOut, FlowError> {
+    ) -> Result<FlowStep, FlowError> {
         match (states.suspension(), &resumption) {
-            (Some(tool_id), None) => return Err(FlowError::ResumeRequired(tool_id.clone())),
-            (None, Some((tool_id, _))) => {
-                return Err(FlowError::UnexpectedResumption(tool_id.clone()));
-            }
-            (Some(expected), Some((actual, _))) if actual != expected => {
-                return Err(FlowError::ResumeMismatchError(expected.clone()));
+            (Some(_), None) => return Err(FlowError::ResumeRequired),
+            (None, Some(_)) => {
+                return Err(FlowError::UnexpectedResumption);
             }
             _ => {}
         }
-        let active = walk_to_inner_graph(self, states);
-        active
-            .step_inner(factory, ctx, history, session_id, resumption, states)
-            .await
-    }
-}
-
-/// Walks the frame stack to find the currently active inner graph.
-fn walk_to_inner_graph<'a>(root: &'a FlowGraph, states: &FlowState) -> &'a FlowGraph {
-    let mut g = root;
-    for depth in 1..states.frame_depth() {
-        let Some(entry) = states.frame_entry_at(depth) else { break };
-        if let Some(FlowNode::Flow(inner)) = g.nodes.get(entry) {
-            g = inner;
-        }
-    }
-    g
-}
-
-/// Validates per-node structural rules only — no entry or reachability checks.
-/// Called by [`FlowBuilder::build`] before the entry is known.
-fn validate_nodes(nodes: &HashMap<String, FlowNode>) -> Result<(), BuildError> {
-    let mut problems: Vec<String> = Vec::new();
-    let mut seen_join_groups: HashSet<String> = HashSet::new();
-    for (key, node) in nodes {
-        match node {
-            FlowNode::Agent(info) => {
-                if info.exit_name == info.name {
-                    problems.push(format!(
-                        "agent '{}': exit_name equals input name — node would overwrite its own input",
-                        key
-                    ));
-                }
-                if info.model.is_empty() {
-                    problems.push(format!("agent '{}': model is empty", key));
-                }
-            }
-            FlowNode::Work(info) => {
-                if info.exit_name == info.name {
-                    problems.push(format!(
-                        "work '{}': exit_name equals input name — node would overwrite its own input",
-                        key
-                    ));
-                }
-            }
-            FlowNode::Fork(info) => {
-                if info.children.len() < 2 {
-                    problems.push(format!(
-                        "fork '{}': must have at least 2 children, found {}",
-                        key,
-                        info.children.len()
-                    ));
-                }
-                let mut seen_children: HashSet<&str> = HashSet::new();
-                for child in &info.children {
-                    if !seen_children.insert(child.as_str()) {
-                        problems.push(format!("fork '{}': duplicate child '{}'", key, child));
-                    }
-                    if !nodes.contains_key(child) {
-                        problems.push(format!(
-                            "fork '{}': child '{}' is not a registered node",
-                            key, child
-                        ));
+        if let Some(resumption) = resumption.take() {
+            // If resuming from a tool suspension, write the tool result to history
+            // before the suspension slot (which holds the original ToolCall JSON) is consumed.
+            if let Some(susp) = states.suspension() {
+                if let Some(call_json) = states.get_state(susp.src) {
+                    if let Ok(tc) = serde_json::from_value::<ToolCall>(call_json.clone()) {
+                        history.push(
+                            Message::tool_output(tc.id, resumption.to_string())
+                                .with_context(&tc.name, session_id),
+                        );
                     }
                 }
             }
-            FlowNode::Join(info) => {
-                let mut sorted_parents = info.parents.clone();
-                sorted_parents.sort();
-                let group_key = format!("{}→{}", sorted_parents.join("+"), info.target);
-                if !seen_join_groups.insert(group_key) {
-                    continue;
-                }
-                if info.parents.len() != 2 {
-                    problems.push(format!(
-                        "join (target '{}'): must have exactly 2 parents, found {}",
-                        info.target,
-                        info.parents.len()
-                    ));
-                }
-                let mut seen_parents: HashSet<&str> = HashSet::new();
-                for p in &info.parents {
-                    if !seen_parents.insert(p.as_str()) {
-                        problems.push(format!(
-                            "join (target '{}'): duplicate parent '{}'",
-                            info.target, p
-                        ));
-                    }
-                    if p == &info.target {
-                        problems.push(format!(
-                            "join (target '{}'): target matches parent '{}'",
-                            info.target, p
-                        ));
-                    }
-                    if !nodes.contains_key(p.as_str()) {
-                        problems.push(format!(
-                            "join (target '{}'): parent '{}' is not a registered node",
-                            info.target, p
-                        ));
-                    }
-                }
-            }
-            FlowNode::Either(info) => {
-                if info.left_name == info.right_name {
-                    problems.push(format!(
-                        "either '{}': both branches resolve to the same schema name '{}'",
-                        key, info.left_name
-                    ));
-                }
-            }
-            FlowNode::Flow(inner) => {
-                if inner.name == inner.exit_name {
-                    problems.push(format!(
-                        "flow '{}': exit_name equals input name — sub-flow output would overwrite its own input",
-                        key
-                    ));
-                }
-                if inner.name.is_empty() {
-                    problems.push(format!("flow '{}': name is empty", key));
-                }
-                if inner.exit_name.is_empty() {
-                    problems.push(format!("flow '{}': exit_name is empty", key));
-                }
-            }
-            FlowNode::Tool(_) => {}
-        }
-    }
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(BuildError::Invalid(problems))
-    }
-}
-
-/// Validates entry registration and graph reachability. Called by [`FlowGraph::with_entry`].
-fn validate(nodes: &HashMap<String, FlowNode>, entry: &str) -> Result<(), BuildError> {
-    let mut problems: Vec<String> = Vec::new();
-
-    // --- Entry check ---
-    if entry.is_empty() {
-        problems.push("flow has no entry node".to_string());
-    } else if !nodes.contains_key(entry) {
-        problems.push(format!("entry '{}' is not a registered node", entry));
-    }
-
-    // --- Reachability (only when entry is valid) ---
-    if !entry.is_empty() && nodes.contains_key(entry) {
-        // Map each node to the set of keys it produces output into.
-        // Tool nodes are excluded: they are dynamically reachable only when
-        // an agent dispatches them, not via static graph edges.
-        let successors: HashMap<&str, Vec<&str>> = nodes
-            .iter()
-            .filter(|(_, node)| !matches!(node, FlowNode::Tool(_)))
-            .map(|(key, node)| {
-                let succs: Vec<&str> = match node {
-                    FlowNode::Agent(info) => vec![info.exit_name.as_str()],
-                    FlowNode::Work(info) => vec![info.exit_name.as_str()],
-                    FlowNode::Fork(info) => info.children.iter().map(String::as_str).collect(),
-                    FlowNode::Join(info) => vec![info.target.as_str()],
-                    FlowNode::Either(info) => {
-                        vec![info.left_name.as_str(), info.right_name.as_str()]
-                    }
-                    FlowNode::Flow(inner) => vec![inner.exit_name.as_str()],
-                    FlowNode::Tool(_) => vec![],
-                };
-                (key.as_str(), succs)
-            })
-            .collect();
-
-        // Forward BFS: which registered nodes are reachable from entry?
-        let mut reachable: HashSet<&str> = HashSet::new();
-        let mut queue: VecDeque<&str> = VecDeque::new();
-        reachable.insert(entry);
-        queue.push_back(entry);
-        while let Some(cur) = queue.pop_front() {
-            if let Some(succs) = successors.get(cur) {
-                for &s in succs {
-                    if nodes.contains_key(s) && reachable.insert(s) {
-                        queue.push_back(s);
-                    }
-                }
-            }
-        }
-        for key in nodes.keys() {
-            if matches!(nodes[key], FlowNode::Tool(_)) {
-                continue; // tool nodes are dynamically reachable — skip static check
-            }
-            if !reachable.contains(key.as_str()) {
-                problems.push(format!(
-                    "node '{}': unreachable from entry '{}'",
-                    key, entry
+            if !states.resume(resumption) {
+                return Err(FlowError::Internal(
+                    "resume: no active suspension or empty frame stack".into(),
                 ));
             }
         }
-
-        // Build reverse adjacency for backward BFS.
-        let mut predecessors: HashMap<&str, Vec<&str>> = HashMap::new();
-        for (&key, succs) in &successors {
-            for &s in succs {
-                predecessors.entry(s).or_default().push(key);
-            }
-        }
-
-        // Terminals: successor keys not present in the node map.
-        let terminals: HashSet<&str> = successors
-            .values()
-            .flat_map(|v| v.iter().copied())
-            .filter(|&s| !nodes.contains_key(s))
-            .collect();
-
-        // Backward BFS: which registered nodes can reach a terminal?
-        let mut can_reach_terminal: HashSet<&str> = HashSet::new();
-        let mut queue2: VecDeque<&str> = VecDeque::new();
-        for &t in &terminals {
-            if let Some(preds) = predecessors.get(t) {
-                for &p in preds {
-                    if can_reach_terminal.insert(p) {
-                        queue2.push_back(p);
-                    }
+        let result = self.step_inner(factory, ctx, history, session_id, states).await?;
+        match result {
+            FlowStep::Continue => {
+                if let Some(v) = states.call_exit() {
+                    return Ok(FlowStep::Done(v));
                 }
+                Ok(FlowStep::Continue)
             }
+            other => Ok(other), // Suspend — do NOT call call_exit
         }
-        while let Some(cur) = queue2.pop_front() {
-            if let Some(preds) = predecessors.get(cur) {
-                for &p in preds {
-                    if can_reach_terminal.insert(p) {
-                        queue2.push_back(p);
-                    }
-                }
-            }
-        }
-        for key in nodes.keys() {
-            if matches!(nodes[key], FlowNode::Tool(_)) {
-                continue; // tool nodes exit via submitted_value — no static terminal path
-            }
-            if !can_reach_terminal.contains(key.as_str()) {
-                problems.push(format!(
-                    "node '{}': has no path to any terminal — dead end",
-                    key
-                ));
-            }
-        }
-    }
-
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(BuildError::Invalid(problems))
-    }
-}
-
-fn collect_terminal_state_ids(nodes: &HashMap<String, FlowNode>) -> HashSet<String> {
-    nodes
-        .values()
-        .flat_map(|node| match node {
-            FlowNode::Agent(info) => vec![info.exit_name.clone()],
-            FlowNode::Work(info) => vec![info.exit_name.clone()],
-            FlowNode::Fork(info) => info.children.clone(),
-            FlowNode::Join(info) => vec![info.target.clone()],
-            FlowNode::Either(info) => vec![info.left_name.clone(), info.right_name.clone()],
-            FlowNode::Flow(inner) => vec![inner.exit_name.clone()],
-            FlowNode::Tool(_) => vec![], // no static terminal states
-        })
-        .filter(|state_id| !nodes.contains_key(state_id))
-        .collect()
-}
-
-fn validate_runtime_output_contract(
-    nodes: &HashMap<String, FlowNode>,
-    expected_output: &str,
-) -> Result<(), BuildError> {
-    let terminals = collect_terminal_state_ids(nodes);
-    let mut sorted_terminals: Vec<String> = terminals.iter().cloned().collect();
-    sorted_terminals.sort();
-
-    let mut problems = Vec::new();
-    if sorted_terminals.len() != 1 {
-        let found = if sorted_terminals.is_empty() {
-            "<none>".to_string()
-        } else {
-            sorted_terminals.join(", ")
-        };
-        problems.push(format!(
-            "flow must have exactly one terminal state id matching output '{}', found: {}",
-            expected_output, found
-        ));
-    } else if sorted_terminals[0] != expected_output {
-        problems.push(format!(
-            "flow output '{}' does not match terminal state id '{}'",
-            expected_output, sorted_terminals[0]
-        ));
-    }
-
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(BuildError::Invalid(problems))
     }
 }
 
@@ -1088,10 +755,11 @@ impl FlowBuilder {
 
     /// Registers an agent node. The node name is derived from `A::node_id()`.
     pub fn agent<A: Agent>(mut self) -> Self {
-        let name = A::node_id();
+        let name_str = A::node_id();
+        let name = self.flow.interner.intern(&name_str);
         if self.flow.nodes.contains_key(&name) {
             self.errors
-                .push(format!("agent '{}': duplicate node key", name));
+                .push(format!("agent '{}': duplicate node key", name_str));
             return self;
         }
         let mut schema_gen = schemars::r#gen::SchemaGenerator::default();
@@ -1099,29 +767,35 @@ impl FlowBuilder {
             Ok(v) => v,
             Err(e) => {
                 self.errors
-                    .push(format!("agent '{}' output schema: {e}", name));
+                    .push(format!("agent '{}' output schema: {e}", name_str));
                 return self;
             }
         };
         let config = A::build();
         let tool_box = Arc::new(config.tool_box.with_agent::<A>());
+        let output_str = A::Output::schema_name();
+        let output_id = self.flow.interner.intern(&output_str);
         let agent_info = AgentInfo {
-            name: name.clone(),
+            id: name,
             tool_box: Arc::clone(&tool_box),
             preamble: config.preamble,
             model: config.model_url,
-            exit_name: A::Output::schema_name(),
+            exit: output_id,
             output_schema,
         };
-        self.flow.nodes.insert(name.clone(), FlowNode::Agent(agent_info));
+        self.flow
+            .nodes
+            .insert(name, FlowNode::Agent(Arc::new(agent_info)));
         // Register a FlowNode::Tool for each tool in the toolbox (including the submit sentinel).
         for i in 0..tool_box.len() {
-            let tool_name = format!("{}::{}", name, tool_box.name_at(i));
+            let tool_name_str = format!("{}::{}", name_str, tool_box.name_at(i));
+            let tool_name = self.flow.interner.intern(&tool_name_str);
             self.flow.nodes.insert(
-                tool_name.clone(),
+                tool_name,
                 FlowNode::Tool(ToolInfo {
                     name: tool_name,
-                    agent_name: name.clone(),
+                    agent_name: name,
+                    agent_exit: output_id,
                     tool_index: i,
                     tool_box: Arc::clone(&tool_box),
                 }),
@@ -1139,44 +813,43 @@ impl FlowBuilder {
         B: 'static + Serialize + DeserializeOwned + JsonSchema,
         H: Fn(From, Context) -> Result<Either<A, B>, FlowError> + Send + Sync + 'static,
     {
-        let from_id = From::schema_name();
+        let from_id_str = From::schema_name();
+        let from_id = self.flow.interner.intern(&from_id_str);
         if self.flow.nodes.contains_key(&from_id) {
             self.errors
-                .push(format!("either '{}': duplicate node key", from_id));
+                .push(format!("either '{}': duplicate node key", from_id_str));
             return self;
         }
-        let from_id_clone = from_id.clone();
-        let shim: Box<dyn Fn(&Value, Context) -> Result<StateNode, FlowError> + Send + Sync> =
+        let left_name = self.flow.interner.intern(&A::schema_name());
+        let right_name = self.flow.interner.intern(&B::schema_name());
+        let from_id_clone = from_id_str.clone();
+        let shim: Box<dyn Fn(&Value, Context) -> Result<(NodeId, Value), FlowError> + Send + Sync> =
             Box::new(move |value: &Value, ctx: Context| {
                 let typed: From = serde_json::from_value(value.clone()).map_err(|e| {
                     FlowError::DeserializeError(format!(
                         "transition from '{}': {e}",
-                        from_id.clone()
+                        from_id_clone.clone()
                     ))
                 })?;
                 match func(typed, ctx)? {
                     Either::Left(a) => {
-                        let node = node(a)?;
-                        Ok(StateNode {
-                            name: A::schema_name(),
-                            value: node.value,
-                        })
+                        let v = serde_json::to_value(&a)
+                            .map_err(|e| FlowError::SerializeError(format!("either left: {e}")))?;
+                        Ok((left_name, v))
                     }
                     Either::Right(b) => {
-                        let node = node(b)?;
-                        Ok(StateNode {
-                            name: B::schema_name(),
-                            value: node.value,
-                        })
+                        let v = serde_json::to_value(&b)
+                            .map_err(|e| FlowError::SerializeError(format!("either right: {e}")))?;
+                        Ok((right_name, v))
                     }
                 }
             });
         self.flow.nodes.insert(
-            from_id_clone.clone(),
+            from_id,
             FlowNode::Either(EitherInfo {
-                name: from_id_clone.clone(),
-                left_name: A::schema_name(),
-                right_name: B::schema_name(),
+                name: from_id,
+                left_name,
+                right_name,
                 func: shim,
             }),
         );
@@ -1193,26 +866,29 @@ impl FlowBuilder {
         B: 'static + Serialize + DeserializeOwned + JsonSchema,
         H: Fn(From, Context) -> Result<(A, B), FlowError> + Send + Sync + 'static,
     {
-        let from_id = From::schema_name();
+        let from_id_str = From::schema_name();
+        let from_id = self.flow.interner.intern(&from_id_str);
         if self.flow.nodes.contains_key(&from_id) {
             self.errors
-                .push(format!("fork '{}': duplicate node key", from_id));
+                .push(format!("fork '{}': duplicate node key", from_id_str));
             return self;
         }
-        let from_id_clone = from_id.clone();
+        let from_id_clone = from_id_str.clone();
         let shim: Box<dyn Fn(&Value, Context) -> Result<Vec<StateNode>, FlowError> + Send + Sync> =
             Box::new(move |value: &Value, ctx: Context| {
                 let typed: From = serde_json::from_value(value.clone()).map_err(|e| {
-                    FlowError::DeserializeError(format!("fork from '{}': {e}", from_id))
+                    FlowError::DeserializeError(format!("fork from '{}': {e}", from_id_clone))
                 })?;
                 let (a, b) = func(typed, ctx)?;
                 Ok(vec![node(a)?, node(b)?])
             });
+        let a_child = self.flow.interner.intern(&A::schema_name());
+        let b_child = self.flow.interner.intern(&B::schema_name());
         self.flow.nodes.insert(
-            from_id_clone.clone(),
+            from_id,
             FlowNode::Fork(ForkInfo {
-                name: from_id_clone,
-                children: vec![A::schema_name(), B::schema_name()],
+                name: from_id,
+                children: vec![a_child, b_child],
                 func: shim,
             }),
         );
@@ -1228,18 +904,20 @@ impl FlowBuilder {
         Out: 'static + Serialize + DeserializeOwned + JsonSchema,
         H: Fn(A, B, Context) -> Result<Out, FlowError> + Send + Sync + 'static,
     {
-        let a_id = A::schema_name();
-        let b_id = B::schema_name();
-        for id in [&a_id, &b_id] {
-            if self.flow.nodes.contains_key(id) {
+        let a_id_str = A::schema_name();
+        let b_id_str = B::schema_name();
+        let a_id = self.flow.interner.intern(&a_id_str);
+        let b_id = self.flow.interner.intern(&b_id_str);
+        for (id, id_str) in [(a_id, &a_id_str), (b_id, &b_id_str)] {
+            if self.flow.nodes.contains_key(&id) {
                 self.errors
-                    .push(format!("join: duplicate node key '{}'", id));
+                    .push(format!("join: duplicate node key '{}'", id_str));
                 return self;
             }
         }
-        let target_id = Out::schema_name();
-        let a_id_inner = a_id.clone();
-        let b_id_inner = b_id.clone();
+        let target_id = self.flow.interner.intern(&Out::schema_name());
+        let a_id_inner = a_id_str.clone();
+        let b_id_inner = b_id_str.clone();
         let shim: Arc<dyn Fn(&[Value], Context) -> Result<StateNode, FlowError> + Send + Sync> =
             Arc::new(move |inputs: &[Value], ctx: Context| {
                 let a: A = serde_json::from_value(inputs[0].clone()).map_err(|e| {
@@ -1251,15 +929,15 @@ impl FlowBuilder {
                 node(func(a, b, ctx)?)
             });
         self.flow.nodes.insert(
-            a_id.clone(),
+            a_id,
             FlowNode::Join(JoinInfo {
-                parents: vec![a_id.clone(), b_id.clone()],
-                target: target_id.clone(),
+                parents: vec![a_id, b_id],
+                target: target_id,
                 func: Arc::clone(&shim),
             }),
         );
         self.flow.nodes.insert(
-            b_id.clone(),
+            b_id,
             FlowNode::Join(JoinInfo {
                 parents: vec![a_id, b_id],
                 target: target_id,
@@ -1276,23 +954,32 @@ impl FlowBuilder {
     /// value, and resumes the inner graph until it produces `F::Output`. The output
     /// is then written to the parent frame under `F::Output::schema_name()`.
     pub fn flow<F: Flow>(mut self) -> Self {
-        let name = F::schema_name();
-        let exit_name = F::Output::schema_name();
-        if self.flow.nodes.contains_key(&name) {
+        let input_str = F::schema_name();
+        let output_str = F::Output::schema_name();
+        let input_id = self.flow.interner.intern(&input_str);
+        let output_id = self.flow.interner.intern(&output_str);
+
+        if self.flow.nodes.contains_key(&input_id) {
             self.errors
-                .push(format!("flow '{}': duplicate node key", name));
+                .push(format!("flow '{}': duplicate node key", input_str));
             return self;
         }
-        let mut inner = match F::build() {
+
+        let mut inner = match FlowGraph::from_flow::<F>() {
             Ok(g) => g,
             Err(e) => {
-                self.errors.push(format!("flow '{}': {e}", name));
+                self.errors.push(format!("flow '{}': {e}", input_str));
                 return self;
             }
         };
-        inner.name = name.clone();
-        inner.exit_name = exit_name;
-        self.flow.nodes.insert(name, FlowNode::Flow(Box::new(inner)));
+
+        inner.parent_entry = Some(input_id);
+        inner.parent_exit = Some(output_id);
+
+        self.flow
+            .nodes
+            .insert(input_id, FlowNode::Flow(Arc::new(inner)));
+
         self
     }
 
@@ -1305,21 +992,23 @@ impl FlowBuilder {
         Fut: std::future::Future<Output = Result<Out, FlowError>> + Send + 'static,
         H: Fn(From, Context) -> Fut + Send + Sync + 'static,
     {
-        let from_id = From::schema_name();
+        let from_id_str = From::schema_name();
+        let from_id = self.flow.interner.intern(&from_id_str);
         if self.flow.nodes.contains_key(&from_id) {
             self.errors
-                .push(format!("work '{}': duplicate node key", from_id));
+                .push(format!("work '{}': duplicate node key", from_id_str));
             return self;
         }
-        let from_id_clone = from_id.clone();
-        let exit_id = Out::schema_name();
+        let from_id_clone = from_id_str.clone();
+        let exit_id = self.flow.interner.intern(&Out::schema_name());
         let shim: Box<
             dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, FlowError>> + Send + Sync,
         > = Box::new(move |value: &Value, ctx: Context| {
             let typed: From = match serde_json::from_value(value.clone()) {
                 Ok(v) => v,
                 Err(e) => {
-                    let err = FlowError::DeserializeError(format!("work from '{}': {e}", from_id));
+                    let err =
+                        FlowError::DeserializeError(format!("work from '{}': {e}", from_id_clone));
                     return Box::pin(async move { Err(err) });
                 }
             };
@@ -1331,9 +1020,9 @@ impl FlowBuilder {
             })
         });
         self.flow.nodes.insert(
-            from_id_clone.clone(),
+            from_id,
             FlowNode::Work(WorkInfo {
-                name: from_id_clone,
+                name: from_id,
                 exit_name: exit_id,
                 func: shim,
             }),
@@ -1350,147 +1039,7 @@ impl FlowBuilder {
         if !self.errors.is_empty() {
             return Err(BuildError::Invalid(self.errors).into());
         }
-        validate_nodes(&self.flow.nodes)?;
+        validate_nodes(&self.flow.nodes, &self.flow)?;
         Ok(self.flow)
     }
-}
-
-pub struct FlowRuntime<I: Flow> {
-    state: FlowState,
-    graph: FlowGraph,
-    history: FlowHistory,
-    session_id: String,
-    factory: Arc<dyn ClientFactory>,
-    _marker: std::marker::PhantomData<I>,
-}
-
-impl<I: Flow> FlowRuntime<I> {
-    fn build_graph() -> Result<FlowGraph, FlowError> {
-        let graph = I::build()?.with_entry(I::node_id())?;
-        validate_runtime_output_contract(&graph.nodes, &I::Output::schema_name())?;
-        Ok(graph)
-    }
-
-    pub fn new(flow: I) -> Result<Self, FlowError> {
-        let graph = Self::build_graph()?;
-        let value = serde_json::to_value(&flow).map_err(|e| {
-            FlowError::SerializeError(format!("start node '{}': {e}", I::node_id()))
-        })?;
-        let mut state = FlowState::new();
-        state.push_frame("", "");
-        state.set_state(&I::node_id(), value, None);
-        let mut history = FlowHistory::new(None);
-        history.push(Message::user(format!("Starting flow: {}", I::node_id())));
-        Ok(Self {
-            state,
-            graph,
-            history,
-            session_id: new_session_id(),
-            factory: Arc::new(DefaultClientFactory),
-            _marker: std::marker::PhantomData,
-        })
-    }
-
-    /// Overrides the default [`ClientFactory`]. Useful for testing or selecting a provider.
-    pub fn with_factory(mut self, factory: impl ClientFactory + 'static) -> Self {
-        self.factory = Arc::new(factory);
-        self
-    }
-
-    /// Replaces the conversation history used by agent nodes.
-    ///
-    /// Call after [`FlowRuntime::from_snapshot`] to restore the LLM context from a
-    /// previously persisted [`FlowHistory`].
-    pub fn with_history(mut self, history: FlowHistory) -> Self {
-        self.history = history;
-        self
-    }
-
-    pub async fn next(&mut self, ctx: Context) -> Result<RunOut<I::Output>, FlowError> {
-        let factory = Arc::clone(&self.factory);
-        let out = self
-            .graph
-            .next(factory.as_ref(), ctx, &mut self.history, &self.session_id, &mut self.state)
-            .await?;
-        Self::map_out(out)
-    }
-
-    pub async fn resume(
-        &mut self,
-        ctx: Context,
-        resumption: (String, Value),
-    ) -> Result<RunOut<I::Output>, FlowError> {
-        let factory = Arc::clone(&self.factory);
-        let out = self
-            .graph
-            .resume(
-                factory.as_ref(),
-                ctx,
-                &mut self.history,
-                &self.session_id,
-                resumption,
-                &mut self.state,
-            )
-            .await?;
-        Self::map_out(out)
-    }
-
-    fn map_out(out: FlowOut) -> Result<RunOut<I::Output>, FlowError> {
-        match out {
-            FlowOut::Continue => Ok(RunOut::Continue),
-            FlowOut::Done(value) => {
-                let output = serde_json::from_value(value)
-                    .map_err(|e| FlowError::DeserializeError(format!("flow output: {e}")))?;
-                Ok(RunOut::Done(output))
-            }
-            FlowOut::Suspend { value, tool_id } => Ok(RunOut::Suspend { value, tool_id }),
-        }
-    }
-
-    /// Captures the current execution state as an opaque [`FlowSnapshot`].
-    ///
-    /// The snapshot can be serialized and persisted. It does not include conversation
-    /// history — manage that separately and re-attach via [`FlowRuntime::with_history`].
-    pub fn snapshot(&self) -> FlowSnapshot {
-        FlowSnapshot {
-            state: self.state.clone(),
-        }
-    }
-
-    /// Reconstructs a runtime from a previously captured [`FlowSnapshot`].
-    ///
-    /// The flow graph is rebuilt from `I::build()` — closures are never persisted.
-    /// A fresh history is created; chain `.with_history(saved_history)` to restore
-    /// the full LLM conversation context.
-    pub fn from_snapshot(snapshot: FlowSnapshot) -> Result<Self, FlowError> {
-        let graph = Self::build_graph()?;
-        let mut history = FlowHistory::new(None);
-        history.push(Message::user(format!("Starting flow: {}", I::node_id())));
-        Ok(Self {
-            state: snapshot.state,
-            history,
-            graph,
-            session_id: new_session_id(),
-            factory: Arc::new(DefaultClientFactory),
-            _marker: std::marker::PhantomData,
-        })
-    }
-}
-
-impl<I: Flow> std::fmt::Debug for FlowRuntime<I> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FlowRuntime").finish_non_exhaustive()
-    }
-}
-
-/// Opaque snapshot of a flow's execution state at a point in time.
-///
-/// Obtained via [`FlowRuntime::snapshot`]; restored via [`FlowRuntime::from_snapshot`].
-/// Safe to serialize with any `serde` format (JSON, MessagePack, etc.).
-///
-/// Does **not** include conversation history — manage [`FlowHistory`] separately and
-/// re-attach with [`FlowRuntime::with_history`] after reconstructing the runtime.
-#[derive(Serialize, Deserialize)]
-pub struct FlowSnapshot {
-    state: FlowState,
 }

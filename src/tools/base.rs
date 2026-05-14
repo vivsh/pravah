@@ -38,23 +38,12 @@ pub enum ToolError {
     #[doc(hidden)]
     #[error("exit signal from tool")]
     Exit(serde_json::Value),
-    /// A tool requesting user input before the flow can continue.
-    /// Produced by [`ToolError::suspend`]; caught by the orchestrator, which transitions
-    /// to the matching resume variant and returns [`crate::flows::FlowError::Suspended`].
+    /// A tool requesting external input before the flow can continue.
+    /// Caught by the orchestrator, which surfaces the tool's input args as
+    /// [`crate::flows::FlowStep::Suspend`]`{ value }` so the caller sees
+    /// exactly what the LLM passed to the tool.
     #[error("suspend signal from tool")]
-    Suspend(serde_json::Value),
-}
-
-impl ToolError {
-    /// Serializes `val` and wraps it as a suspend signal.
-    ///
-    /// On serialization failure, returns [`ToolError::Serialize`] instead of panicking.
-    pub fn suspend<T: serde::Serialize + 'static>(val: T) -> Self {
-        match serde_json::to_value(&val) {
-            Ok(value) => ToolError::Suspend(value),
-            Err(e) => ToolError::Serialize(e),
-        }
-    }
+    Suspend,
 }
 
 impl Context {

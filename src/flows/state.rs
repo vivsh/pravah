@@ -2,29 +2,52 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::flows::interner::NodeId;
 use crate::flows::phase::Phase;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Callable {
+    /// key where entry for this callable is expected in the parent frame;
+    pub parent_entry: NodeId,
+    /// key where exit value from this callable should be placed in the parent frame;
+    pub parent_exit: NodeId,
+    /// key where exit value from this callable is expected in this frame;
+    pub exit: NodeId,
+    /// key where entry value for this callable is expected in this frame;
+    pub entry: NodeId,
+    /// index of this callable in the runtime's callables list;
+    pub index: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct Suspension {
+    pub src: NodeId,
+    pub dst: NodeId,
+}
 
 /// A single execution frame — one per active call on the stack.
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct Frame {
     /// Key–value state for nodes executing in this frame.
-    pub(crate) states: IndexMap<String, Value>,
+    states: IndexMap<NodeId, Value>,
     /// Current execution phase for the active multi-phase node in this frame.
-    pub(crate) phase: Phase,
-    /// Schema name of the sub-flow node that started this frame.
-    pub(crate) entry: String,
-    /// Key in the *parent* frame to write the sub-flow result into on completion.
-    pub(crate) exit_name: String,
+    phase: Option<Phase>, // discriminates between child(agent) and parent(flow) frames
+
+    /// NodeId of the node that started this frame;
+    callable: Callable,
 }
 
 impl Frame {
-    pub(crate) fn new(entry: &str, exit_name: &str) -> Self {
+    fn new(call: Callable) -> Self {
         Self {
             states: IndexMap::new(),
-            phase: Phase::Entry,
-            entry: entry.to_string(),
-            exit_name: exit_name.to_string(),
+            phase: None,
+            callable: call,
         }
+    }
+
+    pub(crate) fn can_exit(&self) -> bool {
+        self.states.contains_key(&self.callable.exit)
     }
 }
 
@@ -34,7 +57,7 @@ impl Frame {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FlowState {
     frames: Vec<Frame>,
-    suspension: Option<String>,
+    suspension: Option<Suspension>,
 }
 
 impl FlowState {
@@ -53,76 +76,110 @@ impl FlowState {
         self.frames.last_mut()
     }
 
-    // ── frame management ──────────────────────────────────────────────────
+    /// Pushes a new frame for `callable`, transferring state from the parent entry to the child entry.
+    pub(crate) fn call_enter(&mut self, callable: Callable) {
+        let entry_value = self
+            .top_mut()
+            .and_then(|frame| frame.states.shift_remove(&callable.parent_entry));
 
-    /// Pushes a new frame for an agent or sub-flow call.
-    pub(crate) fn push_frame(&mut self, entry: &str, exit_name: &str) {
-        self.frames.push(Frame::new(entry, exit_name));
+        let mut child = Frame::new(callable);
+
+        if let Some(value) = entry_value {
+            child.states.insert(child.callable.entry, value);
+        }
+
+        self.frames.push(child);
     }
 
-    /// Pops the top frame. Returns `None` if the stack is already empty.
-    pub(crate) fn pop_frame(&mut self) -> Option<Frame> {
-        self.frames.pop()
+    /// Checks if the top frame can exit, and if so pops
+    /// it and transfers state from the child exit to the parent.
+    /// if parent does not exist, the state is discarded. Returns the popped value
+    /// This should be done for all frames till exit is not possible, to bubble up the exit through the stack.     
+    /// This must be called at the end of every step to ensure the stack is in a consistent state
+    /// for the next step.
+    pub(crate) fn call_exit(&mut self) -> Option<Value> {
+        loop {
+            let (exited, return_value) = self.handle_exit();
+            if exited {
+                if let Some(v) = return_value {
+                    return Some(v);
+                }
+            } else {
+                break;
+            }
+        }
+        None
     }
 
-    /// Depth of the frame stack (0 = empty / execution finished).
-    pub(crate) fn frame_depth(&self) -> usize {
-        self.frames.len()
-    }
-
-    /// Returns the `entry` field of the frame at `index` (0-based), or `None` if out of range.
-    pub(crate) fn frame_entry_at(&self, index: usize) -> Option<&str> {
-        self.frames.get(index).map(|f| f.entry.as_str())
-    }
-
-    /// Returns the `exit_name` field of the frame at `index` (0-based), or `None` if out of range.
-    pub(crate) fn frame_exit_name_at(&self, index: usize) -> Option<&str> {
-        self.frames.get(index).map(|f| f.exit_name.as_str())
+    fn handle_exit(&mut self) -> (bool, Option<Value>) {
+        if let Some(frame) = self.top_mut() {
+            let parent_exit = frame.callable.parent_exit;
+            if let Some(exit_value) = frame.states.shift_remove(&frame.callable.exit) {
+                self.frames.pop();
+                if let Some(parent) = self.top_mut() {
+                    parent.states.insert(parent_exit, exit_value);
+                    return (true, None);
+                } else {
+                    return (true, Some(exit_value));
+                }
+            }
+        }
+        (false, None)
     }
 
     // ── suspension ────────────────────────────────────────────────────────
 
-    pub fn suspension(&self) -> Option<&String> {
+    pub fn suspension(&self) -> Option<&Suspension> {
         self.suspension.as_ref()
     }
 
-    pub fn clear_suspension(&mut self) {
-        self.suspension = None;
+    pub fn suspend(&mut self, src: NodeId, dst: NodeId) {
+        self.suspension = Some(Suspension { src, dst });
     }
 
-    pub fn suspend(&mut self, node_id: &str) {
-        self.suspension = Some(node_id.to_string());
+    pub fn resume(&mut self, value: Value) -> bool {
+        if let Some(suspension) = self.suspension.take() {
+            if let Some(frame) = self.top_mut() {
+                frame.states.shift_remove(&suspension.src);
+                frame.states.insert(suspension.dst, value);
+                return true;
+            }
+        }
+        false
     }
 
     // ── phase ─────────────────────────────────────────────────────────────
 
     /// Returns the phase of the top frame, or `None` if the stack is empty.
     pub(crate) fn phase(&self) -> Option<&Phase> {
-        self.top().map(|f| &f.phase)
+        self.top().and_then(|f| f.phase.as_ref())
     }
 
     /// Sets the phase of the top frame. Returns `false` if the stack is empty.
     pub(crate) fn set_phase(&mut self, phase: Phase) -> bool {
         match self.top_mut() {
-            Some(f) => { f.phase = phase; true }
+            Some(f) => {
+                f.phase = Some(phase);
+                true
+            }
             None => false,
         }
     }
 
     // ── state accessors (delegate to top frame) ───────────────────────────
 
-    pub fn contains_state(&self, state_name: &str) -> bool {
-        self.top().is_some_and(|f| f.states.contains_key(state_name))
+    pub fn contains_state(&self, id: NodeId) -> bool {
+        self.top().is_some_and(|f| f.states.contains_key(&id))
     }
 
     /// Writes `value` under `new_node` and optionally removes `old_node`.
     /// Returns `false` if the stack is empty.
-    pub fn set_state(&mut self, new_node: &str, value: Value, old_node: Option<&str>) -> bool {
+    pub fn set_state(&mut self, new_node: NodeId, value: Value, old_node: Option<NodeId>) -> bool {
         match self.top_mut() {
             Some(frame) => {
-                frame.states.insert(new_node.to_string(), value);
+                frame.states.insert(new_node, value);
                 if let Some(old) = old_node {
-                    frame.states.shift_remove(old);
+                    frame.states.shift_remove(&old);
                 }
                 true
             }
@@ -130,29 +187,37 @@ impl FlowState {
         }
     }
 
-    /// Removes `state_name` from the top frame. Returns `false` if the stack is empty.
-    pub fn remove_state(&mut self, state_name: &str) -> bool {
+    /// Removes `id` from the top frame. Returns `false` if the stack is empty.
+    pub fn remove_state(&mut self, id: NodeId) -> bool {
         match self.top_mut() {
-            Some(frame) => { frame.states.shift_remove(state_name); true }
+            Some(frame) => {
+                frame.states.shift_remove(&id);
+                true
+            }
             None => false,
         }
     }
 
-    pub fn get_state(&self, node_id: &str) -> Option<&Value> {
-        self.top().and_then(|f| f.states.get(node_id))
+    pub fn get_state(&self, id: NodeId) -> Option<&Value> {
+        self.top().and_then(|f| f.states.get(&id))
     }
 
     pub fn len(&self) -> usize {
         self.top().map_or(0, |f| f.states.len())
     }
 
-    pub fn get_index(&self, i: usize) -> Option<(&String, &Value)> {
-        self.top().and_then(|f| f.states.get_index(i))
+    pub fn get_index(&self, i: usize) -> Option<(NodeId, &Value)> {
+        self.top()
+            .and_then(|f| f.states.get_index(i).map(|(&k, v)| (k, v)))
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = &String> {
+    pub fn keys(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.top()
             .into_iter()
-            .flat_map(|f| f.states.keys())
+            .flat_map(|f| f.states.keys().copied())
+    }
+
+    pub fn callable_index(&self) -> Option<usize> {
+        self.top().map(|f| f.callable.index)
     }
 }

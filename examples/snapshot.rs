@@ -25,7 +25,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use pravah::flows::{Flow, FlowError, FlowGraph, FlowRuntime, FlowSnapshot, RunOut};
+use pravah::flows::{Flow, FlowError, FlowGraph, FlowRuntime, FlowSnapshot, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -130,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 1: RawRecord → NormalisedRecord
     match runtime.next(ctx.clone()).await? {
-        RunOut::Continue => println!("[phase A] step 1 complete"),
+        FlowStep::Continue => println!("[phase A] step 1 complete"),
         other => panic!("unexpected: {other:?}"),
     }
 
@@ -147,15 +147,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         match restored.next(ctx.clone()).await? {
-            RunOut::Continue => {}
-            RunOut::Done(record) => {
+            FlowStep::Continue => {}
+            FlowStep::Done(record) => {
                 println!("\n=== Done ===\n{}", record.report);
 
                 // Clean up the temporary snapshot file.
                 let _ = fs::remove_file(snapshot_path());
                 break;
             }
-            RunOut::Suspend { value, tool_id } => {
+            FlowStep::Suspend { value, tool_id } => {
                 eprintln!("Unexpected suspension at '{tool_id}': {value}");
                 break;
             }

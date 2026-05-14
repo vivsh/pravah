@@ -23,7 +23,7 @@
 //! GEMINI_API_KEY=<key> cargo run --example fork_join
 //! ```
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, RunOut};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -157,14 +157,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         match runtime.next(ctx.clone()).await? {
-            RunOut::Continue => {}
-            RunOut::Done(report) => {
+            FlowStep::Continue => {}
+            FlowStep::Done(report) => {
                 println!("## Research\n{}\n", report.research);
                 println!("## Design\n{}\n", report.design);
                 println!("## Recommendation\n{}", report.recommendation);
                 break;
             }
-            RunOut::Suspend { value, tool_id } => {
+            FlowStep::Suspend { value, tool_id } => {
                 eprintln!("Unexpected suspension at '{tool_id}': {value}");
                 break;
             }

@@ -3,13 +3,17 @@ pub mod flows;
 mod errors;
 mod history;
 mod phase;
-mod vm;
 mod state;
-#[cfg(test)]
-mod tests;
+mod runtime;
+mod interner;
+mod validation;
+
 pub use crate::clients::ClientFactory;
 pub use crate::commons::{Agent, AgentConfig};
 pub use crate::context::Context;
 pub use diagram::FlowGraphDiagram;
-pub use flows::{Flow, FlowBuilder, FlowError, FlowGraph, FlowRuntime, FlowSnapshot, RunOut};
+pub use errors::FlowError;
+pub use flows::{Flow, FlowBuilder, FlowGraph, FlowStep};
+pub use interner::NodeId;
+pub use runtime::{FlowRuntime, FlowSnapshot};
 pub use history::FlowHistory;
