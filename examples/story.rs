@@ -182,9 +182,8 @@ struct FinalSummary {
 /// Fans out one `StoryTurn` into four independent branches in a single step.
 fn split_crew(
     turn: StoryTurn,
-    _ctx: Context,
-) -> Result<(ChoreographerBrief, DialogueBrief, CinematographerBrief, TurnCarry), FlowError> {
-    Ok((
+) -> (ChoreographerBrief, DialogueBrief, CinematographerBrief, TurnCarry) {
+    (
         ChoreographerBrief {
             panel_number: turn.panel_number,
             recap: turn.recap.clone(),
@@ -201,11 +200,11 @@ fn split_crew(
             direction: turn.direction,
         },
         TurnCarry { panel_number: turn.panel_number, recap: turn.recap },
-    ))
+    )
 }
 
-fn split4(notes: AllNotes, _ctx: Context) -> Result<(DirectorBrief, DirectorCarry), FlowError> {
-    Ok((
+fn split4(notes: AllNotes) -> (DirectorBrief, DirectorCarry) {
+    (
         DirectorBrief {
             panel_number: notes.panel_number,
             recap: notes.recap.clone(),
@@ -220,7 +219,7 @@ fn split4(notes: AllNotes, _ctx: Context) -> Result<(DirectorBrief, DirectorCarr
             dialogue: notes.dialogue,
             cinema: notes.cinema,
         },
-    ))
+    )
 }
 
 // ── Merge handlers ───────────────────────────────────────────────────────────
@@ -228,29 +227,27 @@ fn split4(notes: AllNotes, _ctx: Context) -> Result<(DirectorBrief, DirectorCarr
 /// Collects all three specialist outputs and the carry in a single step.
 fn merge_all_notes(
     (choreo, dialogue, cinema, carry): (ChoreoNotes, DialogueNotes, CinemaNote, TurnCarry),
-    _ctx: Context,
-) -> Result<AllNotes, FlowError> {
-    Ok(AllNotes {
+) -> AllNotes {
+    AllNotes {
         choreo,
         dialogue,
         cinema,
         panel_number: carry.panel_number,
         recap: carry.recap,
-    })
+    }
 }
 
 fn merge_director(
     (panel, carry): (ComicPanel, DirectorCarry),
-    _ctx: Context,
-) -> Result<DirectorPanel, FlowError> {
-    Ok(DirectorPanel {
+) -> DirectorPanel {
+    DirectorPanel {
         panel_number: carry.panel_number,
         recap: carry.recap,
         panel,
         choreo: carry.choreo,
         dialogue: carry.dialogue,
         cinema: carry.cinema,
-    })
+    }
 }
 
 // ── Specialist agents ─────────────────────────────────────────────────────────
@@ -399,10 +396,9 @@ async fn print_and_read(dp: DirectorPanel, _ctx: Context) -> Result<UserInput, F
 
 fn route_input(
     input: UserInput,
-    _ctx: Context,
-) -> Result<Either<StoryTurn, FinalSummary>, FlowError> {
+) -> Either<StoryTurn, FinalSummary> {
     if input.direction.eq_ignore_ascii_case("exit") {
-        return Ok(Either::Right(FinalSummary { panels_written: input.panel_number }));
+        return Either::Right(FinalSummary { panels_written: input.panel_number });
     }
 
     let dialogue_text = if input.panel.dialogues.is_empty() {
@@ -447,11 +443,11 @@ fn route_input(
         input.direction
     };
 
-    Ok(Either::Left(StoryTurn {
+    Either::Left(StoryTurn {
         panel_number: input.panel_number + 1,
         recap,
         direction,
-    }))
+    })
 }
 
 // ── Flow ──────────────────────────────────────────────────────────────────────

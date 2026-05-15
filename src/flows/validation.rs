@@ -71,6 +71,22 @@ pub fn validate_nodes(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> R
                     ));
                 }
             }
+            FlowNode::Map(info) => {
+                if info.exit_name == info.name {
+                    problems.push(format!(
+                        "map '{}': exit_name equals input name — node would overwrite its own input",
+                        key_str
+                    ));
+                }
+            }
+            FlowNode::Suspend(info) => {
+                if info.entry == info.exit {
+                    problems.push(format!(
+                        "suspend '{}': entry equals exit — node would overwrite its own input",
+                        key_str
+                    ));
+                }
+            }
             FlowNode::Fork(info) => {
                 if info.children.len() < 2 {
                     problems.push(format!(
@@ -235,6 +251,8 @@ pub fn validate(
                 let succs: Vec<NodeId> = match node {
                     FlowNode::Agent(info) => vec![info.exit],
                     FlowNode::Work(info) => vec![info.exit_name],
+                    FlowNode::Map(info) => vec![info.exit_name],
+                    FlowNode::Suspend(info) => vec![info.exit],
                     FlowNode::Fork(info) => info.children.clone(),
                     FlowNode::Join(info) => vec![info.target],
                     FlowNode::Either(info) => vec![info.left_name, info.right_name],

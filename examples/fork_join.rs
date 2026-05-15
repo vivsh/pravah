@@ -101,27 +101,25 @@ impl Agent for DesignRequest {
 
 fn split_project(
     req: ProjectRequest,
-    _ctx: Context,
-) -> Result<(ResearchRequest, DesignRequest), FlowError> {
-    Ok((
+) -> (ResearchRequest, DesignRequest) {
+    (
         ResearchRequest { topic: req.title },
         DesignRequest { feature: req.description },
-    ))
+    )
 }
 
 fn merge_reports(
     research: ResearchFindings,
     design: DesignProposal,
-    _ctx: Context,
-) -> Result<FinalReport, FlowError> {
-    Ok(FinalReport {
+) -> FinalReport {
+    FinalReport {
         research: research.summary,
         design: design.approach,
         recommendation: format!(
             "Proceed with design. Key trade-offs: {}",
             design.trade_offs.join("; ")
         ),
-    })
+    }
 }
 
 // ── Flow ──────────────────────────────────────────────────────────────────────

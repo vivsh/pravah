@@ -132,23 +132,22 @@ impl Agent for DebateDraft {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-fn split_claim(input: DebateInput, _ctx: Context) -> Result<(ProRequest, ConRequest), FlowError> {
-    Ok((
+fn split_claim(input: DebateInput) -> (ProRequest, ConRequest) {
+    (
         ProRequest { claim: input.claim.clone() },
         ConRequest { claim: input.claim },
-    ))
+    )
 }
 
 fn merge_arguments(
     pro: ProArguments,
     con: ConArguments,
-    _ctx: Context,
-) -> Result<DebateDraft, FlowError> {
-    Ok(DebateDraft {
+) -> DebateDraft {
+    DebateDraft {
         claim: pro.claim,
         pro_points: pro.points,
         con_points: con.points,
-    })
+    }
 }
 
 async fn format_verdict(verdict: DebateVerdict, _ctx: Context) -> Result<DebateReport, FlowError> {

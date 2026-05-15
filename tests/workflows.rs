@@ -113,11 +113,11 @@ async fn even_to_out(n: EvenBranch, _c: Context) -> Result<EitherOut, FlowError>
 async fn odd_to_out(n: OddBranch, _c: Context) -> Result<EitherOut, FlowError> {
     Ok(EitherOut(format!("odd:{}", n.0)))
 }
-fn route_even_odd(i: EitherIn, _c: Context) -> Result<Either<EvenBranch, OddBranch>, FlowError> {
+fn route_even_odd(i: EitherIn) -> Either<EvenBranch, OddBranch> {
     if i.value % 2 == 0 {
-        Ok(Either::Left(EvenBranch(i.value)))
+        Either::Left(EvenBranch(i.value))
     } else {
-        Ok(Either::Right(OddBranch(i.value)))
+        Either::Right(OddBranch(i.value))
     }
 }
 
@@ -168,11 +168,11 @@ struct PreRouteOut(String);
 async fn normalize(n: PreRouteIn, _c: Context) -> Result<PreRouteNorm, FlowError> {
     Ok(PreRouteNorm(n.0 * 2))
 }
-fn route_sign(n: PreRouteNorm, _c: Context) -> Result<Either<PosBranch, NegBranch>, FlowError> {
+fn route_sign(n: PreRouteNorm) -> Either<PosBranch, NegBranch> {
     if n.0 >= 0 {
-        Ok(Either::Left(PosBranch(n.0)))
+        Either::Left(PosBranch(n.0))
     } else {
-        Ok(Either::Right(NegBranch(n.0)))
+        Either::Right(NegBranch(n.0))
     }
 }
 async fn pos_label(n: PosBranch, _c: Context) -> Result<PreRouteOut, FlowError> {
@@ -224,11 +224,11 @@ struct ForkJoinOut {
     sum: i64,
 }
 
-fn split(i: ForkJoinIn, _c: Context) -> Result<(ForkLeft, ForkRight), FlowError> {
-    Ok((ForkLeft(i.x + 1), ForkRight(i.x * 2)))
+fn split(i: ForkJoinIn) -> (ForkLeft, ForkRight) {
+    (ForkLeft(i.x + 1), ForkRight(i.x * 2))
 }
-fn merge(l: ForkLeft, r: ForkRight, _c: Context) -> Result<ForkJoinOut, FlowError> {
-    Ok(ForkJoinOut { sum: l.0 + r.0 })
+fn merge(l: ForkLeft, r: ForkRight) -> ForkJoinOut {
+    ForkJoinOut { sum: l.0 + r.0 }
 }
 
 impl Flow for ForkJoinIn {
@@ -260,8 +260,8 @@ struct FWJRightDone(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FWJOut(i64);
 
-fn fwj_split(n: FWJIn, _c: Context) -> Result<(FWJLeft, FWJRight), FlowError> {
-    Ok((FWJLeft(n.0), FWJRight(n.0)))
+fn fwj_split(n: FWJIn) -> (FWJLeft, FWJRight) {
+    (FWJLeft(n.0), FWJRight(n.0))
 }
 async fn fwj_left_work(n: FWJLeft, _c: Context) -> Result<FWJLeftDone, FlowError> {
     Ok(FWJLeftDone(n.0 + 100))
@@ -269,8 +269,8 @@ async fn fwj_left_work(n: FWJLeft, _c: Context) -> Result<FWJLeftDone, FlowError
 async fn fwj_right_work(n: FWJRight, _c: Context) -> Result<FWJRightDone, FlowError> {
     Ok(FWJRightDone(n.0 * 100))
 }
-fn fwj_join(l: FWJLeftDone, r: FWJRightDone, _c: Context) -> Result<FWJOut, FlowError> {
-    Ok(FWJOut(l.0 - r.0))
+fn fwj_join(l: FWJLeftDone, r: FWJRightDone) -> FWJOut {
+    FWJOut(l.0 - r.0)
 }
 
 impl Flow for FWJIn {
@@ -310,11 +310,11 @@ struct WFJWOut(i64);
 async fn wfjw_norm(n: WFJWIn, _c: Context) -> Result<WFJWNorm, FlowError> {
     Ok(WFJWNorm(n.0 + 1))
 }
-fn wfjw_split(n: WFJWNorm, _c: Context) -> Result<(WFJWL, WFJWR), FlowError> {
-    Ok((WFJWL(n.0 * 2), WFJWR(n.0 * 3)))
+fn wfjw_split(n: WFJWNorm) -> (WFJWL, WFJWR) {
+    (WFJWL(n.0 * 2), WFJWR(n.0 * 3))
 }
-fn wfjw_join(l: WFJWL, r: WFJWR, _c: Context) -> Result<WFJWMid, FlowError> {
-    Ok(WFJWMid(l.0 + r.0))
+fn wfjw_join(l: WFJWL, r: WFJWR) -> WFJWMid {
+    WFJWMid(l.0 + r.0)
 }
 async fn wfjw_final(n: WFJWMid, _c: Context) -> Result<WFJWOut, FlowError> {
     Ok(WFJWOut(n.0 * 10))
@@ -476,8 +476,8 @@ struct NForkBDone(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct NForkOut(i64);
 
-fn nfork_split(n: NForkIn, _c: Context) -> Result<(NForkA, NForkB), FlowError> {
-    Ok((NForkA(n.0), NForkB(n.0)))
+fn nfork_split(n: NForkIn) -> (NForkA, NForkB) {
+    (NForkA(n.0), NForkB(n.0))
 }
 async fn nfork_a_work(n: NForkA, _c: Context) -> Result<NForkADone, FlowError> {
     Ok(NForkADone(n.0 * 10))
@@ -485,8 +485,8 @@ async fn nfork_a_work(n: NForkA, _c: Context) -> Result<NForkADone, FlowError> {
 async fn nfork_b_work(n: NForkB, _c: Context) -> Result<NForkBDone, FlowError> {
     Ok(NForkBDone(n.0 + 1000))
 }
-fn nfork_join(a: NForkADone, b: NForkBDone, _c: Context) -> Result<NForkOut, FlowError> {
-    Ok(NForkOut(a.0 + b.0))
+fn nfork_join(a: NForkADone, b: NForkBDone) -> NForkOut {
+    NForkOut(a.0 + b.0)
 }
 
 impl Flow for NForkIn {
@@ -656,11 +656,11 @@ struct EFNeg(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct EFOut(String);
 
-fn ef_route(n: EFIn, _c: Context) -> Result<Either<EFPos, EFNeg>, FlowError> {
+fn ef_route(n: EFIn) -> Either<EFPos, EFNeg> {
     if n.0 >= 0 {
-        Ok(Either::Left(EFPos(n.0)))
+        Either::Left(EFPos(n.0))
     } else {
-        Ok(Either::Right(EFNeg(n.0)))
+        Either::Right(EFNeg(n.0))
     }
 }
 async fn ef_pos_work(n: EFPos, _c: Context) -> Result<EFOut, FlowError> {
@@ -736,14 +736,14 @@ struct FEJRightDone(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FEJOut(i64);
 
-fn fej_split(n: FEJIn, _c: Context) -> Result<(FEJLeft, FEJRight), FlowError> {
-    Ok((FEJLeft(n.0), FEJRight(n.0)))
+fn fej_split(n: FEJIn) -> (FEJLeft, FEJRight) {
+    (FEJLeft(n.0), FEJRight(n.0))
 }
-fn fej_route(n: FEJLeft, _c: Context) -> Result<Either<FEJLeftA, FEJLeftB>, FlowError> {
+fn fej_route(n: FEJLeft) -> Either<FEJLeftA, FEJLeftB> {
     if n.0 >= 0 {
-        Ok(Either::Left(FEJLeftA(n.0 + 1)))
+        Either::Left(FEJLeftA(n.0 + 1))
     } else {
-        Ok(Either::Right(FEJLeftB(n.0 - 1)))
+        Either::Right(FEJLeftB(n.0 - 1))
     }
 }
 async fn fej_la_work(n: FEJLeftA, _c: Context) -> Result<FEJLeftDone, FlowError> {
@@ -755,8 +755,8 @@ async fn fej_lb_work(n: FEJLeftB, _c: Context) -> Result<FEJLeftDone, FlowError>
 async fn fej_right_work(n: FEJRight, _c: Context) -> Result<FEJRightDone, FlowError> {
     Ok(FEJRightDone(n.0 + 5))
 }
-fn fej_join(l: FEJLeftDone, r: FEJRightDone, _c: Context) -> Result<FEJOut, FlowError> {
-    Ok(FEJOut(l.0 + r.0))
+fn fej_join(l: FEJLeftDone, r: FEJRightDone) -> FEJOut {
+    FEJOut(l.0 + r.0)
 }
 
 impl Flow for FEJIn {
@@ -874,13 +874,11 @@ struct ErrRight(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ErrRouteOut(i64);
 
-fn err_route(n: ErrRouteIn, _c: Context) -> Result<Either<ErrLeft, ErrRight>, FlowError> {
-    if n.0 == 999 {
-        Err(FlowError::Internal { handler: "test", detail: "route error".into() })
-    } else if n.0 >= 0 {
-        Ok(Either::Left(ErrLeft(n.0)))
+fn err_route(n: ErrRouteIn) -> Either<ErrLeft, ErrRight> {
+    if n.0 >= 0 {
+        Either::Left(ErrLeft(n.0))
     } else {
-        Ok(Either::Right(ErrRight(n.0)))
+        Either::Right(ErrRight(n.0))
     }
 }
 async fn err_left(n: ErrLeft, _c: Context) -> Result<ErrRouteOut, FlowError> {
@@ -901,11 +899,11 @@ impl Flow for ErrRouteIn {
     }
 }
 
-/// Either routing closure returning an error propagates out of next().
+/// Either is now infallible; this test confirms success on input 999.
 #[tokio::test]
 async fn test_either_routing_error_propagates() {
-    let mut rt = FlowRuntime::new(ErrRouteIn(999)).unwrap();
-    assert!(rt.next(ctx()).await.is_err());
+    let out = run_to_done(FlowRuntime::new(ErrRouteIn(999)).unwrap()).await;
+    assert_eq!(out.0, 999);
 }
 
 /// Either routing that succeeds completes normally.
@@ -928,11 +926,11 @@ struct FJWJoined(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FJWOut(i64);
 
-fn fjw_split(n: FJWIn, _c: Context) -> Result<(FJWLeft, FJWRight), FlowError> {
-    Ok((FJWLeft(n.0), FJWRight(n.0)))
+fn fjw_split(n: FJWIn) -> (FJWLeft, FJWRight) {
+    (FJWLeft(n.0), FJWRight(n.0))
 }
-fn fjw_join(l: FJWLeft, r: FJWRight, _c: Context) -> Result<FJWJoined, FlowError> {
-    Ok(FJWJoined(l.0 * r.0))
+fn fjw_join(l: FJWLeft, r: FJWRight) -> FJWJoined {
+    FJWJoined(l.0 * r.0)
 }
 async fn fjw_post(n: FJWJoined, _c: Context) -> Result<FJWOut, FlowError> {
     Ok(FJWOut(n.0 + 1000))
@@ -996,15 +994,12 @@ struct ForkErrR(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ForkErrOut(i64);
 
-fn fork_err_split(n: ForkErrIn, _c: Context) -> Result<(ForkErrL, ForkErrR), FlowError> {
-    if n.0 {
-        Err(FlowError::Internal { handler: "test", detail: "fork error".into() })
-    } else {
-        Ok((ForkErrL(1), ForkErrR(2)))
-    }
+fn fork_err_split(n: ForkErrIn) -> (ForkErrL, ForkErrR) {
+    let _ = n;
+    (ForkErrL(1), ForkErrR(2))
 }
-fn fork_err_join(l: ForkErrL, r: ForkErrR, _c: Context) -> Result<ForkErrOut, FlowError> {
-    Ok(ForkErrOut(l.0 + r.0))
+fn fork_err_join(l: ForkErrL, r: ForkErrR) -> ForkErrOut {
+    ForkErrOut(l.0 + r.0)
 }
 
 impl Flow for ForkErrIn {
@@ -1014,11 +1009,11 @@ impl Flow for ForkErrIn {
     }
 }
 
-/// Fork closure returning an error propagates out of next().
+/// Fork and join are now infallible; this test confirms the happy path works.
 #[tokio::test]
 async fn test_fork_error_propagates() {
-    let mut rt = FlowRuntime::new(ForkErrIn(true)).unwrap();
-    assert!(rt.next(ctx()).await.is_err());
+    let out = run_to_done(FlowRuntime::new(ForkErrIn(false)).unwrap()).await;
+    assert_eq!(out.0, 3);
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -1032,15 +1027,11 @@ struct JoinErrR(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct JoinErrOut(i64);
 
-fn join_split(n: JoinErrIn, _c: Context) -> Result<(JoinErrL, JoinErrR), FlowError> {
-    Ok((JoinErrL(if n.fail { 0 } else { 1 }), JoinErrR(2)))
+fn join_split(n: JoinErrIn) -> (JoinErrL, JoinErrR) {
+    (JoinErrL(if n.fail { 0 } else { 1 }), JoinErrR(2))
 }
-fn join_err_merge(l: JoinErrL, r: JoinErrR, _c: Context) -> Result<JoinErrOut, FlowError> {
-    if l.0 == 0 {
-        Err(FlowError::Internal { handler: "test", detail: "join error".into() })
-    } else {
-        Ok(JoinErrOut(l.0 + r.0))
-    }
+fn join_err_merge(l: JoinErrL, r: JoinErrR) -> JoinErrOut {
+    JoinErrOut(l.0 + r.0)
 }
 
 impl Flow for JoinErrIn {
@@ -1050,20 +1041,11 @@ impl Flow for JoinErrIn {
     }
 }
 
-/// Join closure returning an error propagates out of next().
+/// Join is now infallible; this test confirms the happy path works.
 #[tokio::test]
 async fn test_join_error_propagates() {
-    let mut rt = FlowRuntime::new(JoinErrIn { fail: true }).unwrap();
-    rt.next(ctx()).await.unwrap(); // fork step
-    let result = loop {
-        match rt.next(ctx()).await {
-            Ok(FlowStep::Continue) => {}
-            Ok(FlowStep::Done(_)) => break Ok(()),
-            Ok(FlowStep::Suspend(_)) => panic!(),
-            Err(e) => break Err(e),
-        }
-    };
-    assert!(result.is_err());
+    let out = run_to_done(FlowRuntime::new(JoinErrIn { fail: false }).unwrap()).await;
+    assert_eq!(out.0, 3);
 }
 
 // ─── large values ────────────────────────────────────────────────────────────

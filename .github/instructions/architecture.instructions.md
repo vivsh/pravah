@@ -45,17 +45,21 @@ Tool node keys are interned as `"{agent_name}::{tool_name}"` to avoid collisions
 
 `FlowGraph.nodes: HashMap<NodeId, FlowNode>` stores every node. `FlowNode` variants:
 
-| Variant  | Dispatch model                | State transition                                                         |
-| -------- | ----------------------------- | ------------------------------------------------------------------------ |
-| `Work`   | async closure                 | removes `name`, inserts `exit_name`                                      |
-| `Agent`  | multi-step (see below)        | see Agent Dispatch                                                       |
-| `Tool`   | async, driven by parent agent | removes `name`, or exits agent frame                                     |
-| `Either` | sync closure                  | removes `name`, inserts one of `left_name`/`right_name` (cycles allowed) |
-| `Fork`   | sync closure                  | removes `name`, inserts all children                                     |
-| `Join`   | sync closure                  | fires only when all parents present; removes parents, inserts `target`   |
-| `Flow`   | pushes child frame            | transfers entry value via `call_enter`                                   |
+| Variant   | Dispatch model                               | State transition                                                         |
+| --------- | -------------------------------------------- | ------------------------------------------------------------------------ |
+| `Work`    | async closure                                | removes `name`, inserts `exit_name`                                      |
+| `Agent`   | multi-step (see below)                       | see Agent Dispatch                                                       |
+| `Tool`    | async, driven by parent agent                | removes `name`, or exits agent frame                                     |
+| `Map`     | infallible sync `fn(&Value)->Value`          | removes `name`, inserts `exit_name`                                      |
+| `Either`  | infallible sync `fn(&Value)->(NodeId,Value)` | removes `name`, inserts one of `left_name`/`right_name` (cycles allowed) |
+| `Fork`    | infallible sync `fn(&Value)->Vec<StateNode>` | removes `name`, inserts all children                                     |
+| `Join`    | infallible sync `fn(&[Value])->StateNode`    | fires only when all parents present; removes parents, inserts `target`   |
+| `Suspend` | no closure — pauses the frame                | records `Suspension{src,dst}`; returns `FlowStep::Suspend(sv)`           |
+| `Flow`    | pushes child frame                           | transfers entry value via `call_enter`                                   |
 
 `Fork` and `Join` serve both the binary `fork`/`join` builder methods and the N-ary `split`/`merge` methods. `split` produces a `Fork` node whose `children` vec has N entries (arity 2–16); `merge` produces N `Join` nodes (one per parent key) that share the same `Arc`-ed shim and `target`. No new `FlowNode` variants are needed.
+
+`Map`, `Either`, `Fork`, and `Join` are **pure algebra nodes**: their shims are `fn(&Value) -> …` with no `Context` argument and no `Result` wrapper beyond serialization errors. Any handler returning a user error must use `Work` or `Agent` instead.
 
 Edges are **implicit**: each node writes the key its successor reads. There are no explicit edge structures. The graph supports cycles — an `Either` node can write a key that was already consumed earlier in the same flow, enabling retry loops and multi-turn conversations. Validation checks reachability and type contracts but does not forbid cycles.
 
@@ -104,12 +108,25 @@ Called at the end of every `FlowGraph::step` that returns `Continue`. Loops `han
 
 ### Suspension
 
+There are two suspension sources:
+
+**Tool-level** (`ToolError::Suspend` from `handle_tool`)
+
 `FlowState.suspension: Option<Suspension>` stores `{ src: NodeId, dst: NodeId }`. When a tool suspends:
 
 - `src = tool node key` — holds the original `ToolCall` JSON for history reconstruction on resume
 - `dst = agent node key` — where the resumed value lands, triggering `handle_child_agent`
 
-`states.resume(value)` removes `src`, inserts `dst = value`, clears suspension.
+**Flow-level** (`FlowNode::Suspend` from `handle_suspend`)
+
+When `step_inner` hits a `Suspend` node:
+
+1. Reads the input value from `info.entry`.
+2. Deserializes it into a `SuspendedValue` via the baked-in `deserialize` closure.
+3. Calls `states.suspend(info.entry, info.exit, info.output_type)` — records `Suspension { src: entry, dst: exit }`.
+4. Returns `FlowStep::Suspend(sv)`.
+
+In both cases `states.resume(value)` removes `src`, inserts `dst = value`, clears suspension, and execution continues from the exit node.
 
 ---
 
@@ -371,9 +388,9 @@ after each next() / resume():
 
 Two passes, both run at build time:
 
-1. **`validate_nodes`** — per-node structural rules. No entry point needed. Catches: agent `exit == id`, work `exit == name`, fork < 2 children, fork/join referencing unregistered nodes, join ≠ 2 parents, either `left == right`, sub-flow missing `parent_entry`.
+1. **`validate_nodes`** — per-node structural rules. No entry point needed. Catches: agent `exit == id`, work `exit == name`, map `exit == name`, fork < 2 children, fork/join referencing unregistered nodes, join ≠ 2 parents, either `left == right`, sub-flow missing `parent_entry`, suspend `entry == exit`.
 
-2. **`validate`** — called by `with_entry` after an entry is designated. Runs forward reachability (BFS from entry) and backward liveness (BFS from terminals toward entry). A node is invalid if it cannot be reached from entry, or if it has no path to any terminal.
+2. **`validate`** — called by `with_entry` after an entry is designated. Runs forward reachability (BFS from entry) and backward liveness (BFS from terminals toward entry). A node is invalid if it cannot be reached from entry, or if it has no path to any terminal. `Map` successor is `exit_name`; `Suspend` successor is `exit`.
 
 **Implication for runtime**: if both passes succeed, every state key that ends up in a frame's state map is either a registered node key or the frame's exit key. A frame where `step_inner` falls through (no dispatch) and `call_exit` also returns `None` is a structural impossibility with a validated graph — not a detectable runtime condition.
 

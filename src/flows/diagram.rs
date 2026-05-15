@@ -27,9 +27,13 @@ use super::flows::Flow;
 pub enum DiagramNodeKind {
     Agent,
     Work,
+    /// Pure synchronous transform: `fn(I) -> O`.
+    Map,
     Fork,
     Join,
     Either,
+    /// Flow-level suspend point.
+    Suspend,
     /// An embedded sub-flow node.
     Flow,
     /// A node that is the target of an edge but has no definition in the graph
@@ -42,9 +46,11 @@ impl DiagramNodeKind {
         match self {
             Self::Agent => "agent",
             Self::Work => "work",
+            Self::Map => "map",
             Self::Fork => "fork",
             Self::Join => "join",
             Self::Either => "either",
+            Self::Suspend => "suspend",
             Self::Flow => "flow",
             Self::Terminal => "terminal",
         }
@@ -128,7 +134,7 @@ impl FlowGraphDiagram {
             let safe_id = mermaid_id(&node.id);
             let decl = match node.kind {
                 // Rectangle with label + kind
-                DiagramNodeKind::Agent | DiagramNodeKind::Work => {
+                DiagramNodeKind::Agent | DiagramNodeKind::Work | DiagramNodeKind::Map => {
                     format!(
                         "    {}[\"{} ({})\"]",
                         safe_id,
@@ -143,6 +149,14 @@ impl FlowGraphDiagram {
                         safe_id,
                         node.id,
                         node.kind.label_suffix()
+                    )
+                }
+                // Hexagon for suspend
+                DiagramNodeKind::Suspend => {
+                    format!(
+                        "    {}{{{{\"{}  (suspend)\"}}}}",
+                        safe_id,
+                        node.id
                     )
                 }
                 // Stadium for join / terminal
@@ -193,7 +207,7 @@ impl FlowGraphDiagram {
         for node in &self.nodes {
             let safe_id = dot_id(&node.id);
             let attrs = match node.kind {
-                DiagramNodeKind::Agent | DiagramNodeKind::Work => format!(
+                DiagramNodeKind::Agent | DiagramNodeKind::Work | DiagramNodeKind::Map => format!(
                     "label=\"{}\\n({})\" shape=box style=rounded",
                     node.id,
                     node.kind.label_suffix()
@@ -203,6 +217,9 @@ impl FlowGraphDiagram {
                     node.id,
                     node.kind.label_suffix()
                 ),
+                DiagramNodeKind::Suspend => {
+                    format!("label=\"{}\\n(suspend)\" shape=hexagon", node.id)
+                }
                 DiagramNodeKind::Join => {
                     format!("label=\"{}\\n(join)\" shape=ellipse", node.id)
                 }
@@ -328,9 +345,11 @@ fn tree_write_node(
     let kind_tag = match node_kind.get(id).copied() {
         Some(DiagramNodeKind::Agent) => " (agent)",
         Some(DiagramNodeKind::Work) => " (work)",
+        Some(DiagramNodeKind::Map) => " (map)",
         Some(DiagramNodeKind::Fork) => " (fork)",
         Some(DiagramNodeKind::Join) => " (join)",
         Some(DiagramNodeKind::Either) => " (either)",
+        Some(DiagramNodeKind::Suspend) => " (suspend)",
         Some(DiagramNodeKind::Flow) => " (flow)",
         Some(DiagramNodeKind::Terminal) => " ◉",
         None => "",
@@ -455,6 +474,14 @@ fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
                 FlowNode::Work(info) => (
                     DiagramNodeKind::Work,
                     vec![(graph.interner.name_of(info.exit_name).to_string(), "work")],
+                ),
+                FlowNode::Map(info) => (
+                    DiagramNodeKind::Map,
+                    vec![(graph.interner.name_of(info.exit_name).to_string(), "map")],
+                ),
+                FlowNode::Suspend(info) => (
+                    DiagramNodeKind::Suspend,
+                    vec![(graph.interner.name_of(info.exit).to_string(), "suspend")],
                 ),
                 FlowNode::Fork(info) => (
                     DiagramNodeKind::Fork,

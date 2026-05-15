@@ -57,19 +57,19 @@ pub(crate) struct EitherInfo {
     pub(crate) entry: NodeId,
     pub(crate) left_name: NodeId,
     pub(crate) right_name: NodeId,
-    func: Box<dyn Fn(&Value, Context) -> Result<(NodeId, Value), FlowError> + Send + Sync>,
+    func: Box<dyn Fn(&Value) -> Result<(NodeId, Value), FlowError> + Send + Sync>,
 }
 
 pub(crate) struct ForkInfo {
     pub(crate) name: NodeId,
     pub(crate) children: Vec<NodeId>,
-    func: Box<dyn Fn(&Value, Context) -> Result<Vec<StateNode>, FlowError> + Send + Sync>,
+    func: Box<dyn Fn(&Value) -> Result<Vec<StateNode>, FlowError> + Send + Sync>,
 }
 
 pub(crate) struct JoinInfo {
     pub(crate) parents: Vec<NodeId>,
     pub(crate) target: NodeId,
-    func: Arc<dyn Fn(&[Value], Context) -> Result<StateNode, FlowError> + Send + Sync>,
+    func: Arc<dyn Fn(&[Value]) -> Result<StateNode, FlowError> + Send + Sync>,
 }
 
 pub(crate) struct WorkInfo {
@@ -77,6 +77,26 @@ pub(crate) struct WorkInfo {
     pub(crate) exit_name: NodeId,
     func:
         Box<dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, FlowError>> + Send + Sync>,
+}
+
+/// A pure synchronous transformation node: `fn(I) -> O`.
+/// No context, no error path — if it needs I/O or can fail, use `work`.
+pub(crate) struct MapInfo {
+    pub(crate) name: NodeId,
+    pub(crate) exit_name: NodeId,
+    func: Box<dyn Fn(&Value) -> Result<Value, FlowError> + Send + Sync>,
+}
+
+/// A flow-level suspend node. When `I` is present in state the flow pauses
+/// and surfaces a [`SuspendedValue`]. On resume a value of type `O` is written
+/// to state under `exit`.
+pub(crate) struct SuspendInfo {
+    pub(crate) entry: NodeId,
+    pub(crate) exit: NodeId,
+    pub(crate) output_type: String,
+    /// Deserialises the raw [`Value`] from state into a type-erased [`SuspendedValue`]
+    /// so the caller can downcast it to `I`.
+    deserialize: Box<dyn Fn(Value) -> Result<SuspendedValue, serde_json::Error> + Send + Sync>,
 }
 
 /// Constructs a typed [`StateNode`] from an [`Agent`] input value.
@@ -95,6 +115,10 @@ pub(crate) enum FlowNode {
     Fork(ForkInfo),
     Join(JoinInfo),
     Work(WorkInfo),
+    /// Pure synchronous infallible transform: `fn(I) -> O`.
+    Map(MapInfo),
+    /// Flow-level suspend point: pauses when `I` is in state, resumes with `O`.
+    Suspend(SuspendInfo),
     /// An embedded sub-flow. Boxed to break the recursive type-size cycle.
     Flow(Arc<FlowGraph>),
     /// A single tool dispatched by a parent agent. Not statically reachable from the
@@ -245,7 +269,7 @@ impl FlowGraph {
         Ok(())
     }
 
-    fn handle_fork(node: &ForkInfo, ctx: Context, states: &mut FlowState) -> Result<(), FlowError> {
+    fn handle_fork(node: &ForkInfo, states: &mut FlowState) -> Result<(), FlowError> {
         let state = states.get_state(node.name).ok_or_else(|| {
             FlowError::NotFound(format!(
                 "fork parent '{}' has not produced a value",
@@ -253,7 +277,7 @@ impl FlowGraph {
             ))
         })?;
 
-        let children = (node.func)(state, ctx)?;
+        let children = (node.func)(state)?;
         if children.len() != node.children.len() {
             return Err(BuildError::ChildCountMismatch(format!(
                 "fork node '{}' produced {} child states but has {} child nodes",
@@ -281,7 +305,7 @@ impl FlowGraph {
         Ok(())
     }
 
-    fn handle_join(node: &JoinInfo, ctx: Context, states: &mut FlowState) -> Result<(), FlowError> {
+    fn handle_join(node: &JoinInfo, states: &mut FlowState) -> Result<(), FlowError> {
         let mut inputs = Vec::with_capacity(node.parents.len());
         for &p in &node.parents {
             let value = states.get_state(p).ok_or_else(|| {
@@ -289,7 +313,7 @@ impl FlowGraph {
             })?;
             inputs.push(value.clone());
         }
-        let output = (node.func)(&inputs, ctx)?;
+        let output = (node.func)(&inputs)?;
         if !states.set_state(node.target, output.value, None) {
             return Err(FlowError::Internal {
                 handler: "handle_join",
@@ -311,7 +335,6 @@ impl FlowGraph {
 
     fn handle_either(
         either: &EitherInfo,
-        ctx: Context,
         states: &mut FlowState,
     ) -> Result<(), FlowError> {
         let state = states.get_state(either.entry).ok_or_else(|| {
@@ -320,7 +343,7 @@ impl FlowGraph {
                 either.entry.0
             ))
         })?;
-        let (out_id, out_val) = (either.func)(&state, ctx)?;
+        let (out_id, out_val) = (either.func)(&state)?;
         if !states.set_state(out_id, out_val, Some(either.entry)) {
             return Err(FlowError::Internal {
                 handler: "handle_either",
@@ -328,6 +351,38 @@ impl FlowGraph {
             });
         }
         Ok(())
+    }
+
+    fn handle_map(node: &MapInfo, states: &mut FlowState) -> Result<(), FlowError> {
+        let state = states.get_state(node.name).ok_or_else(|| {
+            FlowError::NotFound(format!(
+                "map node '{}' has not produced a value",
+                node.name.0
+            ))
+        })?;
+        let output = (node.func)(&state)?;
+        if !states.set_state(node.exit_name, output, Some(node.name)) {
+            return Err(FlowError::Internal {
+                handler: "handle_map",
+                detail: "frame stack empty on set_state".into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn handle_suspend(info: &SuspendInfo, states: &mut FlowState) -> Result<FlowStep, FlowError> {
+        let value = states
+            .get_state(info.entry)
+            .ok_or_else(|| {
+                FlowError::NotFound(format!(
+                    "suspend node '{}': input state missing",
+                    info.entry.0
+                ))
+            })?
+            .clone();
+        let sv = (info.deserialize)(value).map_err(FlowError::Deserialize)?;
+        states.suspend(info.entry, info.exit, info.output_type.clone());
+        Ok(FlowStep::Suspend(sv))
     }
 
     /// Injects the entry point and runs full graph validation (entry + reachability).
@@ -804,23 +859,30 @@ impl FlowGraph {
                     return Self::handle_tool(info, self, ctx,  states).await;
                 }
                 FlowNode::Either(either) => {
-                    Self::handle_either(either, ctx, states)?;
+                    Self::handle_either(either, states)?;
                     return Ok(FlowStep::Continue);
                 }
                 FlowNode::Fork(info) => {
-                    Self::handle_fork(info, ctx, states)?;
+                    Self::handle_fork(info, states)?;
                     return Ok(FlowStep::Continue);
                 }
                 FlowNode::Join(info) => {
                     if !self.can_join(current_node_id, states) {
                         continue;
                     }
-                    Self::handle_join(info, ctx, states)?;
+                    Self::handle_join(info, states)?;
                     return Ok(FlowStep::Continue);
                 }
                 FlowNode::Work(info) => {
                     Self::handle_work(info, ctx, states).await?;
                     return Ok(FlowStep::Continue);
+                }
+                FlowNode::Map(info) => {
+                    Self::handle_map(info, states)?;
+                    return Ok(FlowStep::Continue);
+                }
+                FlowNode::Suspend(info) => {
+                    return Self::handle_suspend(info, states);
                 }
                 FlowNode::Flow(inner) => {
                     let parent_exit = inner.parent_exit.ok_or_else(|| FlowError::Internal {
@@ -979,14 +1041,15 @@ impl FlowBuilder {
         self
     }
 
-    /// Registers a typed transition from `From`. The closure receives `From::Output`
-    /// deserialized from stored JSON and a `&FlowContext`, and returns a [`StateNode`] — use [`node()`].
+    /// Registers a routing node at `From`. The closure receives `From` and returns
+    /// `Either<A, B>` — a pure infallible branch decision. No context is available;
+    /// if the routing needs I/O or can fail, use a `work` node before it.
     pub fn either<From, A, B, H>(mut self, func: H) -> Self
     where
         From: Serialize + DeserializeOwned + JsonSchema,
         A: 'static + Serialize + DeserializeOwned + JsonSchema,
         B: 'static + Serialize + DeserializeOwned + JsonSchema,
-        H: Fn(From, Context) -> Result<Either<A, B>, FlowError> + Send + Sync + 'static,
+        H: Fn(From) -> Either<A, B> + Send + Sync + 'static,
     {
         let from_id_str = From::schema_name();
         let from_id = self.flow.interner.intern(&from_id_str);
@@ -997,11 +1060,11 @@ impl FlowBuilder {
         }
         let left_name = self.flow.interner.intern(&A::schema_name());
         let right_name = self.flow.interner.intern(&B::schema_name());
-        let shim: Box<dyn Fn(&Value, Context) -> Result<(NodeId, Value), FlowError> + Send + Sync> =
-            Box::new(move |value: &Value, ctx: Context| {
+        let shim: Box<dyn Fn(&Value) -> Result<(NodeId, Value), FlowError> + Send + Sync> =
+            Box::new(move |value: &Value| {
                 let typed: From =
-                    serde_json::from_value(value.clone()).map_err(|e| FlowError::Deserialize(e))?;
-                match func(typed, ctx)? {
+                    serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
+                match func(typed) {
                     Either::Left(a) => {
                         let v = serde_json::to_value(&a).map_err(FlowError::Serialize)?;
                         Ok((left_name, v))
@@ -1025,14 +1088,15 @@ impl FlowBuilder {
         self
     }
 
-    /// Registers a fork node at `From`. The closure receives the parent value and returns two
-    /// child values that are placed into states for independent processing.
+    /// Registers a fork node at `From`. The closure receives the parent value and returns
+    /// two child values placed into state for independent processing. Pure and infallible;
+    /// no context is available.
     pub fn fork<From, A, B, H>(mut self, func: H) -> Self
     where
         From: 'static + Serialize + DeserializeOwned + JsonSchema,
         A: 'static + Serialize + DeserializeOwned + JsonSchema,
         B: 'static + Serialize + DeserializeOwned + JsonSchema,
-        H: Fn(From, Context) -> Result<(A, B), FlowError> + Send + Sync + 'static,
+        H: Fn(From) -> (A, B) + Send + Sync + 'static,
     {
         let from_id_str = From::schema_name();
         let from_id = self.flow.interner.intern(&from_id_str);
@@ -1041,11 +1105,11 @@ impl FlowBuilder {
                 .push(format!("fork '{}': duplicate node key", from_id_str));
             return self;
         }
-        let shim: Box<dyn Fn(&Value, Context) -> Result<Vec<StateNode>, FlowError> + Send + Sync> =
-            Box::new(move |value: &Value, ctx: Context| {
+        let shim: Box<dyn Fn(&Value) -> Result<Vec<StateNode>, FlowError> + Send + Sync> =
+            Box::new(move |value: &Value| {
                 let typed: From =
-                    serde_json::from_value(value.clone()).map_err(|e| FlowError::Deserialize(e))?;
-                let (a, b) = func(typed, ctx)?;
+                    serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
+                let (a, b) = func(typed);
                 Ok(vec![node(a)?, node(b)?])
             });
         let a_child = self.flow.interner.intern(&A::schema_name());
@@ -1062,13 +1126,14 @@ impl FlowBuilder {
     }
 
     /// Registers a join node that waits for both `A` and `B` states to be present,
-    /// combines them into `Out`, and clears the parent states.
+    /// combines them into `Out`, and clears the parent states. Pure and infallible;
+    /// no context is available.
     pub fn join<A, B, Out, H>(mut self, func: H) -> Self
     where
         A: 'static + Serialize + DeserializeOwned + JsonSchema,
         B: 'static + Serialize + DeserializeOwned + JsonSchema,
         Out: 'static + Serialize + DeserializeOwned + JsonSchema,
-        H: Fn(A, B, Context) -> Result<Out, FlowError> + Send + Sync + 'static,
+        H: Fn(A, B) -> Out + Send + Sync + 'static,
     {
         let a_id_str = A::schema_name();
         let b_id_str = B::schema_name();
@@ -1082,13 +1147,13 @@ impl FlowBuilder {
             }
         }
         let target_id = self.flow.interner.intern(&Out::schema_name());
-        let shim: Arc<dyn Fn(&[Value], Context) -> Result<StateNode, FlowError> + Send + Sync> =
-            Arc::new(move |inputs: &[Value], ctx: Context| {
+        let shim: Arc<dyn Fn(&[Value]) -> Result<StateNode, FlowError> + Send + Sync> =
+            Arc::new(move |inputs: &[Value]| {
                 let a: A = serde_json::from_value(inputs[0].clone())
-                    .map_err(|e| FlowError::Deserialize(e))?;
+                    .map_err(FlowError::Deserialize)?;
                 let b: B = serde_json::from_value(inputs[1].clone())
-                    .map_err(|e| FlowError::Deserialize(e))?;
-                node(func(a, b, ctx)?)
+                    .map_err(FlowError::Deserialize)?;
+                node(func(a, b))
             });
         self.flow.nodes.insert(
             a_id,
@@ -1111,12 +1176,13 @@ impl FlowBuilder {
 
     /// Registers a split node at `From` (1→N fan-out). The closure receives the parent
     /// value and returns an N-tuple; each element becomes an independent branch in the
-    /// state map. Supports arities 2–16 via [`SplitOutputs`].
+    /// state map. Supports arities 2–16 via [`SplitOutputs`]. Pure and infallible;
+    /// no context is available.
     pub fn split<From, Out, H>(mut self, func: H) -> Self
     where
         From: 'static + Serialize + DeserializeOwned + JsonSchema,
         Out: SplitOutputs,
-        H: Fn(From, Context) -> Result<Out, FlowError> + Send + Sync + 'static,
+        H: Fn(From) -> Out + Send + Sync + 'static,
     {
         let from_id_str = From::schema_name();
         let from_id = self.flow.interner.intern(&from_id_str);
@@ -1128,11 +1194,11 @@ impl FlowBuilder {
             .into_iter()
             .map(|s| self.flow.interner.intern(&s))
             .collect();
-        let shim: Box<dyn Fn(&Value, Context) -> Result<Vec<StateNode>, FlowError> + Send + Sync> =
-            Box::new(move |value: &Value, ctx: Context| {
+        let shim: Box<dyn Fn(&Value) -> Result<Vec<StateNode>, FlowError> + Send + Sync> =
+            Box::new(move |value: &Value| {
                 let typed: From =
                     serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
-                func(typed, ctx)?.into_nodes()
+                func(typed).into_nodes()
             });
         self.flow.nodes.insert(
             from_id,
@@ -1147,12 +1213,13 @@ impl FlowBuilder {
 
     /// Registers a merge node (N→1 fan-in). Waits until all elements of `In`'s tuple
     /// are present in the state map, passes them as a typed tuple to `func`, and writes
-    /// the result. Supports arities 2–16 via [`MergeInputs`].
+    /// the result. Supports arities 2–16 via [`MergeInputs`]. Pure and infallible;
+    /// no context is available.
     pub fn merge<In, Out, H>(mut self, func: H) -> Self
     where
         In: MergeInputs,
         Out: 'static + Serialize + DeserializeOwned + JsonSchema,
-        H: Fn(In, Context) -> Result<Out, FlowError> + Send + Sync + 'static,
+        H: Fn(In) -> Out + Send + Sync + 'static,
     {
         let parent_names = In::schema_names();
         let parent_ids: Vec<NodeId> = parent_names
@@ -1166,10 +1233,10 @@ impl FlowBuilder {
             }
         }
         let target_id = self.flow.interner.intern(&Out::schema_name());
-        let shim: Arc<dyn Fn(&[Value], Context) -> Result<StateNode, FlowError> + Send + Sync> =
-            Arc::new(move |inputs: &[Value], ctx: Context| {
+        let shim: Arc<dyn Fn(&[Value]) -> Result<StateNode, FlowError> + Send + Sync> =
+            Arc::new(move |inputs: &[Value]| {
                 let typed = In::from_values(inputs)?;
-                node(func(typed, ctx)?)
+                node(func(typed))
             });
         for &pid in &parent_ids {
             self.flow.nodes.insert(
@@ -1259,6 +1326,75 @@ impl FlowBuilder {
                 name: from_id,
                 exit_name: exit_id,
                 func: shim,
+            }),
+        );
+        self
+    }
+
+    /// Registers a pure synchronous transformation node at `From`. The closure
+    /// receives `From` and returns `Out` \u2014 infallible, no context, no async.
+    /// Use `work` instead if the transformation can fail or requires I/O.
+    pub fn map<From, Out, H>(mut self, func: H) -> Self
+    where
+        From: 'static + Serialize + DeserializeOwned + JsonSchema,
+        Out: 'static + Serialize + DeserializeOwned + JsonSchema,
+        H: Fn(From) -> Out + Send + Sync + 'static,
+    {
+        let from_id_str = From::schema_name();
+        let from_id = self.flow.interner.intern(&from_id_str);
+        if self.flow.nodes.contains_key(&from_id) {
+            self.errors
+                .push(format!("map '{}': duplicate node key", from_id_str));
+            return self;
+        }
+        let exit_id = self.flow.interner.intern(&Out::schema_name());
+        let shim: Box<dyn Fn(&Value) -> Result<Value, FlowError> + Send + Sync> =
+            Box::new(move |value: &Value| {
+                let typed: From =
+                    serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
+                let out = func(typed);
+                serde_json::to_value(&out).map_err(FlowError::Serialize)
+            });
+        self.flow.nodes.insert(
+            from_id,
+            FlowNode::Map(MapInfo {
+                name: from_id,
+                exit_name: exit_id,
+                func: shim,
+            }),
+        );
+        self
+    }
+
+    /// Registers a flow-level suspend node. When a value of type `I` is present in
+    /// state the flow pauses and surfaces it as [`FlowStep::Suspend`]. The caller
+    /// resumes by calling [`FlowRuntime::resume`] with a value of type `O`, which is
+    /// written into state under `O`'s schema name and the flow continues from there.
+    pub fn suspend<I, O>(mut self) -> Self
+    where
+        I: 'static + Serialize + DeserializeOwned + JsonSchema + Send,
+        O: 'static + Serialize + DeserializeOwned + JsonSchema,
+    {
+        let entry_str = I::schema_name();
+        let exit_str = O::schema_name();
+        let entry = self.flow.interner.intern(&entry_str);
+        let exit = self.flow.interner.intern(&exit_str);
+        if self.flow.nodes.contains_key(&entry) {
+            self.errors
+                .push(format!("suspend '{}': duplicate node key", entry_str));
+            return self;
+        }
+        let output_type = exit_str.to_string();
+        let deserialize: Box<
+            dyn Fn(Value) -> Result<SuspendedValue, serde_json::Error> + Send + Sync,
+        > = Box::new(|v| serde_json::from_value::<I>(v).map(SuspendedValue::new));
+        self.flow.nodes.insert(
+            entry,
+            FlowNode::Suspend(SuspendInfo {
+                entry,
+                exit,
+                output_type,
+                deserialize,
             }),
         );
         self

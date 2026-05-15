@@ -140,19 +140,18 @@ impl Agent for ReviewedDraft {
 
 // ── Outer flow node handlers ───────────────────────────────────────────────────
 
-fn split_request(req: ArticleRequest, _ctx: Context) -> Result<(ResearchTask, AudienceTask), FlowError> {
-    Ok((
+fn split_request(req: ArticleRequest) -> (ResearchTask, AudienceTask) {
+    (
         ResearchTask { topic: req.topic.clone() },
         AudienceTask { topic: req.topic, format: req.format },
-    ))
+    )
 }
 
 fn merge_findings(
     research: ResearchNotes,
     audience: AudienceProfile,
-    _ctx: Context,
-) -> Result<ContentBrief, FlowError> {
-    Ok(ContentBrief { notes: research.notes, tone: audience.tone, format: audience.reading_level })
+) -> ContentBrief {
+    ContentBrief { notes: research.notes, tone: audience.tone, format: audience.reading_level }
 }
 
 async fn prepare_outline(brief: ContentBrief, _ctx: Context) -> Result<OutlineRequest, FlowError> {
@@ -174,11 +173,11 @@ async fn run_outline_flow(req: OutlineRequest, ctx: Context) -> Result<Outline, 
     }
 }
 
-fn route_draft(outline: Outline, _ctx: Context) -> Result<Either<QuickDraft, LongDraft>, FlowError> {
+fn route_draft(outline: Outline) -> Either<QuickDraft, LongDraft> {
     if outline.format == "quick" || outline.sections.len() <= 3 {
-        Ok(Either::Left(QuickDraft { content: outline.sections.join("\n") }))
+        Either::Left(QuickDraft { content: outline.sections.join("\n") })
     } else {
-        Ok(Either::Right(LongDraft { sections: outline.sections }))
+        Either::Right(LongDraft { sections: outline.sections })
     }
 }
 

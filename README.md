@@ -36,7 +36,7 @@ step of a nested flow.
 
 ```toml
 [dependencies]
-pravah = "0.2"
+pravah = "0.3"
 ```
 
 | Feature              | Default | Description                                                             |
@@ -50,7 +50,7 @@ pravah = "0.2"
 To use only specific providers, disable defaults:
 
 ```toml
-pravah = { version = "0.2", default-features = false, features = ["provider-openai"] }
+pravah = { version = "0.3", default-features = false, features = ["provider-openai"] }
 ```
 
 Model URLs select the backend at runtime: `openai://gpt-4o`,
@@ -155,14 +155,16 @@ serialized, but user code stays typed.
 
 ### Node Types
 
-| Builder method           | What it does                                         |
-| ------------------------ | ---------------------------------------------------- |
-| `agent::<A>()`           | LLM-backed node; structured output or tool loop      |
-| `work::<From, Out>()`    | Deterministic async transform                        |
-| `either::<From, A, B>()` | Routes to one of two typed branches (cycles allowed) |
-| `split::<From, Out>()`   | Fans one value out into N independent branches       |
-| `merge::<In, Out>()`     | Collects N branches once all are ready               |
-| `flow::<F>()`            | Embeds another `Flow` as a node                      |
+| Builder method      | What it does                                                              |
+| ------------------- | ------------------------------------------------------------------------- |
+| `agent::<A>()`      | LLM-backed node; structured output or tool loop                           |
+| `work(f)`           | Effectful async transform; `async fn(I, Context) -> Result<O, FlowError>` |
+| `map(f)`            | Pure sync transform; `fn(I) -> O`, infallible, no `Context`               |
+| `either(f)`         | Routes to one branch; `fn(I) -> Either<A, B>`, infallible (cycles ok)     |
+| `split(f)`          | Fans out to N branches; `fn(I) -> (A, B, ...)`, infallible                |
+| `merge(f)`          | Collects N branches once all ready; `fn(A, B, ...) -> O`, infallible      |
+| `suspend::<I, O>()` | Pauses the flow; caller resumes with a value of type `O`                  |
+| `flow::<F>()`       | Embeds another `Flow` as a node                                           |
 
 `split` and `merge` are the primary fan-out/fan-in primitives. `split` receives
 one typed value and returns an N-tuple; each element becomes an independent branch
@@ -173,6 +175,10 @@ joins. Fan-out/fan-in models information shape, not parallelism — the runner i
 single-threaded.
 
 `fork`/`join` remain available as binary-only aliases for `split`/`merge`.
+
+**Node purity.** `map`, `either`, `split`/`fork`, `merge`/`join` are pure
+algebra nodes: their handlers are plain `fn(I) -> O` with no `Context` argument
+and no `Result` wrapper. Effects and I/O belong in `work` or `agent` nodes.
 
 The builder validates: duplicate node identities, entry not in graph,
 unreachable nodes, no path to a terminal value, invalid split/merge definitions,
@@ -261,12 +267,19 @@ within `working_dir`.
 
 ## Suspend And Resume
 
-A tool returns `Err(ToolError::Suspend)` to pause the flow. The runtime
-surfaces the tool's input args (what the LLM passed to the tool) as the
-suspension `value`. Persist state, show the request to a user, wait for a
-webhook — then call `resume()` with a JSON value to continue. Useful for
-approval gates, missing credentials, payments, or any action needing
-external confirmation.
+There are two ways a flow can suspend:
+
+**Tool-level suspend** — a tool returns `Err(ToolError::Suspend)`. The runtime
+surfaces the tool's input args as the `SuspendedValue`. Useful for approval
+gates, missing credentials, or any external confirmation needed mid-agent-turn.
+
+**Flow-level suspend** — `builder::suspend::<I, O>()` registers a first-class
+suspend node. When a value of type `I` arrives in state the flow pauses
+immediately (no agent or tool needed). Resume by supplying a value of type `O`.
+Useful for human-in-the-loop steps, webhook callbacks, or any out-of-band
+computation that should be a named node in the graph.
+
+In both cases the caller's loop looks the same:
 
 ```rust
 use serde_json::json;
@@ -274,9 +287,9 @@ use serde_json::json;
 loop {
     match runtime.next(ctx.clone()).await? {
         FlowStep::Continue => {}
-        FlowStep::Suspend { value } => {
-            // `value` is the tool's input args from the LLM.
-            // Collect external output, then:
+        FlowStep::Suspend(sv) => {
+            // Downcast sv to retrieve the suspended value, do out-of-band work,
+            // then supply the result:
             runtime.resume(ctx.clone(), json!({ "approved": true })).await?;
         }
         FlowStep::Done(v) => { println!("{v}"); break; }
