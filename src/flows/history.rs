@@ -116,10 +116,15 @@ impl FlowHistory {
     }
 
     fn first_turn_end_exclusive(&self) -> Option<usize> {
-        let start = self.pinned;
-        if start >= self.messages.len() {
-            return None;
-        }
+        // Scan forward from `pinned` to find the first assistant turn.
+        // This tolerates histories loaded via `with_history` where the message
+        // at index `pinned` may not be an assistant turn.
+        let start = (self.pinned..self.messages.len()).find(|&i| {
+            matches!(
+                self.messages[i].role,
+                Role::Assistant | Role::AssistantToolCalls { .. }
+            )
+        })?;
         match &self.messages[start].role {
             Role::AssistantToolCalls { .. } => {
                 let mut end = start + 1;
@@ -131,7 +136,7 @@ impl FlowHistory {
                 Some(end)
             }
             Role::Assistant => Some(start + 1),
-            _ => None,
+            _ => unreachable!(),
         }
     }
 

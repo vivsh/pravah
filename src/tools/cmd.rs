@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::base::{Tool, ToolError};
 use crate::context::Context;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RunCommandOutput {
     pub command: String,
     pub args: Vec<String>,

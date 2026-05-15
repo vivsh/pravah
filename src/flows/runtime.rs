@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use schemars::JsonSchema;
 use crate::{
     Context,
     clients::{DefaultClientFactory, Message},
@@ -10,12 +9,25 @@ use crate::{
     },
 };
 
-use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use uuid::Uuid;
 
 fn new_session_id() -> String {
     Uuid::now_v7().to_string()
+}
+
+/// Converts an internal `FlowStep<Value>` to the public `FlowStep<T>` by deserializing
+/// the `Done` payload. `Continue` and `Suspend` pass through unchanged.
+fn lift_step<T: DeserializeOwned>(step: FlowStep<Value>) -> Result<FlowStep<T>, FlowError> {
+    match step {
+        FlowStep::Continue => Ok(FlowStep::Continue),
+        FlowStep::Done(val) => {
+            serde_json::from_value(val).map(FlowStep::Done).map_err(FlowError::Deserialize)
+        }
+        FlowStep::Suspend(s) => Ok(FlowStep::Suspend(s)),
+    }
 }
 
 struct FlowCall(Arc<FlowGraph>);
@@ -39,9 +51,7 @@ impl<I: Flow> FlowRuntime<I> {
         let graph: FlowGraph = Self::build_graph()?;
         let exit = graph.exit;
 
-        let value = serde_json::to_value(&flow).map_err(|e| {
-            FlowError::SerializeError(format!("start node '{}': {e}", I::node_id()))
-        })?;
+        let value = serde_json::to_value(&flow).map_err(FlowError::Serialize)?;
         let entry_id = graph.entry;
 
         let mut state = FlowState::new();
@@ -97,9 +107,22 @@ impl<I: Flow> FlowRuntime<I> {
                             inner_mut.callable_index = callables.len();
                             callables.push(FlowCall(inner.clone()));
                         } else {
-                            return Err(FlowError::Internal(
-                                "Failed to get mutable reference to inner flow".into(),
-                            ));
+                            return Err(FlowError::Internal {
+                                handler: "collect_callables",
+                                detail: "failed to get exclusive Arc reference to inner flow".into(),
+                            });
+                        }
+                    }
+                    FlowNode::FlowTool { inner, .. } => {
+                        if let Some(inner_mut) = Arc::get_mut(inner) {
+                            Self::collect_callables(inner_mut, callables)?;
+                            inner_mut.callable_index = callables.len();
+                            callables.push(FlowCall(inner.clone()));
+                        } else {
+                            return Err(FlowError::Internal {
+                                handler: "collect_callables",
+                                detail: "failed to get exclusive Arc reference to flow tool inner graph".into(),
+                            });
                         }
                     }
                     _ => {}
@@ -124,12 +147,12 @@ impl<I: Flow> FlowRuntime<I> {
         self
     }
 
-    pub async fn next(&mut self, ctx: Context) -> Result<FlowStep, FlowError> {
+    pub async fn next(&mut self, ctx: Context) -> Result<FlowStep<I::Output>, FlowError> {
         let factory = Arc::clone(&self.factory);
         let callable_index = self.state.callable_index()
-            .ok_or_else(|| FlowError::Internal("next() called after flow completed".into()))?;
+            .ok_or_else(|| FlowError::Internal { handler: "next", detail: "called after flow completed".into() })?;
         let graph = self.callables.get(callable_index)
-            .ok_or_else(|| FlowError::Internal(format!("callable index {callable_index} out of range")))?;
+            .ok_or_else(|| FlowError::Internal { handler: "next", detail: format!("callable index {callable_index} out of range") })?;
         let out = graph
             .0
             .next(
@@ -140,19 +163,27 @@ impl<I: Flow> FlowRuntime<I> {
                 &mut self.state,
             )
             .await?;
-        Ok(out)
+        lift_step(out)
     }
 
-    pub async fn resume(
+    pub async fn resume<R: Serialize + JsonSchema>(
         &mut self,
         ctx: Context,
-        resumption: Value,
-    ) -> Result<FlowStep, FlowError> {
+        value: R,
+    ) -> Result<FlowStep<I::Output>, FlowError> {
+        let suspension = self.state.suspension()
+            .ok_or(FlowError::UnexpectedResumption)?;
+        let expected = suspension.output_type.clone();
+        let got: String = R::schema_name().into();
+        if got != expected {
+            return Err(FlowError::ResumptionTypeMismatch { expected, got });
+        }
+        let resumption = serde_json::to_value(value).map_err(FlowError::Serialize)?;
         let factory = Arc::clone(&self.factory);
         let callable_index = self.state.callable_index()
-            .ok_or_else(|| FlowError::Internal("resume() called after flow completed".into()))?;
+            .ok_or_else(|| FlowError::Internal { handler: "resume", detail: "called after flow completed".into() })?;
         let graph = self.callables.get(callable_index)
-            .ok_or_else(|| FlowError::Internal(format!("callable index {callable_index} out of range")))?;
+            .ok_or_else(|| FlowError::Internal { handler: "resume", detail: format!("callable index {callable_index} out of range") })?;
         let out = graph
             .0
             .resume(
@@ -164,7 +195,7 @@ impl<I: Flow> FlowRuntime<I> {
                 &mut self.state,
             )
             .await?;
-        Ok(out)
+        lift_step(out)
     }
 
     /// Captures the current execution state as an opaque [`FlowSnapshot`].
@@ -174,6 +205,7 @@ impl<I: Flow> FlowRuntime<I> {
     pub fn snapshot(&self) -> FlowSnapshot {
         FlowSnapshot {
             state: self.state.clone(),
+            session_id: self.session_id.clone(),
         }
     }
 
@@ -184,8 +216,7 @@ impl<I: Flow> FlowRuntime<I> {
     /// the full LLM conversation context.
     pub fn from_snapshot(snapshot: FlowSnapshot) -> Result<Self, FlowError> {
         let graph = Self::build_graph()?;
-        let mut history = FlowHistory::new(None);
-        history.push(Message::user(format!("Starting flow: {}", I::node_id())));
+        let history = FlowHistory::new(None);
 
         let (_root_callable_index, callables) = Self::make_callables(graph)?;
 
@@ -193,7 +224,7 @@ impl<I: Flow> FlowRuntime<I> {
             state: snapshot.state,
             history,
             callables,
-            session_id: new_session_id(),
+            session_id: snapshot.session_id,
             factory: Arc::new(DefaultClientFactory),
             _marker: std::marker::PhantomData,
         })
@@ -216,4 +247,5 @@ impl<I: Flow> std::fmt::Debug for FlowRuntime<I> {
 #[derive(Serialize, Deserialize)]
 pub struct FlowSnapshot {
     state: FlowState,
+    session_id: String,
 }

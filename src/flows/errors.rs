@@ -7,20 +7,11 @@ pub enum FlowError {
     #[error("Node not found: {0}")]
     NotFound(String),
 
-    #[error("Snapshot load error: {0}")]
-    SnapLoadError(String),
+    #[error("failed to serialize: {0}")]
+    Serialize(#[source] serde_json::Error),
 
-    #[error("Snapshot store error: {0}")]
-    SnapStoreError(String),
-
-    #[error("Build error: {0}")]
-    BuildError(String),
-
-    #[error("Serialize error: {0}")]
-    SerializeError(String),
-
-    #[error("Deserialize error: {0}")]
-    DeserializeError(String),
+    #[error("failed to deserialize: {0}")]
+    Deserialize(#[source] serde_json::Error),
 
     #[error("Flow is suspended — call resume() with a resumption payload, not next()")]
     ResumeRequired,
@@ -28,90 +19,81 @@ pub enum FlowError {
     #[error("Flow is not suspended — unexpected resumption payload supplied")]
     UnexpectedResumption,
 
-    #[error("Agent error: {0}")]
-    AgentError(String),
+    #[error("resume type mismatch: expected '{expected}', got '{got}'")]
+    ResumptionTypeMismatch { expected: String, got: String },
 
     #[error("Flow deadlock: states [{0}] are waiting but no join is ready")]
     Deadlock(String),
 
-    #[error("Flow graph is invalid:\n{}", .0.join("\n"))]
-    Invalid(Vec<String>),
+    #[error("Internal error in {handler}: {detail}")]
+    Internal {
+        handler: &'static str,
+        detail: String,
+    },
 
-    #[error("Internal error: {0}")]
-    Internal(String),
+    #[error(transparent)]
+    Build(#[from] BuildError),
+
+    #[error(transparent)]
+    Agent(#[from] AgentError),
 }
 
 // ── Build-time errors ─────────────────────────────────────────────────────────
 
 /// Errors that occur while constructing or validating a [`super::FlowGraph`].
 ///
-/// All variants convert into [`super::FlowError`] via [`From`].
+/// Converts into [`super::FlowError::Build`] automatically via `#[from]`.
 #[derive(Debug, Error)]
-pub(crate) enum BuildError {
+pub enum BuildError {
     /// One or more structural/semantic validation failures collected by the builder.
     #[error("Flow graph is invalid:\n{}", .0.join("\n"))]
     Invalid(Vec<String>),
 
-    /// A node key conflict or contract mismatch detected at build time.
-    #[error("Build error: {0}")]
-    NodeConflict(String),
+    /// A node with the same key was registered more than once.
+    #[error("Duplicate node: {0}")]
+    DuplicateNode(String),
+
+    /// A fork node produced a different number of child states than it declared children.
+    #[error("Fork child count mismatch: {0}")]
+    ChildCountMismatch(String),
 
     /// Failed to deserialize a snapshot back into [`super::FlowState`].
     #[error("Snapshot load error: {0}")]
-    SnapLoad(String),
+    SnapshotLoad(String),
 
     /// Failed to serialize [`super::FlowState`] into a snapshot.
     #[error("Snapshot store error: {0}")]
-    SnapStore(String),
-}
-
-impl From<BuildError> for FlowError {
-    fn from(e: BuildError) -> Self {
-        match e {
-            BuildError::Invalid(v)       => FlowError::Invalid(v),
-            BuildError::NodeConflict(s)  => FlowError::BuildError(s),
-            BuildError::SnapLoad(s)      => FlowError::SnapLoadError(s),
-            BuildError::SnapStore(s)     => FlowError::SnapStoreError(s),
-        }
-    }
+    SnapshotStore(String),
 }
 
 // ── Agent / tool runtime errors ───────────────────────────────────────────────
 
 /// Errors that occur while an agent node is executing (LLM call or tool dispatch).
 ///
-/// All variants convert into [`super::FlowError`] via [`From`].
+/// Converts into [`super::FlowError::Agent`] automatically via `#[from]`.
 #[derive(Debug, Error)]
-pub(crate) enum AgentError {
-    /// The LLM client returned an error.
-    #[error("Agent error: {0}")]
-    Llm(String),
+pub enum AgentError {
+    /// The LLM client returned an error (factory creation, history validation, or execute call).
+    #[error("Agent '{agent}' LLM call failed: {reason}")]
+    LlmFailed { agent: String, reason: String },
 
     /// The LLM requested a tool that is not registered on the agent.
-    #[error("Agent error: unknown tool '{0}'")]
-    ToolUnknown(String),
+    #[error("Agent '{agent}' called unknown tool '{tool}'")]
+    UnknownTool { agent: String, tool: String },
+
+    /// The LLM issued two calls to the same tool in a single turn.
+    #[error("Agent '{agent}' issued duplicate call to tool '{tool}'")]
+    DuplicateToolCall { agent: String, tool: String },
 
     /// A registered tool returned a non-suspend, non-exit error.
-    #[error("Agent error: {0}")]
-    ToolFailed(String),
+    #[error("Tool '{tool}' failed: {reason}")]
+    ToolFailed { tool: String, reason: String },
 
     /// Serialization failed while encoding an agent continuation or pending call.
-    #[error("Serialize error: {0}")]
-    Serialize(String),
+    #[error("failed to serialize agent state: {0}")]
+    Serialize(#[source] serde_json::Error),
 
-    /// Deserialization failed while decoding an agent continuation.
-    #[error("Deserialize error: {0}")]
-    Deserialize(String),
-}
-
-impl From<AgentError> for FlowError {
-    fn from(e: AgentError) -> Self {
-        match e {
-            AgentError::Llm(s)         => FlowError::AgentError(s),
-            AgentError::ToolUnknown(s) => FlowError::AgentError(s),
-            AgentError::ToolFailed(s)  => FlowError::AgentError(s),
-            AgentError::Serialize(s)   => FlowError::SerializeError(s),
-            AgentError::Deserialize(s) => FlowError::DeserializeError(s),
-        }
-    }
+    /// Deserialization failed while decoding an agent continuation or tool call.
+    #[error("failed to deserialize agent state: {0}")]
+    Deserialize(#[source] serde_json::Error),
 }

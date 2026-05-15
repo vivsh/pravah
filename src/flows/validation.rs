@@ -98,8 +98,6 @@ pub fn validate_nodes(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> R
                 }
             }
             FlowNode::Join(info) => {
-                let mut sorted_parents = info.parents.clone();
-                sorted_parents.sort_by_key(|p| p.0);
                 let group_key = info.target;
                 if !seen_join_groups.insert(group_key) {
                     continue;
@@ -159,8 +157,23 @@ pub fn validate_nodes(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> R
                         key_str
                     ));
                 }
+                let exit_str = inner.interner.name_of(inner.exit);
+                if graph.interner.fwd.get(exit_str).is_none() {
+                    problems.push(format!(
+                        "flow '{}': output type '{}' is not registered in the parent graph",
+                        key_str, exit_str
+                    ));
+                }
             }
-            FlowNode::Tool(_) => {}
+            FlowNode::AgentTool(info) => {
+                if info.exit == info.id {
+                    problems.push(format!(
+                        "agent_tool '{}': exit equals entry — would overwrite input",
+                        key_str
+                    ));
+                }
+            }
+            FlowNode::Tool(_) | FlowNode::FlowTool { .. } => {}
         }
     }
     if problems.is_empty() {
@@ -216,7 +229,7 @@ pub fn validate(
     if nodes.contains_key(&entry) {
         let successors: HashMap<NodeId, Vec<NodeId>> = nodes
             .iter()
-            .filter(|(_, node)| !matches!(node, FlowNode::Tool(_)))
+            .filter(|(_, node)| !matches!(node, FlowNode::Tool(_) | FlowNode::AgentTool(_) | FlowNode::FlowTool { .. }))
             .map(|(&key, node)| {
                 let succs: Vec<NodeId> = match node {
                     FlowNode::Agent(info) => vec![info.exit],
@@ -236,7 +249,7 @@ pub fn validate(
                             .map(|id| vec![id])
                             .unwrap_or_default()
                     }
-                    FlowNode::Tool(_) => vec![],
+                    FlowNode::Tool(_) | FlowNode::AgentTool(_) | FlowNode::FlowTool { .. } => vec![],
                 };
                 (key, succs)
             })
@@ -256,7 +269,7 @@ pub fn validate(
             }
         }
         for &key in nodes.keys() {
-            if matches!(nodes[&key], FlowNode::Tool(_)) {
+            if matches!(nodes[&key], FlowNode::Tool(_) | FlowNode::AgentTool(_) | FlowNode::FlowTool { .. }) {
                 continue;
             }
             if !reachable.contains(&key) {
@@ -302,7 +315,7 @@ pub fn validate(
             }
         }
         for &key in nodes.keys() {
-            if matches!(nodes[&key], FlowNode::Tool(_)) {
+            if matches!(nodes[&key], FlowNode::Tool(_) | FlowNode::AgentTool(_) | FlowNode::FlowTool { .. }) {
                 continue;
             }
             if !can_reach_terminal.contains(&key) {

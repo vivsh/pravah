@@ -64,7 +64,7 @@ async fn normalise(rec: RawRecord, _ctx: Context) -> Result<NormalisedRecord, Fl
         .raw_value
         .trim()
         .parse()
-        .map_err(|_| FlowError::AgentError("invalid numeric string".into()))?;
+        .map_err(|_| FlowError::Internal { handler: "snapshot", detail: "invalid numeric string".into() })?;
     println!("[step 1] normalised {} → {value}", rec.raw_value);
     Ok(NormalisedRecord { id: rec.id, value })
 }
@@ -155,8 +155,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = fs::remove_file(snapshot_path());
                 break;
             }
-            FlowStep::Suspend { value, tool_id } => {
-                eprintln!("Unexpected suspension at '{tool_id}': {value}");
+            FlowStep::Suspend(_) => {
+                eprintln!("Unexpected suspension");
                 break;
             }
         }

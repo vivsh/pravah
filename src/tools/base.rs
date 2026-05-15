@@ -2,6 +2,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -39,11 +40,11 @@ pub enum ToolError {
     #[error("exit signal from tool")]
     Exit(serde_json::Value),
     /// A tool requesting external input before the flow can continue.
-    /// Caught by the orchestrator, which surfaces the tool's input args as
-    /// [`crate::flows::FlowStep::Suspend`]`{ value }` so the caller sees
-    /// exactly what the LLM passed to the tool.
+    /// Caught by the orchestrator, which surfaces the deserialized input as
+    /// [`crate::flows::FlowStep::Suspend`] so the caller can inspect and downcast it,
+    /// then call `resume()` with a value matching `output_type`.
     #[error("suspend signal from tool")]
-    Suspend,
+    Suspend { value: SuspendedValue, output_type: String },
 }
 
 impl Context {
@@ -143,11 +144,32 @@ fn normalize_path(path: &Path) -> PathBuf {
     out
 }
 
-/// The output of a single tool invocation.
-#[derive(Debug)]
-pub struct ToolOutput {
-    pub call: ToolCall,
-    pub value: serde_json::Value,
+/// Typed input from an LLM suspend-tool call surfaced as [`crate::flows::FlowStep::Suspend`].
+///
+/// Downcast to the concrete input type registered via [`ToolBox::suspend`] using
+/// [`downcast`](Self::downcast) or [`downcast_ref`](Self::downcast_ref).
+pub struct SuspendedValue(Box<dyn std::any::Any + Send>);
+
+impl SuspendedValue {
+    pub(crate) fn new<T: std::any::Any + Send + 'static>(value: T) -> Self {
+        Self(Box::new(value))
+    }
+
+    /// Attempts to downcast to `T`, consuming `self`. Returns `Err(self)` if the type doesn't match.
+    pub fn downcast<T: 'static>(self) -> Result<T, Self> {
+        self.0.downcast::<T>().map(|b| *b).map_err(SuspendedValue)
+    }
+
+    /// Borrows the inner value as `&T`, returning `None` if the type doesn't match.
+    pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
+        self.0.downcast_ref::<T>()
+    }
+}
+
+impl std::fmt::Debug for SuspendedValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SuspendedValue(..)")
+    }
 }
 
 /// Metadata the orchestrator sends to the LLM to advertise a tool.
@@ -168,7 +190,7 @@ pub trait Tool: DeserializeOwned + JsonSchema + Sized + Send {
     /// Typed output this tool produces. Must be `Serialize` so `ErasedTool` can
     /// convert it to `serde_json::Value` after dispatch without the caller
     /// building raw JSON.
-    type Output: serde::Serialize + Send;
+    type Output: serde::Serialize + JsonSchema + DeserializeOwned + Send;
 
     fn name() -> &'static str;
 
@@ -204,6 +226,11 @@ pub(crate) fn make_dispatcher<T: Tool + 'static>() -> Box<dyn ErasedTool> {
 pub(crate) trait ErasedTool: Send + Sync {
     fn name(&self) -> &str;
     fn definition(&self) -> ToolDefinition;
+
+    /// Schema name of the type the LLM provides as args (the tool's input type).
+    fn input_type(&self) -> String;
+    fn output_type(&self) -> String;
+
     /// Deserializes `args` into the concrete tool type, calls it, returns the output.
     fn call_raw<'a>(
         &'a self,
@@ -224,6 +251,14 @@ impl<T: Tool + 'static> ErasedTool for ToolDispatcher<T> {
         T::definition()
     }
 
+    fn input_type(&self) -> String {
+        T::schema_name().into()
+    }
+
+    fn output_type(&self) -> String {
+        T::Output::schema_name().into()
+    }
+
     fn call_raw<'a>(
         &'a self,
         ctx: Context,
@@ -237,21 +272,62 @@ impl<T: Tool + 'static> ErasedTool for ToolDispatcher<T> {
     }
 }
 
-/// Stateless registry of tools. Shareable across agents via `Arc<ToolBox>`.
+/// Registers a tool type `T` — suspension tools are added via [`.suspend()`](ToolBox::suspend).
 ///
-/// Build with [`ToolBox::builder`]; dispatch with [`ToolBox::call`].
+/// Build with [`ToolBox::new`]; dispatch with [`ToolBox::call`].
 pub struct ToolBox {
     tools: Vec<Box<dyn ErasedTool>>,
     exit_name: String,
+    /// Type-erased closures that inject `FlowNode::AgentTool` / `FlowNode::FlowTool` nodes
+    /// into the outer graph at `FlowBuilder::agent` time. Stored here so `ToolBox` stays
+    /// crate-agnostic; drained by `ToolBox::with_agent` in `commons.rs`.
+    /// `Fn + Sync` so that `Arc<ToolBox>` is `Send + Sync`.
+    pub(crate) graph_injectors: Vec<Box<dyn Fn(&str, &mut crate::flows::FlowGraph) + Send + Sync>>,
 }
 
 impl ToolBox {
-    /// Starts building a new [`ToolBox`].
-    pub fn builder() -> ToolBoxBuilder {
-        ToolBoxBuilder {
+    /// Creates an empty [`ToolBox`] with the default exit sentinel name (`"submit"`).
+    pub fn new() -> Self {
+        Self {
             tools: Vec::new(),
             exit_name: "submit".to_owned(),
+            graph_injectors: Vec::new(),
         }
+    }
+
+    /// Overrides the name of the auto-generated exit sentinel tool (default: `"submit"`).
+    pub fn with_exit_name(mut self, name: impl Into<String>) -> Self {
+        self.exit_name = name.into();
+        self
+    }
+
+    /// Registers a tool type `T`. Call multiple times to add more tools.
+    pub fn tool<T: Tool + 'static>(mut self) -> Self {
+        self.tools.push(make_dispatcher::<T>());
+        self
+    }
+
+    /// Registers a typed suspension point. The LLM calls this tool with a value of type `T`;
+    /// the flow pauses and surfaces a [`SuspendedValue`] wrapping the deserialized `T` as
+    /// [`crate::flows::FlowStep::Suspend`]. Call `resume()` with a value of type `Out`.
+    pub fn suspend<T, Out>(mut self) -> Self
+    where
+        T: JsonSchema + serde::de::DeserializeOwned + Send + 'static,
+        Out: JsonSchema + 'static,
+    {
+        let name = T::schema_name();
+        let out_name = Out::schema_name();
+        let parameters = serde_json::to_value(schemars::schema_for!(T))
+            .unwrap_or_else(|_| Value::Object(Default::default()));
+        let def = ToolDefinition {
+            name: name.clone(),
+            description: format!("Pause and await external fulfillment. Resume with `{out_name}`."),
+            parameters,
+        };
+        let deserialize: Arc<dyn Fn(Value) -> Result<SuspendedValue, serde_json::Error> + Send + Sync> =
+            Arc::new(|args| serde_json::from_value::<T>(args).map(SuspendedValue::new));
+        self.tools.push(Box::new(SuspendTool { def, input_type: name.into(), output_type: out_name.into(), deserialize }));
+        self
     }
 
     /// Returns the name used for the auto-generated exit sentinel tool.
@@ -282,23 +358,22 @@ impl ToolBox {
         self.tools[i].name()
     }
 
-    /// Invokes the tool at position `i` by index, using `call_id` as the LLM-assigned
-    /// call identifier and `args` as the raw JSON arguments.
+    pub(crate) fn input_type_at(&self, i: usize) -> String {
+        self.tools[i].input_type()
+    }
+
+    pub(crate) fn output_type_at(&self, i: usize) -> String {
+        self.tools[i].output_type()
+    }
+
+    /// Invokes the tool at position `i` by its slot index.
     pub(crate) async fn call_at_index(
         &self,
         i: usize,
-        call_id: &str,
         args: Value,
         ctx: Context,
-    ) -> Result<ToolOutput, ToolError> {
-        let tool = &self.tools[i];
-        let call = ToolCall {
-            id: call_id.to_owned(),
-            name: tool.name().to_owned(),
-            args: args.clone(),
-            thought_signatures: None,
-        };
-        tool.call_raw(ctx, args).await.map(|value| ToolOutput { call, value })
+    ) -> Result<Value, ToolError> {
+        self.tools[i].call_raw(ctx, args).await
     }
 
     /// Appends a pre-boxed tool. `pub(crate)` so only `commons` can inject the sentinel.
@@ -307,51 +382,56 @@ impl ToolBox {
     }
 
     /// Dispatches `tool_call` to the matching tool, using `ctx` for execution.
-    pub async fn call(&self, tool_call: &ToolCall, ctx: Context) -> Result<ToolOutput, ToolError> {
+    pub async fn call(&self, tool_call: &ToolCall, ctx: Context) -> Result<Value, ToolError> {
         let tool = self
             .tools
             .iter()
             .find(|t| t.name() == tool_call.name)
             .ok_or_else(|| ToolError::UnknownTool(tool_call.name.clone()))?;
-        let call = tool_call.clone();
-        tool.call_raw(ctx, tool_call.args.clone())
-            .await
-            .map(|o| ToolOutput { call, value: o })
+        tool.call_raw(ctx, tool_call.args.clone()).await
     }
 }
 
-/// Builder for [`ToolBox`].
-pub struct ToolBoxBuilder {
-    tools: Vec<Box<dyn ErasedTool>>,
-    exit_name: String,
+/// Hidden tool that returns `ToolError::Suspend` — registered via [`ToolBox::suspend`].
+struct SuspendTool {
+    def: ToolDefinition,
+    input_type: String,
+    output_type: String,
+    deserialize: Arc<dyn Fn(Value) -> Result<SuspendedValue, serde_json::Error> + Send + Sync>,
 }
 
-impl ToolBoxBuilder {
-    /// Overrides the name of the auto-generated exit sentinel tool (default: `"submit"`).
-    pub fn with_exit_name(mut self, name: impl Into<String>) -> Self {
-        self.exit_name = name.into();
-        self
+impl ErasedTool for SuspendTool {
+    fn name(&self) -> &str {
+        &self.def.name
     }
 
-    /// Returns the current exit sentinel tool name.
-    pub fn exit_name(&self) -> &str {
-        &self.exit_name
+    fn definition(&self) -> ToolDefinition {
+        self.def.clone()
     }
 
-    /// Registers a tool type `T`. Call multiple times to add more tools.
-    pub fn tool<T: Tool + 'static>(mut self) -> Self {
-        self.tools.push(make_dispatcher::<T>());
-        self
+    fn input_type(&self) -> String {
+        self.input_type.clone()
     }
 
-    /// Finishes the builder and returns the registered toolbox.
-    pub fn build(self) -> ToolBox {
-        ToolBox {
-            tools: self.tools,
-            exit_name: self.exit_name,
-        }
+    fn output_type(&self) -> String {
+        self.output_type.clone()
+    }
+
+    fn call_raw<'a>(
+        &'a self,
+        _ctx: Context,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, ToolError>> + Send + 'a>> {
+        let deserialize = self.deserialize.clone();
+        let output_type = self.output_type.clone();
+        Box::pin(async move {
+            let value = (deserialize)(args).map_err(ToolError::Deserialize)?;
+            Err(ToolError::Suspend { value, output_type })
+        })
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -374,10 +454,9 @@ mod tests {
     /// Verifies that all registered tool definitions are collected with correct names.
     #[test]
     fn toolbox_collects_definitions() {
-        let tb = ToolBox::builder()
+        let tb = ToolBox::new()
             .tool::<ReadFile>()
-            .tool::<WriteFile>()
-            .build();
+            .tool::<WriteFile>();
         let defs = tb.definitions();
         assert_eq!(defs.len(), 2);
         assert_eq!(defs[0].name, "read_file");
@@ -391,25 +470,24 @@ mod tests {
         write!(tmp, "hello toolbox").unwrap();
         let path = tmp.path().to_string_lossy().into_owned();
 
-        let tb = ToolBox::builder().tool::<ReadFile>().build();
+        let tb = ToolBox::new().tool::<ReadFile>();
         let tc = ToolCall {
             id: "1".into(),
             name: "read_file".into(),
             args: json!({ "path": path }),
             thought_signatures: None,
         };
-        let output = tb
+        let result = tb
             .call(&tc, ctx(tmp.path().parent().unwrap()))
             .await
             .unwrap();
-        let result = output.value;
         assert_eq!(result["content"], "hello toolbox");
     }
 
     /// Verifies that calling an unregistered tool name returns `ToolError::UnknownTool`.
     #[tokio::test]
     async fn toolbox_unknown_tool_returns_error() {
-        let tb = ToolBox::builder().tool::<ReadFile>().build();
+        let tb = ToolBox::new().tool::<ReadFile>();
         let tc = ToolCall {
             id: "x".into(),
             name: "no_such_tool".into(),

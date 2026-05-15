@@ -96,8 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("## Summary\n\n{}", report.markdown);
                 break;
             }
-            FlowStep::Suspend { value, tool_id } => {
-                eprintln!("Unexpected suspension at '{tool_id}': {value}");
+            FlowStep::Suspend(_) => {
+                eprintln!("Unexpected suspension");
                 break;
             }
         }

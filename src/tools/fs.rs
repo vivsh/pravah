@@ -8,36 +8,36 @@ use crate::context::Context;
 
 // ── Output types ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadFileOutput {
     pub path: String,
     pub content: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WriteFileOutput {
     pub path: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ListDirOutput {
     pub path: String,
     pub entries: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PatchFileOutput {
     pub path: String,
     pub applied: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MultiPatchFileOutput {
     pub path: String,
     pub applied: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PatchLinesOutput {
     pub path: String,
     pub replaced_lines: usize,

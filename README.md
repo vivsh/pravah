@@ -10,7 +10,8 @@ A Rust library for building **stepwise, transactional data-flow pipelines** with
 first-class support for agentic programming.
 
 Each call to `next()` does one bounded unit of work — one LLM turn, one tool
-batch, one deterministic transform, one branch, one fork, or one join.
+batch, one deterministic transform, one branch, one fork, one join, or one
+step of a nested flow.
 
 > **Pravah executes flows one transaction-sized step at a time.**
 > After every `next()` call, the entire flow state can be:
@@ -30,7 +31,7 @@ batch, one deterministic transform, one branch, one fork, or one join.
 
 ```toml
 [dependencies]
-pravah = "0.1"
+pravah = "0.2"
 ```
 
 | Feature              | Default | Description                                                             |
@@ -44,7 +45,7 @@ pravah = "0.1"
 To use only specific providers, disable defaults:
 
 ```toml
-pravah = { version = "0.1", default-features = false, features = ["provider-openai"] }
+pravah = { version = "0.2", default-features = false, features = ["provider-openai"] }
 ```
 
 Model URLs select the backend at runtime: `openai://gpt-4o`,
@@ -58,7 +59,7 @@ A two-node flow: an agent produces bullet points, a work node formats them into 
 
 ```rust
 use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
-use pravah::context::{Context, FlowConf};
+use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -106,7 +107,7 @@ impl Flow for SummariseRequest {
 // ── Run ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
-async fn main() -> Result<(), FlowError> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Context::new(FlowConf::default());
     let input = SummariseRequest { topic: "Rust ownership model".into() };
     let mut runtime = FlowRuntime::new(input)?;
@@ -114,9 +115,13 @@ async fn main() -> Result<(), FlowError> {
     loop {
         match runtime.next(ctx.clone()).await? {
             FlowStep::Continue => {}
-            FlowStep::Done(report) => { println!("{}", report.text); break; }
-            FlowStep::Suspend { value, tool_id } => {
-                eprintln!("Unexpected suspension at '{tool_id}': {value}");
+            FlowStep::Done(v) => {
+                let report: Report = serde_json::from_value(v)?;
+                println!("{}", report.text);
+                break;
+            }
+            FlowStep::Suspend { value } => {
+                eprintln!("Unexpected suspension: {value}");
                 break;
             }
         }
@@ -217,7 +222,7 @@ Structured-output behavior is provider-specific:
 ```rust
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use pravah::context::Context;
+use pravah::Context;
 use pravah::tools::{Tool, ToolError};
 
 #[derive(Deserialize, JsonSchema)]
@@ -249,10 +254,10 @@ within `working_dir`.
 
 A tool returns `Err(ToolError::Suspend)` to pause the flow. The runtime
 surfaces the tool's input args (what the LLM passed to the tool) as the
-suspension `value`, together with a `tool_id`. Persist state, show the
-request to a user, wait for a webhook — then call `resume()` with the
-matching `tool_id` and a JSON output. Useful for approval gates, missing
-credentials, payments, or any action needing external confirmation.
+suspension `value`. Persist state, show the request to a user, wait for a
+webhook — then call `resume()` with a JSON value to continue. Useful for
+approval gates, missing credentials, payments, or any action needing
+external confirmation.
 
 ```rust
 use serde_json::json;
@@ -260,12 +265,12 @@ use serde_json::json;
 loop {
     match runtime.next(ctx.clone()).await? {
         FlowStep::Continue => {}
-        FlowStep::Suspend { value, tool_id } => {
+        FlowStep::Suspend { value } => {
             // `value` is the tool's input args from the LLM.
             // Collect external output, then:
-            runtime.resume(ctx.clone(), (tool_id, json!({ "approved": true }))).await?;
+            runtime.resume(ctx.clone(), json!({ "approved": true })).await?;
         }
-        FlowStep::Done(output) => { println!("{}", output.text); break; }
+        FlowStep::Done(v) => { println!("{v}"); break; }
     }
 }
 ```

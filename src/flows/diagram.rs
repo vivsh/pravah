@@ -481,7 +481,7 @@ fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
                     (DiagramNodeKind::Flow, vec![(exit_str, "flow")])
                 }
                 // Tool nodes are implementation details not shown in diagrams.
-                FlowNode::Tool(_) => return None,
+                FlowNode::Tool(_) | FlowNode::AgentTool(_) | FlowNode::FlowTool { .. } => return None,
             };
             Some(NodeDesc {
                 id: key_str,

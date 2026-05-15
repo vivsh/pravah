@@ -23,6 +23,8 @@ pub struct Callable {
 pub(crate) struct Suspension {
     pub src: NodeId,
     pub dst: NodeId,
+    /// Schema name of the type the caller must provide when calling `resume()`.
+    pub output_type: String,
 }
 
 /// A single execution frame — one per active call on the stack.
@@ -133,13 +135,15 @@ impl FlowState {
         self.suspension.as_ref()
     }
 
-    pub fn suspend(&mut self, src: NodeId, dst: NodeId) {
-        self.suspension = Some(Suspension { src, dst });
+    pub fn suspend(&mut self, src: NodeId, dst: NodeId, output_type: String) {
+        self.suspension = Some(Suspension { src, dst, output_type });
     }
 
     pub fn resume(&mut self, value: Value) -> bool {
         if let Some(suspension) = self.suspension.take() {
             if let Some(frame) = self.top_mut() {
+                // note: we donot check if the src node still exists in the state. This should be
+                // safe as mutation of state is unexpected while suspended
                 frame.states.shift_remove(&suspension.src);
                 frame.states.insert(suspension.dst, value);
                 return true;
@@ -202,6 +206,19 @@ impl FlowState {
         self.top().and_then(|f| f.states.get(&id))
     }
 
+    pub fn take_state(&mut self, id: NodeId) -> Option<Value> {
+        self.top_mut().and_then(|f| f.states.shift_remove(&id))
+    }
+
+    /// remove and then re-insert
+    pub fn reinsert_state(&mut self, id: NodeId)  {
+        if let Some(frame) = self.top_mut() {
+            if let Some(value) = frame.states.shift_remove(&id) {
+                frame.states.insert(id, value);
+            }
+        }        
+    }
+
     pub fn len(&self) -> usize {
         self.top().map_or(0, |f| f.states.len())
     }
@@ -219,5 +236,10 @@ impl FlowState {
 
     pub fn callable_index(&self) -> Option<usize> {
         self.top().map(|f| f.callable.index)
+    }
+
+    /// Returns the entry NodeId of the top frame's callable, if any.
+    pub(crate) fn callable_entry(&self) -> Option<NodeId> {
+        self.top().map(|f| f.callable.entry)
     }
 }

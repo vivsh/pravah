@@ -167,8 +167,8 @@ async fn run_outline_flow(req: OutlineRequest, ctx: Context) -> Result<Outline, 
         match rt.next(ctx.clone()).await? {
             FlowStep::Continue => {}
             FlowStep::Done(result) => return Ok(result),
-            FlowStep::Suspend { value, tool_id } => {
-                return Err(FlowError::AgentError(format!("outline flow suspended at {tool_id}: {value}")));
+            FlowStep::Suspend(_) => {
+                return Err(FlowError::Internal { handler: "gen_diagrams", detail: "outline flow suspended unexpectedly".into() });
             }
         }
     }
@@ -188,8 +188,8 @@ async fn run_review_flow(draft: LongDraft, ctx: Context) -> Result<ReviewedDraft
         match rt.next(ctx.clone()).await? {
             FlowStep::Continue => {}
             FlowStep::Done(result) => return Ok(result),
-            FlowStep::Suspend { value, tool_id } => {
-                return Err(FlowError::AgentError(format!("review flow suspended at {tool_id}: {value}")));
+            FlowStep::Suspend(_) => {
+                return Err(FlowError::Internal { handler: "gen_diagrams", detail: "review flow suspended unexpectedly".into() });
             }
         }
     }

@@ -15,3 +15,5 @@ applyTo: "**/*.rs"
 - Avoid file modules that are longer than 1000 lines - divide into multiple files and folder module. In a folder module, mod should always be thin and comprise mainly of mod statements and re-exports.
 - Donot use blocking code in async functions.
 - For sqlx, avoid the query macros. Use FromRow where possible instead of using try_get to fetch information from a row
+
+- Donot make any assumption that breaks any existing public interface. If there is any confusion then ask but never ever work with assumptions.
