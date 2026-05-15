@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::flows::interner::NodeId;
 use crate::flows::phase::Phase;
@@ -37,6 +38,11 @@ pub(crate) struct Frame {
 
     /// NodeId of the node that started this frame;
     callable: Callable,
+
+    /// Unique ID for this frame's conversation session.
+    /// Agent frames use this to tag and filter history messages.
+    /// Flow frames carry one too but never read it.
+    pub(crate) session_id: String,
 }
 
 impl Frame {
@@ -45,6 +51,7 @@ impl Frame {
             states: IndexMap::new(),
             phase: None,
             callable: call,
+            session_id: Uuid::now_v7().to_string(),
         }
     }
 
@@ -241,5 +248,20 @@ impl FlowState {
     /// Returns the entry NodeId of the top frame's callable, if any.
     pub(crate) fn callable_entry(&self) -> Option<NodeId> {
         self.top().map(|f| f.callable.entry)
+    }
+
+    /// Returns the session ID of the top frame, or an empty string if the stack is empty.
+    pub(crate) fn top_session_id(&self) -> &str {
+        self.top().map_or("", |f| &f.session_id)
+    }
+
+    /// Returns the session IDs of all frames currently on the stack, bottom to top.
+    pub fn active_session_ids(&self) -> Vec<&str> {
+        self.frames.iter().map(|f| f.session_id.as_str()).collect()
+    }
+
+    /// Returns the current call-stack depth (number of active frames).
+    pub(crate) fn depth(&self) -> usize {
+        self.frames.len()
     }
 }

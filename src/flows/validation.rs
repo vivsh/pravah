@@ -29,7 +29,7 @@ use crate::flows::{FlowGraph, NodeId, errors::BuildError, flows::FlowNode};
 /// **Join nodes**
 /// - Each join target group (identified by `target`) is validated only once; duplicate join
 ///   entries for the same target are skipped after the first.
-/// - Must have exactly 2 parents.
+/// - Must have at least 2 parents.
 /// - No duplicate parent `NodeId`s within the same join.
 /// - No parent `NodeId` may equal the join's own `target`.
 /// - Every parent `NodeId` must refer to a registered node.
@@ -102,9 +102,9 @@ pub fn validate_nodes(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> R
                 if !seen_join_groups.insert(group_key) {
                     continue;
                 }
-                if info.parents.len() != 2 {
+                if info.parents.len() < 2 {
                     problems.push(format!(
-                        "join (target '{}'): must have exactly 2 parents, found {}",
+                        "join (target '{}'): must have at least 2 parents, found {}",
                         graph.interner.name_of(info.target),
                         info.parents.len()
                     ));
@@ -144,20 +144,21 @@ pub fn validate_nodes(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> R
                 }
             }
             FlowNode::Flow(inner) => {
-                let (inner_name, inner_exit) = match inner.parent_entry {
+                let (inner_name, _inner_exit) = match inner.parent_entry {
                     Some(n) => (n, inner.exit),
                     None => {
                         problems.push(format!("flow '{}': missing name or exit_name", key_str));
                         continue;
                     }
                 };
-                if inner_name == inner_exit {
+                let exit_str = inner.interner.name_of(inner.exit);
+                let parent_entry_str = graph.interner.name_of(inner_name);
+                if parent_entry_str == exit_str {
                     problems.push(format!(
                         "flow '{}': exit_name equals input name — sub-flow output would overwrite its own input",
                         key_str
                     ));
                 }
-                let exit_str = inner.interner.name_of(inner.exit);
                 if graph.interner.fwd.get(exit_str).is_none() {
                     problems.push(format!(
                         "flow '{}': output type '{}' is not registered in the parent graph",

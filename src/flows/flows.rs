@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::history::FlowHistory;
+use super::nary::{MergeInputs, SplitOutputs};
 use crate::flows::NodeId;
 use crate::flows::errors::{AgentError, BuildError, FlowError};
 use crate::flows::interner::Interner;
@@ -345,10 +346,9 @@ impl FlowGraph {
         factory: &dyn ClientFactory,
         ctx: Context,
         history: &mut FlowHistory,
-        session_id: &str,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
-        self.step(factory, ctx, history, session_id, None, states)
+        self.step(factory, ctx, history, None, states)
             .await
     }
 
@@ -357,11 +357,10 @@ impl FlowGraph {
         factory: &dyn ClientFactory,
         ctx: Context,
         history: &mut FlowHistory,
-        session_id: &str,
         resumption: Value,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
-        self.step(factory, ctx, history, session_id, Some(resumption), states)
+        self.step(factory, ctx, history, Some(resumption), states)
             .await
     }
 
@@ -515,9 +514,9 @@ impl FlowGraph {
         factory: &dyn ClientFactory,
         ctx: Context,
         history: &mut FlowHistory,
-        session_id: &str,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
+        let session_id = states.top_session_id().to_owned();
         let phase = states.phase().cloned().ok_or_else(|| FlowError::Internal {
             handler: "handle_child_agent",
             detail: "called without a phase".into(),
@@ -538,9 +537,10 @@ impl FlowGraph {
 
                 let agent_name = flow.interner.name_of(node.id);
                 history.push(
+                    &session_id,
+                    agent_name,
                     Message::from_json(Role::User, &input)
-                        .map_err(AgentError::Serialize)?
-                        .with_context(agent_name, session_id),
+                        .map_err(AgentError::Serialize)?,
                 );
 
                 // Advance phase: Entry is consumed once the user message is in history.
@@ -554,7 +554,7 @@ impl FlowGraph {
                     });
                 }
 
-                Self::dispatch_agent(node, flow, factory, history, session_id, states).await
+                Self::dispatch_agent(node, flow, factory, history, states).await
             }
 
             Phase::Continue(val) => {
@@ -583,10 +583,14 @@ impl FlowGraph {
                                 let call_id = call_id.clone();
                                 let agent_id = flow.interner.name_of(node.id);
                                 completions.insert(*t);
-                                history.push(Message::tool_output(
-                                    call_id,
-                                    serde_json::to_string(&value).map_err(AgentError::Serialize)?,
-                                ).with_context(agent_id, session_id));
+                                history.push(
+                                    &session_id,
+                                    agent_id,
+                                    Message::tool_output(
+                                        call_id,
+                                        serde_json::to_string(&value).map_err(AgentError::Serialize)?,
+                                    ),
+                                );
                             }
                         }
 
@@ -614,7 +618,7 @@ impl FlowGraph {
                     }
                     // Explicit Dispatch: call LLM.
                     Some(AgentContinuation::Dispatch) => {
-                        Self::dispatch_agent(node, flow, factory, history, session_id, states).await
+                        Self::dispatch_agent(node, flow, factory, history, states).await
                     }
                     // None: agent output written to exit slot; call_exit will pop the frame.
                     None => Ok(FlowStep::Continue),
@@ -641,9 +645,9 @@ impl FlowGraph {
         flow: &FlowGraph,
         factory: &dyn ClientFactory,
         history: &mut FlowHistory,
-        session_id: &str,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
+        let session_id = states.top_session_id().to_owned();
         let agent_name = flow.interner.name_of(node.id).to_string();
 
         let options = ClientOptions::default()
@@ -659,14 +663,16 @@ impl FlowGraph {
                 reason: e.to_string(),
             })?;
 
-        history.validate().map_err(|e| AgentError::LlmFailed {
+        history.validate_for_session(&session_id).map_err(|e| AgentError::LlmFailed {
             agent: agent_name.clone(),
             reason: e.to_string(),
         })?;
 
+        let session_msgs = history.for_session(&session_id);
+
         let response =
             client
-                .execute(history.as_slice())
+                .execute(&session_msgs)
                 .await
                 .map_err(|e| AgentError::LlmFailed {
                     agent: agent_name.clone(),
@@ -676,11 +682,12 @@ impl FlowGraph {
         match response.output {
             ClientOutput::Output(val) => {
                 let content = serde_json::to_string(&val).map_err(AgentError::Serialize)?;
-                let mut msg = Message::assistant(content).with_context(&agent_name, session_id);
-                if let Some(usage) = response.usage {
-                    msg = msg.with_usage(usage);
-                }
-                history.push(msg);
+                let msg = if let Some(usage) = response.usage {
+                    Message::assistant(content).with_usage(usage)
+                } else {
+                    Message::assistant(content)
+                };
+                history.push(&session_id, &agent_name, msg);
 
                 // Retire the input slot, write the output slot.
                 if !states.set_state(node.exit, val, Some(node.id)) {
@@ -701,15 +708,14 @@ impl FlowGraph {
             }
 
             ClientOutput::ToolCalls { thought, calls } => {
-                history.push(Message {
+                let atc_msg = Message {
                     role: Role::AssistantToolCalls {
                         calls: calls.clone(),
                     },
                     content: thought.unwrap_or_default(),
                     usage: response.usage,
-                    agent_id: agent_name.clone(),
-                    session_id: session_id.to_owned(),
-                });
+                };
+                history.push(&session_id, &agent_name, atc_msg);
 
                 let mut seen_ids = std::collections::HashSet::new();
 
@@ -767,7 +773,6 @@ impl FlowGraph {
         factory: &dyn ClientFactory,
         ctx: Context,
         history: &mut FlowHistory,
-        session_id: &str,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
         let total_states = states.len();
@@ -788,7 +793,7 @@ impl FlowGraph {
                 FlowNode::Agent(agent) => {
                     if let Some(_phase) = states.phase() {
                         return Self::handle_child_agent(
-                            agent, self, factory, ctx, history, session_id, states,
+                            agent, self, factory, ctx, history, states,
                         )
                         .await;
                     } else {
@@ -839,7 +844,7 @@ impl FlowGraph {
                     if states.callable_entry() == Some(current_node_id) {
                         // We are inside the agent tool's own frame — run it as a child agent.
                         return Self::handle_child_agent(
-                            agent, self, factory, ctx, history, session_id, states,
+                            agent, self, factory, ctx, history, states,
                         )
                         .await;
                     } else {
@@ -861,7 +866,6 @@ impl FlowGraph {
         factory: &dyn ClientFactory,
         ctx: Context,
         history: &mut FlowHistory,
-        session_id: &str,
         mut resumption: Option<Value>,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
@@ -881,7 +885,7 @@ impl FlowGraph {
             }
         }
         let result = self
-            .step_inner(factory, ctx, history, session_id, states)
+            .step_inner(factory, ctx, history, states)
             .await?;
         match result {
             FlowStep::Continue => {
@@ -1102,6 +1106,81 @@ impl FlowBuilder {
                 func: shim,
             }),
         );
+        self
+    }
+
+    /// Registers a split node at `From` (1→N fan-out). The closure receives the parent
+    /// value and returns an N-tuple; each element becomes an independent branch in the
+    /// state map. Supports arities 2–16 via [`SplitOutputs`].
+    pub fn split<From, Out, H>(mut self, func: H) -> Self
+    where
+        From: 'static + Serialize + DeserializeOwned + JsonSchema,
+        Out: SplitOutputs,
+        H: Fn(From, Context) -> Result<Out, FlowError> + Send + Sync + 'static,
+    {
+        let from_id_str = From::schema_name();
+        let from_id = self.flow.interner.intern(&from_id_str);
+        if self.flow.nodes.contains_key(&from_id) {
+            self.errors.push(format!("split '{}': duplicate node key", from_id_str));
+            return self;
+        }
+        let children: Vec<NodeId> = Out::schema_names()
+            .into_iter()
+            .map(|s| self.flow.interner.intern(&s))
+            .collect();
+        let shim: Box<dyn Fn(&Value, Context) -> Result<Vec<StateNode>, FlowError> + Send + Sync> =
+            Box::new(move |value: &Value, ctx: Context| {
+                let typed: From =
+                    serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
+                func(typed, ctx)?.into_nodes()
+            });
+        self.flow.nodes.insert(
+            from_id,
+            FlowNode::Fork(ForkInfo {
+                name: from_id,
+                children,
+                func: shim,
+            }),
+        );
+        self
+    }
+
+    /// Registers a merge node (N→1 fan-in). Waits until all elements of `In`'s tuple
+    /// are present in the state map, passes them as a typed tuple to `func`, and writes
+    /// the result. Supports arities 2–16 via [`MergeInputs`].
+    pub fn merge<In, Out, H>(mut self, func: H) -> Self
+    where
+        In: MergeInputs,
+        Out: 'static + Serialize + DeserializeOwned + JsonSchema,
+        H: Fn(In, Context) -> Result<Out, FlowError> + Send + Sync + 'static,
+    {
+        let parent_names = In::schema_names();
+        let parent_ids: Vec<NodeId> = parent_names
+            .iter()
+            .map(|s| self.flow.interner.intern(s))
+            .collect();
+        for (id, name) in parent_ids.iter().zip(&parent_names) {
+            if self.flow.nodes.contains_key(id) {
+                self.errors.push(format!("merge: duplicate node key '{}'", name));
+                return self;
+            }
+        }
+        let target_id = self.flow.interner.intern(&Out::schema_name());
+        let shim: Arc<dyn Fn(&[Value], Context) -> Result<StateNode, FlowError> + Send + Sync> =
+            Arc::new(move |inputs: &[Value], ctx: Context| {
+                let typed = In::from_values(inputs)?;
+                node(func(typed, ctx)?)
+            });
+        for &pid in &parent_ids {
+            self.flow.nodes.insert(
+                pid,
+                FlowNode::Join(JoinInfo {
+                    parents: parent_ids.clone(),
+                    target: target_id,
+                    func: Arc::clone(&shim),
+                }),
+            );
+        }
         self
     }
 

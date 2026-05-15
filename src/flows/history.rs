@@ -1,82 +1,199 @@
-use crate::clients::{ClientError, Message, Role, TokenUsage, ToolCall};
+use uuid::Uuid;
 
-/// Conversation history for a flow, with optional sliding-window eviction and token accounting.
+use crate::clients::{ClientError, Message, Role, TokenUsage};
+use crate::flows::compactor::CompactionResult;
+
+/// A single entry in conversation history, wrapping a wire-format [`Message`] with
+/// pravah-internal metadata needed for persistence and compaction.
 ///
-/// Usage is auto-extracted from pushed [`Message`]s that carry a `usage` field.
-/// The first `pinned` messages are never evicted (default: 1, to preserve the
-/// initial task/seed User message).
+/// Construction is exclusively via [`FlowHistory::push`] — external code never builds
+/// this directly.
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    /// Stable row identity for persistence (UPDATE/DELETE by id).
+    pub id: Uuid,
+    /// Monotonic ordering counter stamped by [`FlowHistory::push`].
+    pub position: u64,
+    pub session_id: String,
+    pub agent_id: String,
+    /// Set by [`FlowHistory::apply_compaction`]; cleared by [`FlowHistory::prune_evicted`].
+    pub evicted: bool,
+    /// Wire-format message — no agent/session metadata.
+    pub message: Message,
+}
+
+impl HistoryEntry {
+    pub(crate) fn new(session_id: &str, agent_id: &str, message: Message) -> Self {
+        Self {
+            id: Uuid::now_v7(),
+            position: 0,
+            session_id: session_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+            evicted: false,
+            message,
+        }
+    }
+}
+
+/// Append-only conversation store for all flow agents.
+///
+/// `FlowHistory` is the sole constructor of [`HistoryEntry`] values. Compaction and
+/// persistence consumers read entries but never build them.
+///
+/// Token accounting is updated automatically on every [`push`](FlowHistory::push).
 #[derive(Debug, Clone, Default)]
 pub struct FlowHistory {
-    messages: Vec<Message>,
-    max_turns: Option<usize>,
-    pinned: usize,
+    entries: Vec<HistoryEntry>,
+    next_position: u64,
     last_usage: Option<TokenUsage>,
     total_input: Option<u32>,
     total_output: Option<u32>,
 }
 
 impl FlowHistory {
-    pub fn new(max_turns: Option<usize>) -> Self {
-        Self {
-            max_turns,
-            pinned: 1,
-            ..Default::default()
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn with_pinned(max_turns: Option<usize>, pinned: usize) -> Self {
-        Self {
-            max_turns,
-            pinned,
-            ..Default::default()
-        }
-    }
-
-    /// Appends `msg`, auto-extracts its token usage, then evicts if over the turn limit.
-    pub fn push(&mut self, msg: Message) {
-        if let Some(u) = msg.usage {
+    /// Appends a new entry for `(session_id, agent_id, message)`.
+    ///
+    /// Stamps `position`, generates a fresh `id`, and extracts token usage from the message.
+    pub fn push(&mut self, session_id: &str, agent_id: &str, message: Message) {
+        if let Some(u) = message.usage {
             self.last_usage = Some(u);
             self.total_input = add_opt(self.total_input, u.input);
             self.total_output = add_opt(self.total_output, u.output);
         }
-        self.messages.push(msg);
-        self.evict_if_needed();
+        let mut entry = HistoryEntry::new(session_id, agent_id, message);
+        entry.position = self.next_position;
+        self.next_position += 1;
+        self.entries.push(entry);
     }
 
-    pub fn extend(&mut self, msgs: impl IntoIterator<Item = Message>) {
-        for msg in msgs {
-            self.push(msg);
-        }
-    }
-
-    pub fn as_slice(&self) -> &[Message] {
-        &self.messages
-    }
-
-    pub fn last_role(&self) -> Option<&Role> {
-        self.messages.last().map(|m| &m.role)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.messages.is_empty()
-    }
-
-    /// Number of complete assistant turns after the pinned region.
-    pub fn turn_count(&self) -> usize {
-        let start = self.pinned.min(self.messages.len());
-        self.messages[start..]
+    /// Returns all non-evicted entries for `session_id` as borrowed refs.
+    ///
+    /// Pass the returned vec back into [`apply_compaction`](FlowHistory::apply_compaction)
+    /// so indices in [`CompactionResult`] reference the same slice.
+    pub fn session_entries(&self, session_id: &str) -> Vec<&HistoryEntry> {
+        self.entries
             .iter()
-            .filter(|m| matches!(m.role, Role::Assistant | Role::AssistantToolCalls { .. }))
-            .count()
+            .filter(|e| !e.evicted && e.session_id == session_id)
+            .collect()
     }
 
-    pub fn validate(&self) -> Result<(), ClientError> {
-        if matches!(self.last_role(), Some(Role::AssistantToolCalls { .. })) {
+    /// Returns all non-evicted messages for `session_id`, unwrapped from their entries.
+    ///
+    /// This is the slice passed to the LLM client on every dispatch.
+    pub fn for_session(&self, session_id: &str) -> Vec<Message> {
+        self.entries
+            .iter()
+            .filter(|e| !e.evicted && e.session_id == session_id)
+            .map(|e| e.message.clone())
+            .collect()
+    }
+
+    /// Checks that the most recent non-evicted message for `session_id` is not an
+    /// unresolved `AssistantToolCalls`. Called before dispatching to the LLM.
+    pub fn validate_for_session(&self, session_id: &str) -> Result<(), ClientError> {
+        let last = self
+            .entries
+            .iter()
+            .rev()
+            .find(|e| !e.evicted && e.session_id == session_id);
+        if matches!(
+            last.map(|e| &e.message.role),
+            Some(Role::AssistantToolCalls { .. })
+        ) {
             return Err(ClientError::Validation(
                 "history ends with assistant tool calls without tool results".into(),
             ));
         }
         Ok(())
+    }
+
+    /// All entries including evicted. Intended for [`HistoryStore`] consumers only.
+    pub fn entries(&self) -> &[HistoryEntry] {
+        &self.entries
+    }
+
+    /// Applies a compaction result for one session.
+    ///
+    /// `session_slice` must be the exact slice returned by
+    /// [`session_entries`](FlowHistory::session_entries) for this `session_id`.
+    /// Indices in `result.evict_indices` reference positions within it.
+    ///
+    /// Marks targeted entries evicted, then inserts an optional summary entry whose
+    /// `position` equals the first evicted entry's position.
+    ///
+    /// Returns an error if any index is out of bounds.
+    pub fn apply_compaction(
+        &mut self,
+        session_id: &str,
+        session_slice: &[&HistoryEntry],
+        result: CompactionResult,
+    ) -> Result<(), ClientError> {
+        if result.evict_indices.is_empty() && result.summary.is_none() {
+            return Ok(());
+        }
+
+        let mut evict_ids: Vec<Uuid> = Vec::with_capacity(result.evict_indices.len());
+        let mut first_position: Option<u64> = None;
+        for &rel_idx in &result.evict_indices {
+            let entry = session_slice.get(rel_idx).ok_or_else(|| {
+                ClientError::Validation(format!(
+                    "compaction index {rel_idx} out of bounds for session '{session_id}'"
+                ))
+            })?;
+            if first_position.map_or(true, |p| entry.position < p) {
+                first_position = Some(entry.position);
+            }
+            evict_ids.push(entry.id);
+        }
+
+        for entry in &mut self.entries {
+            if evict_ids.contains(&entry.id) {
+                entry.evicted = true;
+            }
+        }
+
+        if let Some(summary_message) = result.summary {
+            let position = first_position.unwrap_or(self.next_position);
+            let insert_at = self
+                .entries
+                .iter()
+                .position(|e| evict_ids.contains(&e.id))
+                .unwrap_or(self.entries.len());
+            let summary_entry = HistoryEntry {
+                id: Uuid::now_v7(),
+                position,
+                session_id: session_id.to_owned(),
+                agent_id: "__summary__".to_owned(),
+                evicted: false,
+                message: summary_message,
+            };
+            self.entries.insert(insert_at, summary_entry);
+        }
+
+        Ok(())
+    }
+
+    /// Physically removes all entries marked `evicted`.
+    ///
+    /// Called by [`HistoryStore::flush`] after the DB has acknowledged deletions.
+    pub fn prune_evicted(&mut self) {
+        self.entries.retain(|e| !e.evicted);
+    }
+
+    pub fn last_role(&self) -> Option<&Role> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| !e.evicted)
+            .map(|e| &e.message.role)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.iter().all(|e| e.evicted)
     }
 
     pub fn last_usage(&self) -> Option<TokenUsage> {
@@ -98,62 +215,6 @@ impl FlowHistory {
             _ => None,
         }
     }
-
-    /// Returns a filtered slice of messages visible to the given session.
-    ///
-    /// Untagged messages (`session_id` is empty) are always included — they represent
-    /// shared context such as the initial seed message. Passing an empty `session_id`
-    /// returns all messages.
-    pub fn for_session(&self, session_id: &str) -> Vec<Message> {
-        if session_id.is_empty() {
-            return self.messages.clone();
-        }
-        self.messages
-            .iter()
-            .filter(|m| m.session_id.is_empty() || m.session_id == session_id)
-            .cloned()
-            .collect()
-    }
-
-    fn first_turn_end_exclusive(&self) -> Option<usize> {
-        // Scan forward from `pinned` to find the first assistant turn.
-        // This tolerates histories loaded via `with_history` where the message
-        // at index `pinned` may not be an assistant turn.
-        let start = (self.pinned..self.messages.len()).find(|&i| {
-            matches!(
-                self.messages[i].role,
-                Role::Assistant | Role::AssistantToolCalls { .. }
-            )
-        })?;
-        match &self.messages[start].role {
-            Role::AssistantToolCalls { .. } => {
-                let mut end = start + 1;
-                while end < self.messages.len()
-                    && matches!(self.messages[end].role, Role::Tool { .. })
-                {
-                    end += 1;
-                }
-                Some(end)
-            }
-            Role::Assistant => Some(start + 1),
-            _ => unreachable!(),
-        }
-    }
-
-    fn evict_if_needed(&mut self) {
-        let max = match self.max_turns {
-            Some(m) => m,
-            None => return,
-        };
-        while self.turn_count() > max {
-            match self.first_turn_end_exclusive() {
-                Some(end) => {
-                    self.messages.drain(self.pinned..end);
-                }
-                None => break,
-            }
-        }
-    }
 }
 
 fn add_opt(a: Option<u32>, b: Option<u32>) -> Option<u32> {
@@ -168,6 +229,7 @@ fn add_opt(a: Option<u32>, b: Option<u32>) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::ToolCall;
 
     fn usage(input: u32, output: u32) -> TokenUsage {
         TokenUsage {
@@ -176,36 +238,32 @@ mod tests {
         }
     }
 
-    fn msg_with_usage(u: TokenUsage) -> Message {
-        Message {
-            role: Role::Assistant,
-            content: "hi".into(),
-            usage: Some(u),
-            agent_id: String::new(),
-            session_id: String::new(),
+    fn push_assistant(h: &mut FlowHistory, session: &str, u: Option<TokenUsage>) {
+        let mut msg = Message::assistant("hi");
+        if let Some(u) = u {
+            msg = msg.with_usage(u);
         }
+        h.push(session, "agent", msg);
     }
 
-    fn atc_msg(calls: Vec<ToolCall>) -> Message {
-        Message {
-            role: Role::AssistantToolCalls { calls },
-            content: String::new(),
-            usage: None,
-            agent_id: String::new(),
-            session_id: String::new(),
-        }
-    }
-
-    fn tool_msg(call_id: &str) -> Message {
-        Message {
-            role: Role::Tool {
-                call_id: call_id.into(),
+    fn push_atc(h: &mut FlowHistory, session: &str, calls: Vec<ToolCall>) {
+        h.push(
+            session,
+            "agent",
+            Message {
+                role: Role::AssistantToolCalls { calls },
+                content: String::new(),
+                usage: None,
             },
-            content: "ok".into(),
-            usage: None,
-            agent_id: String::new(),
-            session_id: String::new(),
-        }
+        );
+    }
+
+    fn push_tool(h: &mut FlowHistory, session: &str, call_id: &str) {
+        h.push(session, "agent", Message::tool_output(call_id.into(), "ok"));
+    }
+
+    fn push_user(h: &mut FlowHistory, session: &str, content: &str) {
+        h.push(session, "agent", Message::user(content));
     }
 
     fn dummy_call(id: &str) -> ToolCall {
@@ -220,8 +278,8 @@ mod tests {
     /// `push` records the most recently seen token usage.
     #[test]
     fn push_records_last_usage() {
-        let mut h = FlowHistory::new(None);
-        h.push(msg_with_usage(usage(10, 5)));
+        let mut h = FlowHistory::new();
+        push_assistant(&mut h, "s1", Some(usage(10, 5)));
         let u = h.last_usage().unwrap();
         assert_eq!(u.input, Some(10));
         assert_eq!(u.output, Some(5));
@@ -230,89 +288,125 @@ mod tests {
     /// `push` accumulates total input and output tokens across all messages.
     #[test]
     fn push_accumulates_totals() {
-        let mut h = FlowHistory::new(None);
-        h.push(msg_with_usage(usage(10, 5)));
-        h.push(msg_with_usage(usage(20, 8)));
+        let mut h = FlowHistory::new();
+        push_assistant(&mut h, "s1", Some(usage(10, 5)));
+        push_assistant(&mut h, "s1", Some(usage(20, 8)));
         assert_eq!(h.total_input(), Some(30));
         assert_eq!(h.total_output(), Some(13));
         assert_eq!(h.total_usage(), Some(43));
     }
 
-    /// `turn_count` counts only assistant turns after the pinned region.
+    /// `for_session` returns only non-evicted messages for the exact session.
     #[test]
-    fn turn_count_counts_assistant_turns() {
-        let mut h = FlowHistory::new(None);
-        h.push(Message::user("seed"));
-        h.push(atc_msg(vec![dummy_call("1")]));
-        h.push(tool_msg("1"));
-        assert_eq!(h.turn_count(), 1);
-        h.push(atc_msg(vec![dummy_call("2")]));
-        h.push(tool_msg("2"));
-        assert_eq!(h.turn_count(), 2);
+    fn for_session_excludes_other_sessions() {
+        let mut h = FlowHistory::new();
+        push_user(&mut h, "s1", "task");
+        push_atc(&mut h, "s1", vec![dummy_call("1")]);
+        push_tool(&mut h, "s1", "1");
+        push_user(&mut h, "s2", "task");
+        push_atc(&mut h, "s2", vec![dummy_call("2")]);
+        let s1 = h.for_session("s1");
+        assert_eq!(s1.len(), 3);
     }
 
-    /// Sliding window evicts the oldest non-pinned turn when limit is exceeded.
+    /// `validate_for_session` rejects a session whose last message is unresolved tool calls.
     #[test]
-    fn sliding_evicts_oldest_turn() {
-        let mut h = FlowHistory::new(Some(1));
-        h.push(Message::user("seed"));
-        h.push(atc_msg(vec![dummy_call("1")]));
-        h.push(tool_msg("1"));
-        h.push(atc_msg(vec![dummy_call("2")]));
-        h.push(tool_msg("2"));
-        assert_eq!(h.turn_count(), 1);
-        assert!(matches!(h.as_slice()[0].role, Role::User));
+    fn validate_for_session_rejects_dangling() {
+        let mut h = FlowHistory::new();
+        push_atc(&mut h, "s1", vec![dummy_call("1")]);
+        assert!(matches!(
+            h.validate_for_session("s1"),
+            Err(ClientError::Validation(_))
+        ));
+        assert!(h.validate_for_session("s2").is_ok());
     }
 
-    /// Pinned messages are never evicted even when the window is exceeded.
-    #[test]
-    fn pinned_messages_survive_eviction() {
-        let mut h = FlowHistory::with_pinned(Some(1), 2);
-        h.push(Message::user("seed"));
-        h.push(Message::user("ctx"));
-        h.push(atc_msg(vec![dummy_call("1")]));
-        h.push(tool_msg("1"));
-        h.push(atc_msg(vec![dummy_call("2")]));
-        h.push(tool_msg("2"));
-        assert_eq!(h.as_slice().len(), 4);
-        assert!(matches!(h.as_slice()[0].role, Role::User));
-        assert!(matches!(h.as_slice()[1].role, Role::User));
-    }
-
-    /// `validate` returns an error when history ends with unresolved tool calls.
-    #[test]
-    fn validate_rejects_dangling_tool_calls() {
-        let mut h = FlowHistory::new(None);
-        h.push(Message::user("seed"));
-        h.push(atc_msg(vec![dummy_call("1")]));
-        assert!(matches!(h.validate(), Err(ClientError::Validation(_))));
-    }
-
-    /// `last_role` returns the role of the most recently pushed message.
+    /// `last_role` returns the role of the most recent non-evicted entry.
     #[test]
     fn last_role_returns_correct_role() {
-        let mut h = FlowHistory::new(None);
+        let mut h = FlowHistory::new();
         assert!(h.last_role().is_none());
-        h.push(Message::user("hi"));
+        push_user(&mut h, "s1", "hi");
         assert!(matches!(h.last_role(), Some(Role::User)));
     }
 
     /// `total_usage` returns `None` when either input or output is missing.
     #[test]
     fn total_usage_requires_both_values() {
-        let mut h = FlowHistory::new(None);
-        h.push(Message {
-            role: Role::Assistant,
-            content: "x".into(),
-            usage: Some(TokenUsage {
-                input: Some(5),
-                output: None,
-            }),
-            agent_id: String::new(),
-            session_id: String::new(),
-        });
+        let mut h = FlowHistory::new();
+        h.push(
+            "s1",
+            "agent",
+            Message {
+                role: Role::Assistant,
+                content: "x".into(),
+                usage: Some(TokenUsage {
+                    input: Some(5),
+                    output: None,
+                }),
+            },
+        );
         assert_eq!(h.total_input(), Some(5));
         assert_eq!(h.total_output(), None);
         assert_eq!(h.total_usage(), None);
     }
+
+    /// `apply_compaction` marks targeted entries evicted and inserts a summary.
+    #[test]
+    fn apply_compaction_marks_evicted_and_inserts_summary() {
+        let mut h = FlowHistory::new();
+        push_atc(&mut h, "s1", vec![dummy_call("1")]);
+        push_tool(&mut h, "s1", "1");
+        push_atc(&mut h, "s1", vec![dummy_call("2")]);
+        push_tool(&mut h, "s1", "2");
+
+        let owned: Vec<_> = h.session_entries("s1").into_iter().cloned().collect();
+        let refs: Vec<_> = owned.iter().collect();
+        let result = CompactionResult {
+            evict_indices: vec![0, 1], // first turn
+            summary: Some(Message::assistant("summary")),
+        };
+        h.apply_compaction("s1", &refs, result).unwrap();
+
+        let active = h.for_session("s1");
+        // summary + second turn (2 messages)
+        assert_eq!(active.len(), 3);
+        assert!(matches!(active[0].role, Role::Assistant));
+    }
+
+    /// `apply_compaction` returns an error for an out-of-bounds index.
+    #[test]
+    fn apply_compaction_rejects_out_of_bounds_index() {
+        let mut h = FlowHistory::new();
+        push_atc(&mut h, "s1", vec![dummy_call("1")]);
+        let owned: Vec<_> = h.session_entries("s1").into_iter().cloned().collect();
+        let refs: Vec<_> = owned.iter().collect();
+        let result = CompactionResult {
+            evict_indices: vec![99],
+            summary: None,
+        };
+        assert!(h.apply_compaction("s1", &refs, result).is_err());
+    }
+
+    /// `prune_evicted` physically removes evicted entries.
+    #[test]
+    fn prune_evicted_removes_entries() {
+        let mut h = FlowHistory::new();
+        push_atc(&mut h, "s1", vec![dummy_call("1")]);
+        push_tool(&mut h, "s1", "1");
+        push_atc(&mut h, "s1", vec![dummy_call("2")]);
+        push_tool(&mut h, "s1", "2");
+
+        let owned: Vec<_> = h.session_entries("s1").into_iter().cloned().collect();
+        let refs: Vec<_> = owned.iter().collect();
+        let result = CompactionResult {
+            evict_indices: vec![0, 1],
+            summary: None,
+        };
+        h.apply_compaction("s1", &refs, result).unwrap();
+        assert_eq!(h.entries().len(), 4); // still present, just evicted
+        h.prune_evicted();
+        assert_eq!(h.entries().len(), 2);
+    }
 }
+

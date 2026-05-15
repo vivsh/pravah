@@ -278,8 +278,6 @@ mod tests {
                 },
                 content: "checking".into(),
                 usage: None,
-                agent_id: String::new(),
-                session_id: String::new(),
             },
             Message::tool_output("toolu_1".into(), r#"{"ok":true}"#),
         ]);

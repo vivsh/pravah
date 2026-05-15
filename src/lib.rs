@@ -5,5 +5,7 @@ pub mod deps;
 pub mod flows;
 pub mod tools;
 pub mod utils;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use context::{Context, FlowConf};

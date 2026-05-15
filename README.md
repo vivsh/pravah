@@ -9,6 +9,11 @@ _Pravah_ (प्रवाह, _pruh-VAH_) — Sanskrit/Hindi for "flow" or "curr
 A Rust library for building **stepwise, transactional data-flow pipelines** with
 first-class support for agentic programming.
 
+Flows are typed graphs where every edge is a Rust type contract. Cycles are
+supported — an `either` node can route back to any earlier type, enabling
+retry loops, multi-turn conversations, and interactive pipelines within a
+single `FlowRuntime`.
+
 Each call to `next()` does one bounded unit of work — one LLM turn, one tool
 batch, one deterministic transform, one branch, one fork, one join, or one
 step of a nested flow.
@@ -150,29 +155,33 @@ serialized, but user code stays typed.
 
 ### Node Types
 
-| Builder method           | What it does                                    |
-| ------------------------ | ----------------------------------------------- |
-| `agent::<A>()`           | LLM-backed node; structured output or tool loop |
-| `work::<From, Out>()`    | Deterministic async transform                   |
-| `either::<From, A, B>()` | Routes to one of two typed branches             |
-| `fork::<From, A, B>()`   | Splits one value into two active branches       |
-| `join::<A, B, Out>()`    | Combines two branches once both are ready       |
-| `flow::<F>()`            | Embeds another `Flow` as a node                 |
+| Builder method           | What it does                                         |
+| ------------------------ | ---------------------------------------------------- |
+| `agent::<A>()`           | LLM-backed node; structured output or tool loop      |
+| `work::<From, Out>()`    | Deterministic async transform                        |
+| `either::<From, A, B>()` | Routes to one of two typed branches (cycles allowed) |
+| `split::<From, Out>()`   | Fans one value out into N independent branches       |
+| `merge::<In, Out>()`     | Collects N branches once all are ready               |
+| `flow::<F>()`            | Embeds another `Flow` as a node                      |
 
-Fork and join model information shape, not parallelism — the runner is
+`split` and `merge` are the primary fan-out/fan-in primitives. `split` receives
+one typed value and returns an N-tuple; each element becomes an independent branch
+in the state map. `merge` receives an N-tuple (all branches must be present before
+it fires) and produces one value. Both support arities 2–16, so a single `split`
+replaces chains of binary forks, and a single `merge` replaces chains of binary
+joins. Fan-out/fan-in models information shape, not parallelism — the runner is
 single-threaded.
 
+`fork`/`join` remain available as binary-only aliases for `split`/`merge`.
+
 The builder validates: duplicate node identities, entry not in graph,
-unreachable nodes, no path to a terminal value, invalid fork/join definitions,
+unreachable nodes, no path to a terminal value, invalid split/merge definitions,
 and both branches of `either` routing to the same type.
 
 Runtime construction adds two output contract checks:
 
 - the graph must resolve to exactly one distinct terminal state id
 - that terminal id must match `Flow::Output`
-
-Join validation also rejects `join::<A, B, Out>()` when `Out` is the same type
-as `A` or `B`, which would otherwise overwrite and remove the result.
 
 ## Agents
 
@@ -279,9 +288,89 @@ loop {
 
 Call `runtime.snapshot()` to capture an opaque `FlowSnapshot`
 (serializable, no closures). Restore it with `FlowRuntime::from_snapshot(snap)`.
-Conversation history is managed separately — re-attach it with
-`runtime.with_history(history)` after restoring. Pravah defines the
+Conversation history is separate from the execution snapshot — save it via a
+`HistoryStore` (see [History Management](#history-management)) and re-attach
+with `runtime.with_history(history)` after restoring. Pravah defines the
 serializable state; it does not prescribe where snapshots live.
+
+## History Management
+
+Every LLM turn is stored in a `FlowHistory` that the runtime owns. History is
+kept separate from execution state so you can persist them independently and
+restore them on a different machine or process.
+
+### Compaction
+
+By default (`NoopCompactor`) turns accumulate forever. Attach a
+`SlidingWindowCompactor` to cap how many turns are kept per session:
+
+```rust
+use pravah::flows::{FlowRuntime, SlidingWindowCompactor};
+
+let mut runtime = FlowRuntime::new(input)?
+    .with_compactor(SlidingWindowCompactor { max_turns_per_session: 10 });
+```
+
+After every `next()` / `resume()` call the runtime runs compaction per active
+session, then calls `HistoryStore::flush`. A
+`Role::AssistantToolCalls` message and all its matching tool results count as
+one turn; incomplete turns are never evicted.
+
+Implement `HistoryCompactor` to supply a custom strategy (summarisation,
+importance scoring, etc.):
+
+```rust
+use pravah::flows::{CompactionResult, HistoryCompactor, HistoryEntry};
+
+struct SummarisationCompactor;
+
+impl HistoryCompactor for SummarisationCompactor {
+    async fn compact(&self, session_id: &str, entries: &[&HistoryEntry]) -> CompactionResult {
+        // Decide what to evict and optionally return a summary Message.
+        CompactionResult { evict_indices: vec![], summary: None }
+    }
+}
+```
+
+### Store
+
+Implement `HistoryStore` to persist turns to a database, object storage, or
+any backend:
+
+```rust
+use pravah::flows::{FlowHistory, HistoryEntry, HistoryStore};
+
+struct MyStore;
+
+impl HistoryStore for MyStore {
+    type Error = std::io::Error;
+
+    async fn flush(&self, history: &mut FlowHistory) -> Result<(), Self::Error> {
+        for entry in history.entries() {
+            if entry.evicted {
+                // delete by entry.id
+            } else {
+                // upsert by entry.position
+            }
+        }
+        history.prune_evicted(); // free evicted entries from memory
+        Ok(())
+    }
+
+    async fn load(&self, session_ids: &[&str]) -> Result<Vec<HistoryEntry>, Self::Error> {
+        // restore from DB
+        Ok(vec![])
+    }
+}
+
+let mut runtime = FlowRuntime::new(input)?
+    .with_compactor(SlidingWindowCompactor { max_turns_per_session: 10 })
+    .with_store(MyStore);
+```
+
+The default `NoopHistoryStore` calls `prune_evicted()` immediately so evicted
+entries do not accumulate in memory. See [ARCHITECTURE.md](ARCHITECTURE.md)
+for the full snapshot vs. history separation model.
 
 ## Nested Flows
 
@@ -292,7 +381,7 @@ sub-flow. The same node-identity rule applies at each graph boundary.
 
 ### Example: Article Production Pipeline
 
-Combines every node type — fork, join, work, either, agent, and two nested flows.
+Combines every node type — split, merge, work, either, agent, and two nested flows.
 The tree below is the output of `FlowGraphDiagram::for_flow::<ArticleRequest>()?.render_tree()`:
 
 ```text
@@ -324,3 +413,6 @@ resumable, testable with fake clients, and explicit about information movement.
 **Don't use it** as a distributed workflow engine, parallel job scheduler,
 queue processor, or durable storage system. Pravah can sit inside those
 systems but does not try to replace them.
+
+For a deeper look at module structure, the history/compaction model, and
+extension points see [ARCHITECTURE.md](ARCHITECTURE.md).

@@ -37,6 +37,9 @@ pub enum Role {
 }
 
 /// A single turn in the conversation history.
+///
+/// Wire-format only — carries no pravah-internal metadata (session, agent).
+/// Metadata lives on [`crate::flows::HistoryEntry`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -44,12 +47,6 @@ pub struct Message {
     /// Token usage reported by the provider for this message (set on assistant turns only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
-    /// The agent node that produced this message. Empty string means untagged/shared.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub agent_id: String,
-    /// The session this message belongs to. Empty string means untagged/shared.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub session_id: String,
 }
 
 impl Message {
@@ -58,8 +55,6 @@ impl Message {
             role: Role::User,
             content: content.into(),
             usage: None,
-            agent_id: String::new(),
-            session_id: String::new(),
         }
     }
 
@@ -68,8 +63,6 @@ impl Message {
             role: Role::Assistant,
             content: content.into(),
             usage: None,
-            agent_id: String::new(),
-            session_id: String::new(),
         }
     }
 
@@ -78,8 +71,6 @@ impl Message {
             role: Role::Tool { call_id },
             content: content.into(),
             usage: None,
-            agent_id: String::new(),
-            session_id: String::new(),
         }
     }
 
@@ -89,22 +80,12 @@ impl Message {
             role,
             content: serde_json::to_string(value)?,
             usage: None,
-            agent_id: String::new(),
-            session_id: String::new(),
         })
     }
 
     pub fn with_usage(self, usage: TokenUsage) -> Self {
         Message {
             usage: Some(usage),
-            ..self
-        }
-    }
-
-    pub fn with_context(self, agent_id: &str, session_id: &str) -> Self {
-        Message {
-            agent_id: agent_id.to_owned(),
-            session_id: session_id.to_owned(),
             ..self
         }
     }

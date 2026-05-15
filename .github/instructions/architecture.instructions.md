@@ -15,14 +15,19 @@ src/flows/
   mod.rs          — public re-exports only; no logic
   flows.rs        — FlowGraph, FlowBuilder, node handlers, step loop
   runtime.rs      — FlowRuntime<I>; thin orchestrator over FlowGraph
+  nary.rs         — SplitOutputs, MergeInputs traits; macro impls for arities 2–16
   state.rs        — FlowState; frame stack, suspension, call_enter/call_exit
   phase.rs        — Phase enum (Entry | Continue(Option<Value>))
   errors.rs       — FlowError (public), BuildError (internal)
-  history.rs      — FlowHistory; conversation message list + validation
+  history.rs      — FlowHistory + HistoryEntry; conversation store + validation
+  compactor.rs    — HistoryCompactor trait, NoopCompactor, SlidingWindowCompactor
+  store.rs        — HistoryStore trait, NoopHistoryStore
   interner.rs     — Interner; string ↔ NodeId bijection
   validation.rs   — validate_nodes (per-node), validate (reachability)
   diagram.rs      — Mermaid diagram generation; no runtime logic
 ```
+
+`src/clients/mod.rs` contains `Message` — a **wire-only** type carrying `role`, `content`, and optional `usage`. It has no agent or session metadata. All pravah-internal metadata lives on `HistoryEntry` in `history.rs`.
 
 ---
 
@@ -40,17 +45,19 @@ Tool node keys are interned as `"{agent_name}::{tool_name}"` to avoid collisions
 
 `FlowGraph.nodes: HashMap<NodeId, FlowNode>` stores every node. `FlowNode` variants:
 
-| Variant  | Dispatch model                | State transition                                                       |
-| -------- | ----------------------------- | ---------------------------------------------------------------------- |
-| `Work`   | async closure                 | removes `name`, inserts `exit_name`                                    |
-| `Agent`  | multi-step (see below)        | see Agent Dispatch                                                     |
-| `Tool`   | async, driven by parent agent | removes `name`, or exits agent frame                                   |
-| `Either` | sync closure                  | removes `name`, inserts one of `left_name`/`right_name`                |
-| `Fork`   | sync closure                  | removes `name`, inserts all children                                   |
-| `Join`   | sync closure                  | fires only when all parents present; removes parents, inserts `target` |
-| `Flow`   | pushes child frame            | transfers entry value via `call_enter`                                 |
+| Variant  | Dispatch model                | State transition                                                         |
+| -------- | ----------------------------- | ------------------------------------------------------------------------ |
+| `Work`   | async closure                 | removes `name`, inserts `exit_name`                                      |
+| `Agent`  | multi-step (see below)        | see Agent Dispatch                                                       |
+| `Tool`   | async, driven by parent agent | removes `name`, or exits agent frame                                     |
+| `Either` | sync closure                  | removes `name`, inserts one of `left_name`/`right_name` (cycles allowed) |
+| `Fork`   | sync closure                  | removes `name`, inserts all children                                     |
+| `Join`   | sync closure                  | fires only when all parents present; removes parents, inserts `target`   |
+| `Flow`   | pushes child frame            | transfers entry value via `call_enter`                                   |
 
-Edges are **implicit**: each node writes the key its successor reads. There are no explicit edge structures. The graph is a DAG of state-key contracts enforced at build and validation time.
+`Fork` and `Join` serve both the binary `fork`/`join` builder methods and the N-ary `split`/`merge` methods. `split` produces a `Fork` node whose `children` vec has N entries (arity 2–16); `merge` produces N `Join` nodes (one per parent key) that share the same `Arc`-ed shim and `target`. No new `FlowNode` variants are needed.
+
+Edges are **implicit**: each node writes the key its successor reads. There are no explicit edge structures. The graph supports cycles — an `Either` node can write a key that was already consumed earlier in the same flow, enabling retry loops and multi-turn conversations. Validation checks reachability and type contracts but does not forbid cycles.
 
 ---
 
@@ -213,7 +220,7 @@ Fires on every `next()` call while the agent frame is active. Dispatches based o
 
 | Phase                   | Action                                                                                                                                |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `Entry`                 | Push user message to history. Advance phase to `Continue(Dispatch)`. Call `dispatch_agent`.                                           |
+| `Entry`                 | Call `history.push(session_id, agent_name, user_message)`. Advance phase to `Continue(Dispatch)`. Call `dispatch_agent`.              |
 | `Continue(Dispatch)`    | Call `dispatch_agent` directly.                                                                                                       |
 | `Continue(PendingTool)` | Move agent key to tail of state map. If tool keys still present, return `Continue` (let tools dispatch first). Otherwise re-dispatch. |
 | `Continue(None)`        | Agent has written its exit slot. Return `Continue`; `call_exit` in `step` will pop this frame.                                        |
@@ -224,16 +231,18 @@ Calls the LLM once. Two response paths:
 
 **Structured output (`ClientOutput::Output`)**:
 
-- Pushes assistant message to history.
+- Calls `history.push(&session_id, &agent_name, Message::assistant(content))`.
 - Writes `val` under `node.exit`, removes `node.id`.
 - Sets `Phase::Continue(None)`.
 
 **Tool calls (`ClientOutput::ToolCalls`)**:
 
 - Validates tool names (unknown → `AgentError`) and uniqueness (duplicate → `AgentError`).
-- Pushes `AssistantToolCalls` message to history.
+- Calls `history.push(&session_id, &agent_name, Message { role: AssistantToolCalls { calls }, ... })`.
 - Writes each `ToolCall` JSON under its interned `NodeId`.
 - Sets `Phase::Continue(PendingTool)`.
+
+`flows.rs` never constructs `HistoryEntry` directly — all history writes go through `FlowHistory::push`.
 
 ---
 
@@ -271,16 +280,90 @@ This is maintained by `handle_child_agent`'s `PendingTool` branch: it removes th
 
 `FlowRuntime<I>` is a thin shell over `FlowGraph`. Its responsibilities:
 
-- Owns `FlowState`, `FlowHistory`, `session_id`, `factory`, `callables`.
+- Owns `FlowState`, `FlowHistory`, `factory`, `callables`, `compactor`, `store`.
 - `callable_index()` determines which `FlowGraph` in `callables` is the active one for the top frame. This changes when frames are pushed/popped by `call_enter`/`call_exit`.
-- `next()` and `resume()` resolve the active graph and delegate to `FlowGraph::step`.
+- `next()` and `resume()` resolve the active graph, delegate to `FlowGraph::step`, then run the compaction loop and store flush (see Conversation History and Compaction).
 - Returns `FlowError::Internal` (not panic) if `callable_index()` is `None` (stack empty — flow already done) or if the index is out of range (invariant violation).
+- `compactor` and `store` are both held as `Box<dyn Dyn*>` (internal erasure of the public RPITIT async traits). Default: `NoopCompactor` and `NoopHistoryStore`.
 
 ### callables
 
 `FlowRuntime.callables: Vec<FlowCall(Arc<FlowGraph>)>` is built once at construction by `collect_callables`, which walks the root graph recursively and assigns `callable_index` to each `FlowGraph` (including sub-flows) before pushing them. The root graph is pushed last.
 
 `Frame.callable.index` indexes into this flat list. The active graph is always `callables[callable_index()]`.
+
+---
+
+## Session Lifecycle
+
+Every `Frame` owns a `session_id: String` generated in `Frame::new()` via `Uuid::now_v7()`. Session identity is therefore tied to frame lifetime: a session starts when `call_enter` pushes a frame and ends when `call_exit` pops it.
+
+`FlowState::top_session_id() -> &str` returns the top frame's `session_id`. Agent nodes read this in `handle_child_agent` and `dispatch_agent` to tag history entries.
+
+`FlowState::active_session_ids() -> Vec<&str>` returns all current frame session IDs bottom-to-top. `FlowRuntime` uses this after each step to drive the per-session compaction loop.
+
+Flow frames also get a `session_id` but it is never read — only agent frames use it.
+
+---
+
+## Conversation History and Compaction
+
+### HistoryEntry and FlowHistory
+
+`FlowHistory` stores `Vec<HistoryEntry>`. **`HistoryEntry` is never constructed outside `FlowHistory`**; its `pub(crate) new()` is the only constructor.
+
+```
+HistoryEntry {
+    pub id: Uuid,           // stable DB row key; generated by FlowHistory::push()
+    pub position: u64,      // monotonic ordering; stamped by push()
+    pub session_id: String,
+    pub agent_id: String,
+    pub evicted: bool,      // set by apply_compaction(); cleared by prune_evicted()
+    pub message: Message,   // wire-format only; no agent/session metadata on Message
+}
+```
+
+`FlowHistory::push(session_id, agent_id, message)` — the **only** way to add an entry. Constructs the `HistoryEntry` internally and stamps `position` from a monotonic counter.
+
+All read paths (`for_session`, `validate_for_session`, `last_role`, `is_empty`) filter out `evicted` entries.
+
+`FlowHistory::entries() -> &[HistoryEntry]` returns all entries including evicted; intended for `HistoryStore` only.
+
+### Visibility contract
+
+| Consumer                    | Sees                                                                                                                             |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `flows.rs`                  | `Message` only — calls `history.push(session_id, agent_id, message)`                                                             |
+| `HistoryCompactor`          | reads `&[HistoryEntry]` (one session's non-evicted slice), writes `CompactionResult { evict_indices, summary: Option<Message> }` |
+| `HistoryStore`              | reads `history.entries() -> &[HistoryEntry]` (all, including evicted)                                                            |
+| `HistoryEntry` construction | exclusively inside `FlowHistory`                                                                                                 |
+
+### Compaction
+
+`HistoryCompactor` is a public async trait (RPITIT — no `async_trait` in the public API). It is erased internally; `FlowRuntime` holds `Box<dyn DynHistoryCompactor>`.
+
+Compaction is always **session-scoped**. `FlowRuntime` drives the loop:
+
+```
+after each next() / resume():
+  for session_id in state.active_session_ids():
+      entries = history.session_entries(session_id)   // !evicted, this session only
+      result  = compactor.compact(session_id, &entries).await
+      history.apply_compaction(session_id, &entries, result)
+  store.flush(&mut history).await
+```
+
+`compact()` receives one session's slice and returns indices **into that same slice** to evict, plus an optional summary `Message`. It never sees other sessions' data — cross-session contamination is structurally impossible.
+
+`apply_compaction` maps relative indices → absolute positions in `self.entries`, marks them `evicted = true`, and if a summary `Message` was returned, wraps it into a `HistoryEntry` (new `id`, `position` = first evicted entry's position, `agent_id = "__summary__"`).
+
+### Persistence
+
+`HistoryStore` is a public async trait, erased internally the same way as `HistoryCompactor`. `flush` upserts new entries (by `position > watermark`), deletes DB rows for `evicted = true` entries using `entry.id`, then calls `history.prune_evicted()` to physically remove evicted entries from memory.
+
+`NoopHistoryStore::flush` calls `prune_evicted()` immediately so evicted entries do not accumulate.
+
+`load(session_ids)` restores entries on process restart for the given sessions.
 
 ---
 
