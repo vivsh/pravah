@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::context::Context;
 use crate::flows::flows::{AgentInfo, FlowNode};
 use crate::flows::{Flow, FlowGraph};
-use crate::tools::base::ErasedTool;
+use crate::tools::base::{ErasedTool, ToolOutcome};
 use crate::tools::{ToolBox, ToolDefinition, ToolError};
 
 /// Configuration returned by [`Agent::build`].
@@ -61,7 +61,7 @@ pub trait Agent: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'stat
     fn build() -> AgentConfig;
 }
 
-/// Auto-generated sentinel tool. The only place [`AgentExit`] / [`ToolError::Exit`] is constructed.
+/// Auto-generated sentinel tool. Returns [`ToolOutcome::Exit`]; never propagates to user code.
 struct AgentExitTool {
     name: String,
     output_type: String,
@@ -89,8 +89,8 @@ impl ErasedTool for AgentExitTool {
         &'a self,
         _ctx: Context,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<Value, ToolError>> + Send + 'a>> {
-        Box::pin(async move { Err(ToolError::Exit(args)) })
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutcome, ToolError>> + Send + 'a>> {
+        Box::pin(async move { Ok(ToolOutcome::Exit(args)) })
     }
 }
 
@@ -134,7 +134,7 @@ impl<A: Agent + 'static> ErasedTool for AgentToolDispatcher<A> {
         &'a self,
         _ctx: Context,
         _args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<Value, ToolError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutcome, ToolError>> + Send + 'a>> {
         Box::pin(async move {
             unreachable!("AgentToolDispatcher::call_raw should never be called — frame-push intercepts")
         })
@@ -178,7 +178,7 @@ impl<F: Flow + 'static> ErasedTool for FlowToolDispatcher<F> {
         &'a self,
         _ctx: Context,
         _args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<Value, ToolError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutcome, ToolError>> + Send + 'a>> {
         Box::pin(async move {
             unreachable!("FlowToolDispatcher::call_raw should never be called — frame-push intercepts")
         })

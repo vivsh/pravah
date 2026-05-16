@@ -34,16 +34,16 @@ pub enum ToolError {
     Missing(#[from] DepsError),
     #[error("{0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
-    /// Auto-generated `submit` sentinel signalling a flow state transition.
-    /// Caught by the orchestrator before reaching history; never propagates to user code.
-    #[doc(hidden)]
-    #[error("exit signal from tool")]
-    Exit(serde_json::Value),
-    /// A tool requesting external input before the flow can continue.
-    /// Caught by the orchestrator, which surfaces the deserialized input as
-    /// [`crate::flows::FlowStep::Suspend`] so the caller can inspect and downcast it,
-    /// then call `resume()` with a value matching `output_type`.
-    #[error("suspend signal from tool")]
+}
+
+/// Internal outcome of a tool dispatch, distinct from a true error.
+/// `Exit` and `Suspend` are orchestrator signals; they never reach user code.
+pub(crate) enum ToolOutcome {
+    /// Normal tool result serialized as JSON.
+    Value(Value),
+    /// The auto-generated exit sentinel was called; carries the agent's final output.
+    Exit(Value),
+    /// A suspend-tool was called; flow pauses until resumed with a matching value.
     Suspend { value: SuspendedValue, output_type: String },
 }
 
@@ -238,12 +238,12 @@ pub(crate) trait ErasedTool: Send + Sync {
         true
     }
 
-    /// Deserializes `args` into the concrete tool type, calls it, returns the output.
+    /// Deserializes `args` into the concrete tool type, calls it, returns the outcome.
     fn call_raw<'a>(
         &'a self,
         ctx: Context,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, ToolError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutcome, ToolError>> + Send + 'a>>;
 }
 
 /// Zero-sized adapter that makes any [`Tool`] object-safe as [`ErasedTool`].
@@ -270,11 +270,11 @@ impl<T: Tool + 'static> ErasedTool for ToolDispatcher<T> {
         &'a self,
         ctx: Context,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, ToolError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutcome, ToolError>> + Send + 'a>> {
         Box::pin(async move {
             let input: T = serde_json::from_value(args).map_err(ToolError::Deserialize)?;
             let output = input.call(ctx).await?;
-            serde_json::to_value(output).map_err(ToolError::Serialize)
+            serde_json::to_value(output).map_err(ToolError::Serialize).map(ToolOutcome::Value)
         })
     }
 }
@@ -386,7 +386,7 @@ impl ToolBox {
         i: usize,
         args: Value,
         ctx: Context,
-    ) -> Result<Value, ToolError> {
+    ) -> Result<ToolOutcome, ToolError> {
         self.tools[i].call_raw(ctx, args).await
     }
 
@@ -402,11 +402,16 @@ impl ToolBox {
             .iter()
             .find(|t| t.name() == tool_call.name)
             .ok_or_else(|| ToolError::UnknownTool(tool_call.name.clone()))?;
-        tool.call_raw(ctx, tool_call.args.clone()).await
+        match tool.call_raw(ctx, tool_call.args.clone()).await? {
+            ToolOutcome::Value(v) => Ok(v),
+            ToolOutcome::Exit(_) | ToolOutcome::Suspend { .. } => {
+                unreachable!("internal sentinel tools must not be dispatched via ToolBox::call")
+            }
+        }
     }
 }
 
-/// Hidden tool that returns `ToolError::Suspend` — registered via [`ToolBox::suspend`].
+/// Hidden tool registered via [`ToolBox::suspend`]. Returns [`ToolOutcome::Suspend`].
 struct SuspendTool {
     def: ToolDefinition,
     input_type: String,
@@ -435,12 +440,12 @@ impl ErasedTool for SuspendTool {
         &'a self,
         _ctx: Context,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<Value, ToolError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutcome, ToolError>> + Send + 'a>> {
         let deserialize = self.deserialize.clone();
         let output_type = self.output_type.clone();
         Box::pin(async move {
             let value = (deserialize)(args).map_err(ToolError::Deserialize)?;
-            Err(ToolError::Suspend { value, output_type })
+            Ok(ToolOutcome::Suspend { value, output_type })
         })
     }
 }

@@ -6,31 +6,19 @@
 
 _Pravah_ (प्रवाह, _pruh-VAH_) — Sanskrit/Hindi for "flow" or "current".
 
-A Rust library for building **stepwise, transactional data-flow pipelines** with
-first-class support for agentic programming.
+Pravah is a Rust library for building **stepwise, resumable, transactional
+data-flow systems**.
 
-Flows are typed graphs where every edge is a Rust type contract. Cycles are
-supported — an `either` node can route back to any earlier type, enabling
-retry loops, multi-turn conversations, and interactive pipelines within a
-single `FlowRuntime`.
+It is designed for workflows where execution must remain:
 
-Each call to `next()` does one bounded unit of work — one LLM turn, one tool
-batch, one deterministic transform, one branch, one fork, one join, or one
-step of a nested flow.
+- typed
+- inspectable
+- replayable
+- resumable
+- deterministic
+- portable across processes and machines
 
-> **Pravah executes flows one transaction-sized step at a time.**
-> After every `next()` call, the entire flow state can be:
->
-> - **persisted** — snapshot to a database, file, or message queue
-> - **suspended** — pause at an approval gate or external event
-> - **resumed** — restore the snapshot in any process and continue
-> - **inspected** — examine typed state between steps for debugging or auditing
-> - **retried** — replay from the last good snapshot on failure
-> - **transferred** — hand the snapshot to a different machine, worker, or service
->
-> Nothing is hidden in closures or thread-local state. The only things needed to
-> continue a flow are the `FlowSnapshot` and the flow graph definition — both
-> of which you own.
+Agentic systems are one application of this model — not the model itself.
 
 ## Installation
 
@@ -39,36 +27,142 @@ step of a nested flow.
 pravah = "0.3"
 ```
 
-| Feature              | Default | Description                                                                                 |
-| -------------------- | :-----: | ------------------------------------------------------------------------------------------- |
-| `provider-openai`    |    ✓    | OpenAI-compatible API client (chat + embeddings)                                            |
-| `provider-anthropic` |    ✓    | Anthropic Claude API client (chat only)                                                     |
-| `provider-gemini`    |    ✓    | Google Gemini API client (chat + embeddings)                                                |
-| `provider-ollama`    |    ✓    | Ollama local model client (chat + embeddings)                                               |
-| `provider-genai`     |    —    | Extra providers via the [`genai`](https://crates.io/crates/genai) crate (chat + embeddings) |
-
-To use only specific providers, disable defaults:
+To enable only selected providers:
 
 ```toml
 pravah = { version = "0.3", default-features = false, features = ["provider-openai"] }
 ```
 
-Model URLs select the backend at runtime: `openai://gpt-4o`,
-`anthropic://claude-sonnet-4-5`, `gemini://gemini-2.5-flash-lite`,
-`ollama://localhost:11434/qwen3:8b`. Inject a custom `ClientFactory` for
-testing, recording/replay, or hosted gateways.
+Available provider features: `provider-openai`, `provider-anthropic`,
+`provider-gemini`, `provider-ollama`, `provider-genai`. All are enabled by
+default.
 
-## Getting Started
+## The Core Idea
 
-A two-node flow: an agent produces bullet points, a work node formats them into a report.
+A Pravah flow advances **one bounded step at a time**.
+
+One call to `next()` performs exactly one unit of work:
+
+- one LLM turn
+- one tool batch
+- one deterministic transform
+- one branch
+- one merge
+- one suspend point
+- one nested flow step
+
+After every step, the entire runtime can be:
+
+- snapshotted
+- persisted
+- transferred
+- retried
+- suspended
+- resumed elsewhere
+
+Nothing is hidden inside closures, async tasks, or thread-local state.
+
+The only things required to continue execution are:
+
+- the `FlowSnapshot`
+- the flow graph definition
+
+Both are owned by you.
+
+## Why Pravah Exists
+
+Most workflow and agent frameworks optimize for:
+
+- convenience
+- implicit execution
+- parallel scheduling
+- opaque orchestration
+
+Pravah optimizes for something different:
+
+> explicit information movement through deterministic execution steps
+
+That changes the entire runtime model.
+
+A Pravah flow behaves more like a resumable interpreter than a background task
+runner.
+
+This makes it particularly good for:
+
+- long-running AI systems
+- human-in-the-loop pipelines
+- transactional orchestration
+- approval workflows
+- resumable execution
+- durable conversations
+- replay/debugging
+- nested agent systems
+- state-machine-like applications
+
+## Mental Model
+
+A flow graph is made of typed nodes.
+
+Each node consumes one Rust type and produces another.
+
+```text
+Input
+  ↓
+Agent
+  ↓
+Split
+ ↙   ↘
+A     B
+ ↘   ↙
+ Merge
+   ↓
+Suspend
+   ↓
+Resume
+   ↓
+Done
+```
+
+The runtime stores typed values internally as serializable JSON state.
+
+Execution progresses by consuming one state value at a time.
+
+## The Most Important Rule
+
+Within a single flow graph:
+
+> one Rust type can identify only one node
+
+If `PlanInput` exists in state, there must be exactly one node capable of
+consuming it.
+
+This guarantees:
+
+- deterministic routing
+- resumable execution
+- checkpoint safety
+- unambiguous replay
+- graph validation before runtime
+
+The builder rejects ambiguous graphs automatically.
+
+## Tiny Example
+
+A two-step flow:
+
+1. an agent generates bullet points
+2. a work node formats them into a report
 
 ```rust
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{
+    Agent, AgentConfig, Flow, FlowError,
+    FlowGraph, FlowRuntime, FlowStep,
+};
+
 use pravah::{Context, FlowConf};
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-// ── Types ──────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct SummariseRequest { topic: String }
@@ -79,24 +173,21 @@ struct BulletPoints { points: Vec<String> }
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct Report { text: String }
 
-// ── Agent ──────────────────────────────────────────────────────────────────
-
 impl Agent for SummariseRequest {
     type Output = BulletPoints;
 
     fn build() -> AgentConfig {
-        AgentConfig::new("Summarise the topic as concise bullet points.", "openai://gpt-4o-mini")
+        AgentConfig::new(
+            "Summarise the topic into concise bullet points.",
+            "openai://gpt-4o-mini",
+        )
     }
 }
-
-// ── Work node ─────────────────────────────────────────────────────────────
 
 async fn format_report(points: BulletPoints, _ctx: Context) -> Result<Report, FlowError> {
     let text = points.points.iter().map(|p| format!("• {p}")).collect::<Vec<_>>().join("\n");
     Ok(Report { text })
 }
-
-// ── Flow ───────────────────────────────────────────────────────────────────
 
 impl Flow for SummariseRequest {
     type Output = Report;
@@ -109,12 +200,10 @@ impl Flow for SummariseRequest {
     }
 }
 
-// ── Run ────────────────────────────────────────────────────────────────────
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = Context::default(); // shorthand for Context::new(FlowConf::default())
-    let input = SummariseRequest { topic: "Rust ownership model".into() };
+    let ctx = Context::default();
+    let input = SummariseRequest { topic: "Rust ownership".into() };
     let mut runtime = FlowRuntime::new(input)?;
 
     loop {
@@ -131,88 +220,125 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
     Ok(())
 }
 ```
 
-Or use `run_until` to avoid writing the loop:
+See the [`examples/`](examples/) directory for runnable examples.
+
+## Execution Model
+
+Pravah is intentionally:
+
+- stepwise
+- single-runtime
+- deterministic
+
+Parallelism is modeled explicitly through graph structure rather than hidden
+inside the scheduler.
+
+A `split()` represents independent information branches.
+A `merge()` represents synchronization.
+
+The runtime itself stays predictable and replayable.
+
+## Node Types
+
+| Builder method      | What it does                                                               |
+| ------------------- | -------------------------------------------------------------------------- |
+| `agent::<A>()`      | LLM-backed node; structured output or tool loop                            |
+| `work(f)`           | Effectful async transform; `async fn(I, Context) -> Result<O, FlowError>` |
+| `map(f)`            | Pure sync transform; `fn(I) -> O`, infallible, no `Context`                |
+| `either(f)`         | Routes to one branch; `fn(I) -> Either<A, B>`, infallible (cycles ok)     |
+| `split(f)`          | Fans out to N branches; `fn(I) -> (A, B, ...)`, infallible                |
+| `merge(f)`          | Collects N branches once all ready; `fn((A, B, ...)) -> O`, infallible    |
+| `suspend::<I, O>()` | Pauses the flow; caller resumes with a value of type `O`                   |
+| `flow::<F>()`       | Embeds another `Flow` as a node                                            |
+
+`split` and `merge` support arities 2–16. `fork`/`join` are binary-only
+aliases for `split`/`merge`.
+
+## Pure vs Effectful Nodes
+
+Pravah distinguishes between two categories of nodes.
+
+### Pure algebra nodes
+
+`map`, `either`, `split`, `merge` (and their `fork`/`join` aliases) cannot
+fail and cannot perform effects. Their handlers are plain functions with no
+`Context` argument and no `Result` wrapper:
 
 ```rust
-use pravah::flows::{RunLimits, RunOutcome};
+fn(I) -> O
+```
 
-let outcome = runtime.run_until(ctx, RunLimits::new()).await?;
-match outcome {
-    RunOutcome::Done(v) => println!("{v}"),
-    RunOutcome::Suspend(sv) => { /* handle */ }
-    RunOutcome::LimitExceeded(kind) => eprintln!("limit hit: {kind:?}"),
+### Effectful nodes
+
+`work` and `agent` may perform I/O or external interaction. They are async
+and fallible:
+
+```rust
+async fn(I, Context) -> Result<O, FlowError>
+```
+
+This separation keeps graph semantics explicit and keeps pure routing logic
+free of error-handling noise.
+
+## Suspend And Resume
+
+There are two ways a flow can suspend.
+
+**Flow-level suspend** — `suspend::<I, O>()` registers a first-class suspend
+node. When a value of type `I` arrives in state the flow pauses immediately.
+Resume by supplying a value of type `O`:
+
+```rust
+builder.suspend::<ApprovalRequest, ApprovalDecision>()
+```
+
+**Tool-level suspend** — register a suspend point via `ToolBox::suspend::<T, Out>()`. The LLM
+calls the tool with a value of type `T`; the flow pauses and surfaces a `SuspendedValue`
+wrapping that `T` as `FlowStep::Suspend`. Useful for approval gates or missing
+credentials needed mid-agent-turn.
+
+In both cases the caller's loop looks the same:
+
+```rust
+loop {
+    match runtime.next(ctx.clone()).await? {
+        FlowStep::Continue => {}
+        FlowStep::Done(v) => break,
+        FlowStep::Suspend(sv) => {
+            // do out-of-band work, then:
+            runtime.resume(ctx.clone(), decision).await?;
+        }
+    }
 }
 ```
 
-## Examples
+This makes Pravah suitable for workflows that span minutes, hours, days,
+machines, or processes without losing execution state.
 
-| Example                                  | Description                                                                                            |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| [linear_flow](examples/linear_flow.rs)   | Agent produces bullet points; a work node formats them into a Markdown report.                         |
-| [split_merge](examples/split_merge.rs)   | A proposal fans out to three specialist agents (tech, market, risk) and merges into a single brief.    |
-| [nested_flow](examples/nested_flow.rs)   | An outer flow delegates part of its work to a fully independent inner flow via `.flow::<F>()`.         |
-| [debate](examples/debate.rs)             | A claim is argued by two agents in parallel, judged by a third, then summarised by a nested flow.      |
-| [snapshot](examples/snapshot.rs)         | A flow is snapshotted mid-execution, serialised to disk, restored in a new runtime, and continued.     |
-| [story](examples/story.rs)               | A multi-agent comic writer that loops panel by panel, letting the user steer the plot after each turn. |
-| [gen_diagrams](examples/gen_diagrams.rs) | Full multi-stage article pipeline that generates and prints the flow graph as a tree and SVG.          |
-| [human_input](examples/human_input.rs)   | An LLM calls `HumanInput` as a tool to collect a decision from stdin before submitting its result.     |
+## Nested Flows
 
-## Core Concepts
+A flow has the same shape as a node — typed input, stepwise execution, typed
+output — so flows compose naturally:
 
-**Each input type identifies exactly one node within a flow graph.**
+```rust
+FlowGraph::builder()
+    .flow::<PlannerFlow>()
+    .flow::<ResearchFlow>()
+    .flow::<ReviewFlow>()
+    .build()
+```
 
-`PlanInput` can be the input for one agent, one work node, one branch, one
-fork, or one join participant — never more than one. The builder rejects
-duplicates. When a value of that type is present in flow state there is exactly
-one node that can consume it, keeping routing unambiguous and state
-checkpointable between steps.
-
-Rust types are the contract at every boundary: input structs define the LLM
-message shape, output types define the result schema, tool structs define
-callable arguments. State is stored as JSON internally so it can be
-serialized, but user code stays typed.
-
-### Node Types
-
-| Builder method      | What it does                                                              |
-| ------------------- | ------------------------------------------------------------------------- |
-| `agent::<A>()`      | LLM-backed node; structured output or tool loop                           |
-| `work(f)`           | Effectful async transform; `async fn(I, Context) -> Result<O, FlowError>` |
-| `map(f)`            | Pure sync transform; `fn(I) -> O`, infallible, no `Context`               |
-| `either(f)`         | Routes to one branch; `fn(I) -> Either<A, B>`, infallible (cycles ok)     |
-| `split(f)`          | Fans out to N branches; `fn(I) -> (A, B, ...)`, infallible                |
-| `merge(f)`          | Collects N branches once all ready; `fn(A, B, ...) -> O`, infallible      |
-| `suspend::<I, O>()` | Pauses the flow; caller resumes with a value of type `O`                  |
-| `flow::<F>()`       | Embeds another `Flow` as a node                                           |
-
-`split` and `merge` are the primary fan-out/fan-in primitives. `split` receives
-one typed value and returns an N-tuple; each element becomes an independent branch
-in the state map. `merge` receives an N-tuple (all branches must be present before
-it fires) and produces one value. Both support arities 2–16, so a single `split`
-replaces chains of binary forks, and a single `merge` replaces chains of binary
-joins. Fan-out/fan-in models information shape, not parallelism — the runner is
-single-threaded.
-
-`fork`/`join` remain available as binary-only aliases for `split`/`merge`.
-
-**Node purity.** `map`, `either`, `split`/`fork`, `merge`/`join` are pure
-algebra nodes: their handlers are plain `fn(I) -> O` with no `Context` argument
-and no `Result` wrapper. Effects and I/O belong in `work` or `agent` nodes.
-
-The builder validates: duplicate node identities, entry not in graph,
-unreachable nodes, no path to a terminal value, invalid split/merge definitions,
-and both branches of `either` routing to the same type.
-
-Runtime construction adds two output contract checks:
-
-- the graph must resolve to exactly one distinct terminal state id
-- that terminal id must match `Flow::Output`
+Nested flows inherit the same guarantees: deterministic execution,
+resumability, snapshot safety, and typed boundaries.
 
 ## Agents
+
+Agents are typed LLM nodes defined by implementing `Agent`:
 
 ```rust
 use schemars::JsonSchema;
@@ -234,6 +360,10 @@ impl Agent for PlannerInput {
 }
 ```
 
+Model URLs follow the pattern `provider://model-id`. Examples:
+`openai://gpt-4o`, `anthropic://claude-opus-4-5`,
+`gemini://gemini-2.5-flash-lite`, `ollama://localhost:11434/llama3`.
+
 To attach tools, call `.with_tools()`:
 
 ```rust
@@ -248,12 +378,12 @@ typed exit sentinel so the model can submit the final value.
 
 Structured-output behavior is provider-specific:
 
-- OpenAI: native JSON Schema mode
-- Gemini: native JSON Schema mode (schema is sanitized for provider compatibility)
-- Ollama: native JSON Schema mode when `output_schema` is present; falls back to
+- **OpenAI**: native JSON Schema mode
+- **Gemini**: native JSON Schema mode (schema is sanitized for provider compatibility)
+- **Ollama**: native JSON Schema mode when `output_schema` is present; falls back to
   generic JSON object mode otherwise
-- Anthropic: schema is provided as a strict prompt contract (best effort)
-- GenAI: JSON schema response format via the `genai` adapter
+- **Anthropic**: schema is provided as a strict prompt contract (best effort)
+- **GenAI**: JSON schema response format via the `genai` adapter
 
 ## Tools
 
@@ -288,223 +418,65 @@ container, and shared HTTP client.
 is rejected, and symlinks are allowed only when their resolved target stays
 within `working_dir`.
 
-### Context and FlowConf
-
-`Context` is cheap to clone (inner `Arc`). Build it from a `FlowConf`:
-
-```rust
-use pravah::{Context, FlowConf};
-
-let ctx = Context::new(FlowConf {
-    working_dir: Some("/tmp/workspace".into()),
-    commands: vec!["git".into(), "cargo".into()], // tools may only exec these
-    http_timeout_secs: Some(60),
-});
-```
-
-Or use `Context::default()` when none of those matter. To inject typed
-dependencies accessible inside tool calls:
-
-```rust
-use pravah::deps::Deps;
-
-let deps = Deps::new().insert(my_db_pool);
-let ctx = Context::default().with_deps(deps);
-
-// inside a Tool::call:
-let pool = ctx.require::<MyDbPool>()?;
-```
-
-## Suspend And Resume
-
-There are two ways a flow can suspend:
-
-**Tool-level suspend** — register a suspend point with `ToolBox::suspend::<Input, ResumeType>()`. The LLM calls this tool with a value of type `Input`; the flow pauses and surfaces a `FlowStep::Suspend(SuspendedValue)`. Downcast to retrieve the value. Resume by calling `runtime.resume(ctx, value)` where `value: ResumeType`.
-
-```rust
-// Registration (inside Agent::build)
-ToolBox::new()
-    .suspend::<ApprovalRequest, ApprovalDecision>()
-
-// At the call site
-FlowStep::Suspend(sv) => {
-    let req = sv.downcast::<ApprovalRequest>().unwrap();
-    let decision = ApprovalDecision { approved: true };
-    runtime.resume(ctx.clone(), decision).await?;
-}
-```
-
-**Flow-level suspend** — `builder.suspend::<I, O>()` registers a first-class
-suspend node. When a value of type `I` arrives in state the flow pauses
-immediately (no agent or tool needed). Resume by supplying a value of type `O`.
-Useful for human-in-the-loop steps, webhook callbacks, or any out-of-band
-computation that should be a named node in the graph.
-
-In both cases the caller's loop looks the same:
-
-```rust
-use serde_json::json;
-
-loop {
-    match runtime.next(ctx.clone()).await? {
-        FlowStep::Continue => {}
-        FlowStep::Suspend(sv) => {
-            // Downcast sv to retrieve the suspended value, do out-of-band work,
-            // then supply the result:
-            runtime.resume(ctx.clone(), json!({ "approved": true })).await?;
-        }
-        FlowStep::Done(v) => { println!("{v}"); break; }
-    }
-}
-```
-
 ## Persistence
 
-Call `runtime.snapshot()` to capture an opaque `FlowSnapshot`
-(serializable, no closures). Restore it with `FlowRuntime::from_snapshot(snap)`.
-Conversation history is separate from the execution snapshot — save it via a
-`HistoryStore` (see [History Management](#history-management)) and re-attach
-with `runtime.with_history(history)` after restoring. Pravah defines the
-serializable state; it does not prescribe where snapshots live.
+Call `runtime.snapshot()` to capture the entire execution state. Restore
+later using `FlowRuntime::from_snapshot(snapshot)`.
+
+Snapshots contain: runtime state, pending branches, suspend points, nested
+flow state, and execution progress. They do not contain closures, async tasks,
+thread-local state, or executor-specific handles. This keeps snapshots
+portable and durable.
 
 ## History Management
 
-Every LLM turn is stored in a `FlowHistory` that the runtime owns. History is
-kept separate from execution state so you can persist them independently and
-restore them on a different machine or process.
+LLM history is intentionally separate from runtime execution state, allowing
+different persistence policies, external storage, compaction strategies, and
+summarization pipelines.
 
-### Compaction
+Pravah includes sliding window compaction, custom compactor hooks, and
+pluggable history stores.
 
-By default (`NoopCompactor`) turns accumulate forever. Attach a
-`SlidingWindowCompactor` to cap how many turns are kept per session:
+## Examples
 
-```rust
-use pravah::flows::{FlowRuntime, SlidingWindowCompactor};
-
-let mut runtime = FlowRuntime::new(input)?
-    .with_compactor(SlidingWindowCompactor { max_turns_per_session: 10 });
-```
-
-After every `next()` / `resume()` call the runtime runs compaction per active
-session, then calls `HistoryStore::flush`. A
-`Role::AssistantToolCalls` message and all its matching tool results count as
-one turn; incomplete turns are never evicted.
-
-Implement `HistoryCompactor` to supply a custom strategy (summarisation,
-importance scoring, etc.):
-
-```rust
-use pravah::flows::{CompactionResult, HistoryCompactor, HistoryEntry};
-
-struct SummarisationCompactor;
-
-impl HistoryCompactor for SummarisationCompactor {
-    async fn compact(&self, session_id: &str, entries: &[&HistoryEntry]) -> CompactionResult {
-        // Decide what to evict and optionally return a summary Message.
-        CompactionResult { evict_indices: vec![], summary: None }
-    }
-}
-```
-
-### Store
-
-Implement `HistoryStore` to persist turns to a database, object storage, or
-any backend:
-
-```rust
-use pravah::flows::{FlowHistory, HistoryEntry, HistoryStore};
-
-struct MyStore;
-
-impl HistoryStore for MyStore {
-    type Error = std::io::Error;
-
-    async fn flush(&self, history: &mut FlowHistory) -> Result<(), Self::Error> {
-        for entry in history.entries() {
-            if entry.evicted {
-                // delete by entry.id
-            } else {
-                // upsert by entry.position
-            }
-        }
-        history.prune_evicted(); // free evicted entries from memory
-        Ok(())
-    }
-
-    async fn load(&self, session_ids: &[&str]) -> Result<Vec<HistoryEntry>, Self::Error> {
-        // restore from DB
-        Ok(vec![])
-    }
-}
-
-let mut runtime = FlowRuntime::new(input)?
-    .with_compactor(SlidingWindowCompactor { max_turns_per_session: 10 })
-    .with_store(MyStore);
-```
-
-The default `NoopHistoryStore` calls `prune_evicted()` immediately so evicted
-entries do not accumulate in memory.
-
-## Nested Flows
-
-A flow has the same shape as a node: typed input, stepwise execution, typed
-output. Use nested flows to keep large agent systems modular — a planning flow
-can contain a research sub-flow, a coding flow can contain a review-and-fix
-sub-flow. The same node-identity rule applies at each graph boundary.
-
-
-## Embeddings
-
-All four default providers expose a `Client::embed()` method on the same
-client object used for chat. Anthropic does not offer an embeddings API and
-returns `ClientError::UnsupportedCapability`.
-
-```rust
-use pravah::clients::{ClientOptions, EmbedRequest, EmbedTaskType};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = ClientOptions::default()
-        .create("openai://text-embedding-3-small")?;
-
-    let response = client
-        .embed(&EmbedRequest {
-            input: "The quick brown fox jumps over the lazy dog".into(),
-            task_type: Some(EmbedTaskType::SemanticSimilarity),
-            ..Default::default()
-        })
-        .await?;
-
-    println!("dimensions: {}", response.values.len());
-    Ok(())
-}
-```
-
-### Provider mapping
-
-| Provider  | Model examples                                     | `task_type` |
-| --------- | -------------------------------------------------- | :---------: |
-| OpenAI    | `text-embedding-3-small`, `text-embedding-3-large` |   ignored   |
-| Gemini    | `text-embedding-004`, `gemini-embedding-exp-03-07` |    used     |
-| Ollama    | `nomic-embed-text`, `mxbai-embed-large`            |   ignored   |
-| genai     | any model the `genai` adapter supports             |   ignored   |
-| Anthropic | —                                                  |      —      |
-
-`EmbedRequest` fields:
-
-| Field                   | Type                        | Notes                                          |
-| ----------------------- | --------------------------- | ---------------------------------------------- |
-| `input`                 | `String`                    | Text to embed                                  |
-| `task_type`             | `Option<EmbedTaskType>`     | Retrieval hint; only Gemini uses this today    |
-| `title`                 | `Option<String>`            | Document title hint (Gemini retrieval quality) |
-| `output_dimensionality` | `Option<i32>`               | Truncate output dimensions (provider-specific) |
-| `provider_config`       | `Option<serde_json::Value>` | Provider-specific overrides as a JSON object   |
+| Example        | Description                        |
+| -------------- | ---------------------------------- |
+| `linear_flow`  | Simple agent → transform pipeline  |
+| `split_merge`  | Multi-branch fan-out/fan-in        |
+| `nested_flow`  | Flow composition                   |
+| `debate`       | Multi-agent debate and judgement   |
+| `snapshot`     | Serialize and restore execution    |
+| `story`        | Interactive looping narrative flow |
+| `human_input`  | Human-in-the-loop suspension       |
+| `gen_diagrams` | Graph visualization and rendering  |
 
 ## When To Use Pravah
 
-**Use it** when you want agentic flows that are type-directed, inspectable,
-resumable, testable with fake clients, and explicit about information movement.
+Use Pravah when you need explicit information movement, deterministic
+orchestration, resumable execution, typed flow boundaries, transactional
+execution steps, inspectable runtime state, nested agent systems, or
+long-running interactive workflows.
 
-**Don't use it** as a distributed workflow engine, parallel job scheduler,
-queue processor, or durable storage system. Pravah can sit inside those
-systems but does not try to replace them.
+## When Not To Use Pravah
+
+Pravah is not a distributed scheduler, queue system, parallel compute engine,
+durable storage system, background task runner, or Kubernetes replacement. It
+can sit inside those systems, but does not attempt to replace them.
+
+## Design Philosophy
+
+Pravah intentionally prefers explicit state, explicit transitions, explicit
+suspension, explicit typing, and explicit execution boundaries over hidden
+orchestration.
+
+The runtime should always be understandable from the flow graph, the runtime
+state, and the snapshot — without requiring implicit runtime knowledge.
+
+## License
+
+Licensed under either:
+
+- MIT license
+- Apache License 2.0
+
+at your option.

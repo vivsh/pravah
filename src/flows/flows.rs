@@ -20,7 +20,8 @@ use crate::{
     clients::{ClientFactory, ClientOptions, ClientOutput, Message, Role},
     commons::Agent,
     context::Context,
-    tools::{SuspendedValue, ToolBox, ToolError},
+    tools::{SuspendedValue, ToolBox},
+    tools::base::ToolOutcome,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -439,7 +440,7 @@ impl FlowGraph {
             .call_at_index(node.tool_index, input, ctx)
             .await
         {
-            Ok(value) => {
+            Ok(ToolOutcome::Value(value)) => {
                 if !states.set_state(node.exit, value, Some(node.entry)) {
                     return Err(FlowError::Internal {
                         handler: "handle_tool",
@@ -448,7 +449,7 @@ impl FlowGraph {
                 }
                 Ok(FlowStep::Continue)
             }
-            Err(ToolError::Exit(value)) => {
+            Ok(ToolOutcome::Exit(value)) => {
                 if !states.remove_state(node.entry){
                     return Err(FlowError::Internal {
                         handler: "handle_tool_exit",
@@ -469,7 +470,7 @@ impl FlowGraph {
 
                 Ok(FlowStep::Continue)
             }
-            Err(ToolError::Suspend { value, output_type }) => {
+            Ok(ToolOutcome::Suspend { value, output_type }) => {
                 states.suspend(node.entry, node.exit, output_type);
                 Ok(FlowStep::Suspend(value))
             }
