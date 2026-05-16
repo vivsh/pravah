@@ -478,6 +478,43 @@ pub(super) fn parse_json_output(text: &str) -> Result<Value, ClientError> {
     })
 }
 
+// ── Embedding types ──────────────────────────────────────────────────────────
+
+/// Task hint for embedding optimization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbedTaskType {
+    RetrievalDocument,
+    RetrievalQuery,
+    SemanticSimilarity,
+    Classification,
+    Clustering,
+    QuestionAnswering,
+    FactVerification,
+    CodeRetrievalQuery,
+}
+
+/// Request to generate a text embedding vector.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EmbedRequest {
+    pub input: String,
+    pub task_type: Option<EmbedTaskType>,
+    /// Document title hint (improves retrieval quality on some models).
+    pub title: Option<String>,
+    /// Truncate the output vector to this many dimensions.
+    pub output_dimensionality: Option<i32>,
+    /// Provider-specific options serialized as a JSON object.
+    pub provider_config: Option<serde_json::Value>,
+}
+
+/// Embedding vector returned by [`Client::embed`].
+#[derive(Debug, Clone)]
+pub struct EmbedResponse {
+    pub values: Vec<f32>,
+}
+
+// ── Client trait ──────────────────────────────────────────────────────────────
+
 /// Provider-agnostic stateless LLM client.
 ///
 /// Options are fixed at construction time and owned by the implementation.
@@ -485,7 +522,22 @@ pub(super) fn parse_json_output(text: &str) -> Result<Value, ClientError> {
 /// push tool-result messages after dispatch.
 #[async_trait]
 pub trait Client: Send + Sync {
+    /// The provider backing this client instance.
+    fn provider(&self) -> Provider;
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError>;
+
+    /// Generate a text embedding vector for `request.input`.
+    ///
+    /// Providers that do not support embeddings return
+    /// [`ClientError::UnsupportedCapability`] by default.
+    async fn embed(&self, _request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {
+        Err(ClientError::UnsupportedCapability {
+            provider: self.provider(),
+            capability: "embeddings".into(),
+        })
+    }
+
 }
 
 /// Creates a [`Client`] from a model URL and call-time options.

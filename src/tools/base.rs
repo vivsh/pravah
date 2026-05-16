@@ -231,6 +231,13 @@ pub(crate) trait ErasedTool: Send + Sync {
     fn input_type(&self) -> String;
     fn output_type(&self) -> String;
 
+    /// Returns `false` for flow/agent tool dispatchers whose nodes are registered
+    /// by graph injectors (as `FlowNode::FlowTool` / `FlowNode::AgentTool`), so the
+    /// flow builder knows not to overwrite them with a plain `FlowNode::Tool`.
+    fn needs_tool_node(&self) -> bool {
+        true
+    }
+
     /// Deserializes `args` into the concrete tool type, calls it, returns the output.
     fn call_raw<'a>(
         &'a self,
@@ -364,6 +371,13 @@ impl ToolBox {
 
     pub(crate) fn output_type_at(&self, i: usize) -> String {
         self.tools[i].output_type()
+    }
+
+    /// Returns `false` for tools whose flow graph nodes are registered by injectors
+    /// (i.e. `FlowToolDispatcher` and `AgentToolDispatcher`), so the builder loop
+    /// does not overwrite them with a plain `FlowNode::Tool`.
+    pub(crate) fn needs_tool_node_at(&self, i: usize) -> bool {
+        self.tools[i].needs_tool_node()
     }
 
     /// Invokes the tool at position `i` by its slot index.

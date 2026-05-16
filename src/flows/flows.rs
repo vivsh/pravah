@@ -1020,7 +1020,14 @@ impl FlowBuilder {
             .nodes
             .insert(name, FlowNode::Agent(Arc::new(agent_info)));
         // Register a FlowNode::Tool for each tool in the toolbox (including the submit sentinel).
+        // FlowToolDispatcher and AgentToolDispatcher return needs_tool_node() = false because
+        // their graph nodes (FlowNode::FlowTool / FlowNode::AgentTool) are already injected by
+        // with_agent; registering a plain Tool node for them would overwrite the injected node
+        // and cause call_raw to be invoked instead of the frame-push logic.
         for i in 0..tool_box.len() {
+            if !tool_box.needs_tool_node_at(i) {
+                continue;
+            }
             let _tool_name = tool_box.name_at(i);
             let tool_entry =
                 self.flow

@@ -37,6 +37,10 @@ impl ScriptedClient {
 
 #[async_trait]
 impl Client for ScriptedClient {
+    fn provider(&self) -> Provider {
+        Provider::OpenAi
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.calls.push((self.model_url.clone(), messages.to_vec()));

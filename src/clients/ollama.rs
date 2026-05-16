@@ -4,8 +4,9 @@ use serde_json::{Value, json};
 
 use super::super::tools::ToolDefinition;
 use super::{
-    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmUrl, Message, Provider,
-    Role, TokenUsage, ToolCall, ToolChoice, parse_json_output, validate_tools,
+    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest, EmbedResponse,
+    LlmUrl, Message, Provider, Role, TokenUsage, ToolCall, ToolChoice, parse_json_output,
+    validate_tools,
 };
 
 struct OllamaClient {
@@ -30,6 +31,10 @@ pub fn new_client(url: &LlmUrl, options: ClientOptions) -> Result<Box<dyn Client
 
 #[async_trait]
 impl Client for OllamaClient {
+    fn provider(&self) -> Provider {
+        Provider::Ollama
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         validate_history(messages)?;
         validate_tools(Provider::Ollama, &self.options.tools)?;
@@ -57,6 +62,30 @@ impl Client for OllamaClient {
             .map_err(|e| ClientError::Llm(e.to_string()))?;
 
         map_response(response, tools_enabled)
+    }
+
+    async fn embed(&self, request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {
+        let endpoint = format!("{}/api/embed", self.base_url.trim_end_matches('/'));
+        let payload = json!({ "model": self.model, "input": request.input });
+        let response: Value = self
+            .http
+            .post(endpoint)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| ClientError::Llm(e.to_string()))?
+            .error_for_status()
+            .map_err(|e| ClientError::Llm(e.to_string()))?
+            .json()
+            .await
+            .map_err(|e| ClientError::Llm(e.to_string()))?;
+        let values: Vec<f32> = response["embeddings"][0]
+            .as_array()
+            .ok_or_else(|| ClientError::Llm("embeddings missing in response".into()))?
+            .iter()
+            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+            .collect();
+        Ok(EmbedResponse { values })
     }
 }
 

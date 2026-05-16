@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use gemini_rust::{
     Content, FunctionCall as GeminiFunctionCall, FunctionCallingMode, FunctionDeclaration,
     FunctionResponse as GeminiFunctionResponse, Gemini, GenerationResponse,
-    Message as GeminiMessage, Part, Role as GeminiRole, Tool as GeminiTool,
+    Message as GeminiMessage, Part, Role as GeminiRole, TaskType, Tool as GeminiTool,
     client::Model as GeminiModel,
 };
 use serde_json::Value;
@@ -10,8 +10,9 @@ use serde_json::Value;
 use super::super::tools::ToolDefinition;
 use super::schema;
 use super::{
-    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmUrl, Message, Provider,
-    Role, TokenUsage, ToolCall, ToolChoice, parse_json_output, validate_tools,
+    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest, EmbedResponse,
+    EmbedTaskType, LlmUrl, Message, Provider, Role,
+    TokenUsage, ToolCall, ToolChoice, parse_json_output, validate_tools,
 };
 
 fn format_error_chain(e: &dyn std::error::Error) -> String {
@@ -272,6 +273,10 @@ impl GeminiClient {
 
 #[async_trait]
 impl Client for GeminiClient {
+    fn provider(&self) -> Provider {
+        Provider::Gemini
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         if messages.is_empty() {
             return Err(ClientError::Validation("messages must not be empty".into()));
@@ -300,6 +305,36 @@ impl Client for GeminiClient {
             .call_api(gemini_messages, tools_enabled, response_schema)
             .await?;
         map_response(response, tools_enabled)
+    }
+
+    async fn embed(&self, request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {
+        let mut builder = self.client.embed_content().with_text(&request.input);
+        if let Some(task_type) = &request.task_type {
+            let gemini_task = match task_type {
+                EmbedTaskType::RetrievalDocument => TaskType::RetrievalDocument,
+                EmbedTaskType::RetrievalQuery => TaskType::RetrievalQuery,
+                EmbedTaskType::SemanticSimilarity => TaskType::SemanticSimilarity,
+                EmbedTaskType::Classification => TaskType::Classification,
+                EmbedTaskType::Clustering => TaskType::Clustering,
+                EmbedTaskType::QuestionAnswering => TaskType::QuestionAnswering,
+                EmbedTaskType::FactVerification => TaskType::FactVerification,
+                EmbedTaskType::CodeRetrievalQuery => TaskType::CodeRetrievalQuery,
+            };
+            builder = builder.with_task_type(gemini_task);
+        }
+        if let Some(title) = &request.title {
+            builder = builder.with_title(title.clone());
+        }
+        if let Some(dim) = request.output_dimensionality {
+            builder = builder.with_output_dimensionality(dim);
+        }
+        let response = builder
+            .execute()
+            .await
+            .map_err(|e| ClientError::Llm(format_error_chain(&e)))?;
+        Ok(EmbedResponse {
+            values: response.embedding.values,
+        })
     }
 }
 

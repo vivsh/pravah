@@ -4,8 +4,9 @@ use serde_json::{Value, json};
 
 use super::super::tools::ToolDefinition;
 use super::{
-    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmUrl, Message, Provider,
-    Role, TokenUsage, ToolCall, ToolChoice, parse_json_output, validate_tools,
+    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest, EmbedResponse,
+    LlmUrl, Message, Provider, Role, TokenUsage, ToolCall, ToolChoice, parse_json_output,
+    validate_tools,
 };
 
 struct OpenAiClient {
@@ -31,6 +32,10 @@ pub fn new_client(url: &LlmUrl, options: ClientOptions) -> Result<Box<dyn Client
 
 #[async_trait]
 impl Client for OpenAiClient {
+    fn provider(&self) -> Provider {
+        Provider::OpenAi
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         validate_history(messages)?;
         validate_tools(Provider::OpenAi, &self.options.tools)?;
@@ -54,6 +59,34 @@ impl Client for OpenAiClient {
             .map_err(|e| ClientError::Llm(e.to_string()))?;
 
         map_response(response, tools_enabled)
+    }
+
+    async fn embed(&self, request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {
+        let payload = json!({
+            "model": self.model,
+            "input": request.input,
+            "encoding_format": "float",
+        });
+        let response: Value = self
+            .http
+            .post("https://api.openai.com/v1/embeddings")
+            .bearer_auth(&self.api_key)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| ClientError::Llm(e.to_string()))?
+            .error_for_status()
+            .map_err(|e| ClientError::Llm(e.to_string()))?
+            .json()
+            .await
+            .map_err(|e| ClientError::Llm(e.to_string()))?;
+        let values: Vec<f32> = response["data"][0]["embedding"]
+            .as_array()
+            .ok_or_else(|| ClientError::Llm("embedding missing in response".into()))?
+            .iter()
+            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+            .collect();
+        Ok(EmbedResponse { values })
     }
 }
 

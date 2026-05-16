@@ -39,13 +39,13 @@ step of a nested flow.
 pravah = "0.3"
 ```
 
-| Feature              | Default | Description                                                             |
-| -------------------- | :-----: | ----------------------------------------------------------------------- |
-| `provider-openai`    |    ✓    | OpenAI-compatible API client                                            |
-| `provider-anthropic` |    ✓    | Anthropic Claude API client                                             |
-| `provider-gemini`    |    ✓    | Google Gemini API client                                                |
-| `provider-ollama`    |    ✓    | Ollama local model client                                               |
-| `provider-genai`     |    —    | Extra providers via the [`genai`](https://crates.io/crates/genai) crate |
+| Feature              | Default | Description                                                                                 |
+| -------------------- | :-----: | ------------------------------------------------------------------------------------------- |
+| `provider-openai`    |    ✓    | OpenAI-compatible API client (chat + embeddings)                                            |
+| `provider-anthropic` |    ✓    | Anthropic Claude API client (chat only)                                                     |
+| `provider-gemini`    |    ✓    | Google Gemini API client (chat + embeddings)                                                |
+| `provider-ollama`    |    ✓    | Ollama local model client (chat + embeddings)                                               |
+| `provider-genai`     |    —    | Extra providers via the [`genai`](https://crates.io/crates/genai) crate (chat + embeddings) |
 
 To use only specific providers, disable defaults:
 
@@ -113,7 +113,7 @@ impl Flow for SummariseRequest {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = Context::new(FlowConf::default());
+    let ctx = Context::default(); // shorthand for Context::new(FlowConf::default())
     let input = SummariseRequest { topic: "Rust ownership model".into() };
     let mut runtime = FlowRuntime::new(input)?;
 
@@ -125,8 +125,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", report.text);
                 break;
             }
-            FlowStep::Suspend { value } => {
-                eprintln!("Unexpected suspension: {value}");
+            FlowStep::Suspend(_) => {
+                eprintln!("unexpected suspension");
                 break;
             }
         }
@@ -135,8 +135,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-See the [`examples/`](examples/) directory for runnable examples covering
-linear flows, fork/join, nested flows, and snapshot-based resumption.
+Or use `run_until` to avoid writing the loop:
+
+```rust
+use pravah::flows::{RunLimits, RunOutcome};
+
+let outcome = runtime.run_until(ctx, RunLimits::new()).await?;
+match outcome {
+    RunOutcome::Done(v) => println!("{v}"),
+    RunOutcome::Suspend(sv) => { /* handle */ }
+    RunOutcome::LimitExceeded(kind) => eprintln!("limit hit: {kind:?}"),
+}
+```
+
+## Examples
+
+| Example                                  | Description                                                                                            |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| [linear_flow](examples/linear_flow.rs)   | Agent produces bullet points; a work node formats them into a Markdown report.                         |
+| [split_merge](examples/split_merge.rs)   | A proposal fans out to three specialist agents (tech, market, risk) and merges into a single brief.    |
+| [nested_flow](examples/nested_flow.rs)   | An outer flow delegates part of its work to a fully independent inner flow via `.flow::<F>()`.         |
+| [debate](examples/debate.rs)             | A claim is argued by two agents in parallel, judged by a third, then summarised by a nested flow.      |
+| [snapshot](examples/snapshot.rs)         | A flow is snapshotted mid-execution, serialised to disk, restored in a new runtime, and continued.     |
+| [story](examples/story.rs)               | A multi-agent comic writer that loops panel by panel, letting the user steer the plot after each turn. |
+| [gen_diagrams](examples/gen_diagrams.rs) | Full multi-stage article pipeline that generates and prints the flow graph as a tree and SVG.          |
+| [human_input](examples/human_input.rs)   | An LLM calls `HumanInput` as a tool to collect a decision from stdin before submitting its result.     |
 
 ## Core Concepts
 
@@ -216,7 +239,7 @@ To attach tools, call `.with_tools()`:
 ```rust
 fn build() -> AgentConfig {
     AgentConfig::new("You are a careful planning agent.", "gemini://gemini-2.5-flash-lite")
-        .with_tools(ToolBox::builder().tool::<ReadNote>().build())
+        .with_tools(ToolBox::new().tool::<ReadNote>())
 }
 ```
 
@@ -265,15 +288,53 @@ container, and shared HTTP client.
 is rejected, and symlinks are allowed only when their resolved target stays
 within `working_dir`.
 
+### Context and FlowConf
+
+`Context` is cheap to clone (inner `Arc`). Build it from a `FlowConf`:
+
+```rust
+use pravah::{Context, FlowConf};
+
+let ctx = Context::new(FlowConf {
+    working_dir: Some("/tmp/workspace".into()),
+    commands: vec!["git".into(), "cargo".into()], // tools may only exec these
+    http_timeout_secs: Some(60),
+});
+```
+
+Or use `Context::default()` when none of those matter. To inject typed
+dependencies accessible inside tool calls:
+
+```rust
+use pravah::deps::Deps;
+
+let deps = Deps::new().insert(my_db_pool);
+let ctx = Context::default().with_deps(deps);
+
+// inside a Tool::call:
+let pool = ctx.require::<MyDbPool>()?;
+```
+
 ## Suspend And Resume
 
 There are two ways a flow can suspend:
 
-**Tool-level suspend** — a tool returns `Err(ToolError::Suspend)`. The runtime
-surfaces the tool's input args as the `SuspendedValue`. Useful for approval
-gates, missing credentials, or any external confirmation needed mid-agent-turn.
+**Tool-level suspend** — register a suspend point with `ToolBox::suspend::<Input, ResumeType>()`. The LLM calls this tool with a value of type `Input`; the flow pauses and surfaces a `FlowStep::Suspend(SuspendedValue)`. Downcast to retrieve the value. Resume by calling `runtime.resume(ctx, value)` where `value: ResumeType`.
 
-**Flow-level suspend** — `builder::suspend::<I, O>()` registers a first-class
+```rust
+// Registration (inside Agent::build)
+ToolBox::new()
+    .suspend::<ApprovalRequest, ApprovalDecision>()
+
+// At the call site
+FlowStep::Suspend(sv) => {
+    let req = sv.downcast::<ApprovalRequest>().unwrap();
+    let decision = ApprovalDecision { approved: true };
+    runtime.resume(ctx.clone(), decision).await?;
+}
+```
+
+**Flow-level suspend** — `builder.suspend::<I, O>()` registers a first-class
 suspend node. When a value of type `I` arrives in state the flow pauses
 immediately (no agent or tool needed). Resume by supplying a value of type `O`.
 Useful for human-in-the-loop steps, webhook callbacks, or any out-of-band
@@ -382,8 +443,7 @@ let mut runtime = FlowRuntime::new(input)?
 ```
 
 The default `NoopHistoryStore` calls `prune_evicted()` immediately so evicted
-entries do not accumulate in memory. See [ARCHITECTURE.md](ARCHITECTURE.md)
-for the full snapshot vs. history separation model.
+entries do not accumulate in memory.
 
 ## Nested Flows
 
@@ -392,31 +452,53 @@ output. Use nested flows to keep large agent systems modular — a planning flow
 can contain a research sub-flow, a coding flow can contain a review-and-fix
 sub-flow. The same node-identity rule applies at each graph boundary.
 
-### Example: Article Production Pipeline
 
-Combines every node type — split, merge, work, either, agent, and two nested flows.
-The tree below is the output of `FlowGraphDiagram::for_flow::<ArticleRequest>()?.render_tree()`:
+## Embeddings
 
-```text
-● ArticleRequest (fork)
-  ├── [fork] AudienceTask (agent)
-  │   └── [agent] AudienceProfile (join)
-  │       └── [join] ContentBrief (work)
-  │           └── [work] OutlineRequest (work)
-  │               └── [work] Outline (either)
-  │                   ├── [either] LongDraft (work)
-  │                   │   └── [work] ReviewedDraft (agent)
-  │                   │       └── [agent] FinalArticle ◉
-  │                   └── [either] QuickDraft (agent)
-  │                       └── [agent] FinalArticle ◉ ↩
-  └── [fork] ResearchTask (agent)
-      └── [agent] ResearchNotes (join)
-          └── [join] ContentBrief (work) ↩
+All four default providers expose a `Client::embed()` method on the same
+client object used for chat. Anthropic does not offer an embeddings API and
+returns `ClientError::UnsupportedCapability`.
+
+```rust
+use pravah::clients::{ClientOptions, EmbedRequest, EmbedTaskType};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = ClientOptions::default()
+        .create("openai://text-embedding-3-small")?;
+
+    let response = client
+        .embed(&EmbedRequest {
+            input: "The quick brown fox jumps over the lazy dog".into(),
+            task_type: Some(EmbedTaskType::SemanticSimilarity),
+            ..Default::default()
+        })
+        .await?;
+
+    println!("dimensions: {}", response.values.len());
+    Ok(())
+}
 ```
 
-`↩` marks nodes that converge from multiple branches (already shown above).
+### Provider mapping
 
-![Article production pipeline](assets/nested_flow.svg)
+| Provider  | Model examples                                     | `task_type` |
+| --------- | -------------------------------------------------- | :---------: |
+| OpenAI    | `text-embedding-3-small`, `text-embedding-3-large` |   ignored   |
+| Gemini    | `text-embedding-004`, `gemini-embedding-exp-03-07` |    used     |
+| Ollama    | `nomic-embed-text`, `mxbai-embed-large`            |   ignored   |
+| genai     | any model the `genai` adapter supports             |   ignored   |
+| Anthropic | —                                                  |      —      |
+
+`EmbedRequest` fields:
+
+| Field                   | Type                        | Notes                                          |
+| ----------------------- | --------------------------- | ---------------------------------------------- |
+| `input`                 | `String`                    | Text to embed                                  |
+| `task_type`             | `Option<EmbedTaskType>`     | Retrieval hint; only Gemini uses this today    |
+| `title`                 | `Option<String>`            | Document title hint (Gemini retrieval quality) |
+| `output_dimensionality` | `Option<i32>`               | Truncate output dimensions (provider-specific) |
+| `provider_config`       | `Option<serde_json::Value>` | Provider-specific overrides as a JSON object   |
 
 ## When To Use Pravah
 
@@ -426,6 +508,3 @@ resumable, testable with fake clients, and explicit about information movement.
 **Don't use it** as a distributed workflow engine, parallel job scheduler,
 queue processor, or durable storage system. Pravah can sit inside those
 systems but does not try to replace them.
-
-For a deeper look at module structure, the history/compaction model, and
-extension points see [ARCHITECTURE.md](ARCHITECTURE.md).

@@ -9,3 +9,4 @@ pub mod utils;
 pub mod testing;
 
 pub use context::{Context, FlowConf};
+pub use flows::{Choice, CliMode, HumanInput, HumanOutput};

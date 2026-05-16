@@ -8,10 +8,12 @@ use genai::chat::{
 use genai::resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver};
 use serde_json::Value;
 
+use genai::embed::EmbedOptions;
 use super::super::tools::ToolDefinition;
 use super::{
-    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmUrl, Message, Provider,
-    Role, TokenUsage, ToolCall, ToolChoice, parse_json_output, validate_tools,
+    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest, EmbedResponse,
+    LlmUrl, Message, Provider, Role, TokenUsage, ToolCall, ToolChoice, parse_json_output,
+    validate_tools,
 };
 
 fn build_http_client(url: &LlmUrl) -> GenaiHttpClient {
@@ -178,6 +180,10 @@ fn map_response(
 
 #[async_trait]
 impl Client for GenaiClient {
+    fn provider(&self) -> Provider {
+        Provider::Genai
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         if messages.is_empty() {
             return Err(ClientError::Validation("messages must not be empty".into()));
@@ -226,6 +232,19 @@ impl Client for GenaiClient {
             .map_err(|e| ClientError::Llm(e.to_string()))?;
 
         map_response(response, tools_enabled)
+    }
+
+    async fn embed(&self, request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {
+        let response = self
+            .client
+            .embed(&self.model_name, &request.input, None as Option<&EmbedOptions>)
+            .await
+            .map_err(|e| ClientError::Llm(e.to_string()))?;
+        let values = response
+            .first_vector()
+            .cloned()
+            .unwrap_or_default();
+        Ok(EmbedResponse { values })
     }
 }
 

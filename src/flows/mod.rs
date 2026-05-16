@@ -1,6 +1,7 @@
 pub mod diagram;
 pub mod flows;
 pub mod compactor;
+pub mod human_input;
 pub mod nary;
 pub mod store;
 mod errors;
@@ -24,3 +25,4 @@ pub use nary::{MergeInputs, SplitOutputs};
 pub use runtime::{FlowRuntime, FlowSnapshot, LimitKind, RunLimits, RunOutcome};
 pub use store::{HistoryStore, NoopHistoryStore};
 pub use crate::tools::SuspendedValue;
+pub use human_input::{Choice, CliMode, HumanInput, HumanOutput, PendingHumanInput};

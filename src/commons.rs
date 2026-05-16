@@ -108,6 +108,10 @@ impl<A: Agent + 'static> ErasedTool for AgentToolDispatcher<A> {
         &self.name
     }
 
+    fn needs_tool_node(&self) -> bool {
+        false
+    }
+
     fn definition(&self) -> ToolDefinition {
         let parameters = serde_json::to_value(schemars::schema_for!(A))
             .unwrap_or_else(|_| Value::Object(Default::default()));
@@ -146,6 +150,10 @@ struct FlowToolDispatcher<F: Flow> {
 impl<F: Flow + 'static> ErasedTool for FlowToolDispatcher<F> {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn needs_tool_node(&self) -> bool {
+        false
     }
 
     fn definition(&self) -> ToolDefinition {

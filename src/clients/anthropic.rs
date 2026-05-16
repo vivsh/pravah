@@ -31,6 +31,10 @@ pub fn new_client(url: &LlmUrl, options: ClientOptions) -> Result<Box<dyn Client
 
 #[async_trait]
 impl Client for AnthropicClient {
+    fn provider(&self) -> Provider {
+        Provider::Anthropic
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         validate_history(messages)?;
         validate_tools(Provider::Anthropic, &self.options.tools)?;
