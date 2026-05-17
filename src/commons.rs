@@ -13,55 +13,80 @@ use crate::flows::{Flow, FlowGraph};
 use crate::tools::base::{ErasedTool, ToolOutcome};
 use crate::tools::{ToolBox, ToolDefinition, ToolError};
 
-/// Configuration returned by [`Agent::build`].
+/// Runtime settings returned by [`Agent::build`].
 pub struct AgentConfig {
-    /// System prompt sent to the LLM on every turn.
+    /// Prompt sent before each model turn.
     pub preamble: String,
-    /// Model URL, e.g. `gemini://gemini-2.5-flash-lite` or `ollama://localhost:11434/qwen3:8b`.
+    /// Model URL used to create the client.
     pub model_url: String,
-    /// Tools available to the agent. Do **not** add the exit sentinel — the flow engine
-    /// injects it automatically via [`ToolBox::with_agent`].
+    /// Tools exposed to the agent.
+    /// Do not add the exit sentinel yourself; the engine injects it.
     pub tool_box: ToolBox,
+    /// Sampling temperature. `None` uses the provider default.
+    pub temperature: Option<f32>,
+    /// Enables provider-specific reasoning modes when supported.
+    pub thinking: bool,
+    /// Reasoning budget. Ignored unless `thinking` is enabled.
+    pub thinking_budget: Option<u32>,
 }
 
 impl AgentConfig {
-    /// Convenience constructor for the common no-tools case.
+    /// Builds an agent config with no tools.
     pub fn new(preamble: impl Into<String>, model_url: impl Into<String>) -> Self {
         Self {
             preamble: preamble.into(),
             model_url: model_url.into(),
             tool_box: ToolBox::new(),
+            temperature: None,
+            thinking: false,
+            thinking_budget: None,
         }
     }
 
-    /// Attach a toolbox.
+    /// Attaches a toolbox.
     pub fn with_tools(mut self, tool_box: ToolBox) -> Self {
         self.tool_box = tool_box;
         self
     }
+
+    /// Sets the sampling temperature.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Turns reasoning mode on or off.
+    pub fn with_thinking(mut self, thinking: bool) -> Self {
+        self.thinking = thinking;
+        self
+    }
+
+    /// Sets the reasoning budget.
+    pub fn with_thinking_budget(mut self, budget: u32) -> Self {
+        self.thinking_budget = Some(budget);
+        self
+    }
 }
 
-/// Trait implemented by every agent input type.
-///
-/// The implementing struct is both the LLM input schema (serialized into the first user turn)
-/// and the anchor for associated metadata: preamble, model URL, and the tool set.
-///
-/// Return an [`AgentConfig`] from [`build`](Agent::build). The flow engine appends the exit
-/// sentinel automatically — do not add it to the toolbox manually.
+/// Implemented by every agent input type.
+/// The type defines the first user payload, the model settings, and the tool set.
+/// Return an [`AgentConfig`] from [`build`](Agent::build).
+/// Do not add the exit sentinel to the toolbox; the engine injects it.
 pub trait Agent: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'static {
-    /// Typed value the LLM must produce when it calls the exit sentinel.
+    /// Value the agent must submit to finish.
     type Output: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'static;
 
-    /// Node identifier used in flow graphs. Defaults to the schemars schema name.
+    /// Graph node id. Defaults to the schema name.
     fn node_id() -> String {
         Self::schema_name()
     }
 
-    /// Returns the configuration for this agent: preamble, model URL, and tools.
+    /// Returns the runtime settings for this agent.
     fn build() -> AgentConfig;
 }
 
-/// Auto-generated sentinel tool. Returns [`ToolOutcome::Exit`]; never propagates to user code.
+/// Exit tool injected for agents.
+/// It converts a final tool call into [`ToolOutcome::Exit`] and never reaches user code.
 struct AgentExitTool {
     name: String,
     output_type: String,
@@ -78,7 +103,7 @@ impl ErasedTool for AgentExitTool {
     }
 
     fn input_type(&self) -> String {
-        self.output_type.clone()  // LLM provides A::Output-shaped args to submit
+        self.output_type.clone()
     }
 
     fn output_type(&self) -> String {
@@ -94,10 +119,8 @@ impl ErasedTool for AgentExitTool {
     }
 }
 
-/// Dispatcher for an agent registered as a tool via [`ToolBox::agent`].
-/// Provides the `ErasedTool` interface (definition + types) so the agent shows up
-/// in `definitions()` sent to the LLM. `call_raw` is unreachable — the flow engine
-/// intercepts agent tool calls before they reach this.
+/// Erased adapter for an agent registered with [`ToolBox::agent`].
+/// `call_raw` must never run; the engine intercepts agent tool calls earlier.
 struct AgentToolDispatcher<A: Agent> {
     name: String,
     _phantom: PhantomData<fn() -> A>,
@@ -141,7 +164,7 @@ impl<A: Agent + 'static> ErasedTool for AgentToolDispatcher<A> {
     }
 }
 
-/// Dispatcher for a flow registered as a tool via [`ToolBox::flow`].
+/// Erased adapter for a flow registered with [`ToolBox::flow`].
 struct FlowToolDispatcher<F: Flow> {
     name: String,
     _phantom: PhantomData<fn() -> F>,
@@ -186,9 +209,9 @@ impl<F: Flow + 'static> ErasedTool for FlowToolDispatcher<F> {
 }
 
 impl ToolBox {
-    /// Registers an agent type `A` as a callable tool. When the parent agent's LLM
-    /// issues a tool call matching `A::node_id()`, the flow engine pushes a new frame
-    /// and runs `A` to completion, wiring its output directly to the parent's exit slot.
+    /// Registers an agent as a callable tool.
+    /// When the parent agent calls it, the engine pushes a frame and wires the result
+    /// back into the parent agent's exit path.
     pub fn agent<A: Agent>(mut self) -> Self {
         self.push_erased(Box::new(AgentToolDispatcher::<A> {
             name: A::node_id(),
@@ -204,7 +227,6 @@ impl ToolBox {
                 .unwrap_or_else(|_| Value::Object(Default::default()));
             let config = A::build();
             let tool_box = Arc::new(config.tool_box.with_agent::<A>(graph));
-            // Build tool_lookup: call_name → (entry_id, exit_id)
             let mut tool_lookup = std::collections::HashMap::new();
             for i in 0..tool_box.len() {
                 let tname = tool_box.name_at(i).to_owned();
@@ -220,15 +242,18 @@ impl ToolBox {
                 exit,
                 output_schema,
                 tool_lookup,
+                temperature: config.temperature,
+                thinking: config.thinking,
+                thinking_budget: config.thinking_budget,
             });
             graph.nodes.insert(entry, FlowNode::AgentTool(info));
         }));
         self
     }
 
-    /// Registers a flow type `F` as a callable tool. When the parent agent's LLM
-    /// issues a tool call matching `F::node_id()`, the flow engine pushes a new frame
-    /// and runs `F` to completion, wiring its output to the parent's exit slot.
+    /// Registers a flow as a callable tool.
+    /// When the parent agent calls it, the engine pushes a frame and routes the
+    /// flow output back into the parent agent.
     pub fn flow<F: Flow>(mut self) -> Self {
         self.push_erased(Box::new(FlowToolDispatcher::<F> {
             name: F::schema_name().into(),
@@ -255,13 +280,9 @@ impl ToolBox {
         self
     }
 
-    /// Appends the typed exit sentinel for agent `A` and drains any stored
-    /// graph injectors into `graph` (for AgentTool / FlowTool nodes).
-    ///
-    /// When the toolbox has no regular tools the sentinel is **not** injected —
-    /// structured-output mode is used instead.
-    ///
-    /// `pub(crate)` — only the flow engine calls this.
+    /// Injects graph-backed tools and the exit sentinel for agent `A`.
+    /// If the toolbox has no regular tools, the sentinel is skipped and the agent
+    /// stays in structured-output mode.
     pub(crate) fn with_agent<A: Agent>(mut self, graph: &mut FlowGraph) -> Self {
         let agent_name = A::node_id();
         for inject in self.graph_injectors.drain(..) {

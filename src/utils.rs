@@ -3,7 +3,7 @@ use std::hash::Hash;
 
 use thiserror::Error;
 
-/// Error produced by DAG algorithms.
+/// Error returned by DAG helpers.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DagError<Id> {
     #[error("duplicate node id: {0:?}")]
@@ -14,14 +14,9 @@ pub enum DagError<Id> {
     Cycle,
 }
 
-// ── Topological sort ──────────────────────────────────────────────────────────
-
-/// Returns nodes in a valid topological order (dependencies before dependants).
-///
-/// `nodes` is a slice of `(id, deps)` pairs. Each `id` must be unique;
-/// every entry in `deps` must appear as a node `id`.
-///
-/// Returns [`DagError::Cycle`] if the graph contains a cycle.
+/// Returns a topological ordering.
+/// Every id must be unique and every dependency must exist.
+/// Returns [`DagError::Cycle`] when the graph is cyclic.
 pub fn topo_sort<Id>(nodes: &[(Id, &[Id])]) -> Result<Vec<Id>, DagError<Id>>
 where
     Id: Hash + Eq + Clone,
@@ -31,34 +26,12 @@ where
 }
 
 /// Returns nodes grouped into parallel layers.
-///
-/// All nodes within a layer may execute concurrently — no node in a layer
-/// depends on another node in the same layer. Layers are ordered: later layers
-/// depend on earlier ones.
-///
-/// ```rust
-/// use pravah::utils::topo_layers;
-///
-/// let a = "a";
-/// let b = "b";
-/// let c = "c";
-/// let no_deps: [&str; 0] = [];
-/// let b_deps = [a];
-/// let c_deps = [a];
-/// let nodes = [
-///     (a, no_deps.as_slice()),
-///     (b, b_deps.as_slice()),
-///     (c, c_deps.as_slice()),
-/// ];
-/// let layers = topo_layers(&nodes).unwrap();
-/// assert_eq!(layers[0], vec!["a"]);
-/// assert_eq!(layers[1].len(), 2); // b and c can run concurrently
-/// ```
+/// Nodes in the same layer do not depend on each other.
+/// Returns [`DagError::Cycle`] when no valid layering exists.
 pub fn topo_layers<Id>(nodes: &[(Id, &[Id])]) -> Result<Vec<Vec<Id>>, DagError<Id>>
 where
     Id: Hash + Eq + Clone,
 {
-    // Validate: unique ids, all deps known
     let mut id_set: HashSet<&Id> = HashSet::with_capacity(nodes.len());
     for (id, _) in nodes {
         if !id_set.insert(id) {
@@ -73,7 +46,6 @@ where
         }
     }
 
-    // Kahn's algorithm
     let mut in_degree: HashMap<&Id, usize> = nodes.iter().map(|(id, _)| (id, 0)).collect();
     let mut succs: HashMap<&Id, Vec<&Id>> = HashMap::new();
 
@@ -122,11 +94,8 @@ where
     }
 }
 
-// ── Vector similarity ─────────────────────────────────────────────────────────
-
-/// Cosine similarity between two equal-length vectors.
-///
-/// Returns `0.0` if either vector is zero-length (all zeros) or if the slices differ in length.
+/// Cosine similarity between two vectors.
+/// Returns `0.0` for mismatched lengths or zero-magnitude inputs.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;
@@ -141,9 +110,8 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-/// Euclidean distance between two equal-length vectors.
-///
-/// Returns `0.0` if the slices differ in length.
+/// Euclidean distance between two vectors.
+/// Returns `0.0` when the lengths differ.
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;
@@ -155,9 +123,7 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
         .sqrt()
 }
 
-/// Euclidean similarity: `1 / (1 + distance)`, always in `(0, 1]`.
-///
-/// Higher is more similar. Useful when a score (rather than a distance) is needed.
+/// Euclidean similarity score `1 / (1 + distance)`.
 pub fn euclidean_similarity(a: &[f32], b: &[f32]) -> f32 {
     1.0 / (1.0 + euclidean_distance(a, b))
 }
@@ -166,9 +132,7 @@ pub fn euclidean_similarity(a: &[f32], b: &[f32]) -> f32 {
 mod tests {
     use super::*;
 
-    // ── topo_layers ───────────────────────────────────────────────────────────
-
-    /// Independent nodes all land in layer 0.
+    /// Independent nodes share the first layer.
     #[test]
     fn topo_layers_no_deps_single_layer() {
         let nodes = [
@@ -181,7 +145,7 @@ mod tests {
         assert_eq!(layers[0].len(), 3);
     }
 
-    /// Linear chain a→b→c produces three layers in order.
+    /// A linear chain produces one node per layer.
     #[test]
     fn topo_layers_linear_chain() {
         let nodes = [
@@ -193,7 +157,7 @@ mod tests {
         assert_eq!(layers, vec![vec!["a"], vec!["b"], vec!["c"]]);
     }
 
-    /// Diamond: b and c are independent (same layer), d depends on both.
+    /// A diamond keeps independent branches in the same layer.
     #[test]
     fn topo_layers_diamond() {
         let nodes = [
@@ -209,28 +173,26 @@ mod tests {
         assert_eq!(layers[2], vec!["d"]);
     }
 
-    /// A cycle returns `DagError::Cycle`.
+    /// Cycles return `DagError::Cycle`.
     #[test]
     fn topo_layers_cycle_returns_error() {
         let nodes = [("a", ["b"].as_slice()), ("b", ["a"].as_slice())];
         assert_eq!(topo_layers(&nodes), Err(DagError::Cycle));
     }
 
-    /// An unknown dependency returns `DagError::UnknownDependency`.
+    /// Unknown dependencies are rejected.
     #[test]
     fn topo_layers_unknown_dep_returns_error() {
         let nodes = [("a", ["z"].as_slice())];
         assert_eq!(topo_layers(&nodes), Err(DagError::UnknownDependency("z")));
     }
 
-    /// A duplicate id returns `DagError::DuplicateId`.
+    /// Duplicate ids are rejected.
     #[test]
     fn topo_layers_duplicate_id_returns_error() {
         let nodes = [("a", [].as_slice()), ("a", [].as_slice())];
         assert_eq!(topo_layers(&nodes), Err(DagError::DuplicateId("a")));
     }
-
-    // ── cosine_similarity ─────────────────────────────────────────────────────
 
     /// Identical vectors have similarity 1.0.
     #[test]
@@ -244,27 +206,25 @@ mod tests {
         assert_eq!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]), 0.0);
     }
 
-    /// Zero vector returns 0.0 without panicking.
+    /// Zero vectors return 0.0.
     #[test]
     fn cosine_zero_vector_returns_zero() {
         assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]), 0.0);
     }
 
-    // ── euclidean_distance ────────────────────────────────────────────────────
-
-    /// Same point → distance 0.
+    /// Identical points have distance 0.
     #[test]
     fn euclidean_same_point() {
         assert_eq!(euclidean_distance(&[1.0, 2.0], &[1.0, 2.0]), 0.0);
     }
 
-    /// 3-4-5 right triangle.
+    /// Known triangle distances are preserved.
     #[test]
     fn euclidean_known_distance() {
         assert!((euclidean_distance(&[0.0, 0.0], &[3.0, 4.0]) - 5.0).abs() < 1e-6);
     }
 
-    /// Similarity of identical vectors is 1.0.
+    /// Identical vectors have similarity 1.0.
     #[test]
     fn euclidean_similarity_identical() {
         assert_eq!(euclidean_similarity(&[1.0, 2.0], &[1.0, 2.0]), 1.0);

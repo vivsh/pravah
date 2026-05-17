@@ -1,27 +1,10 @@
-//! # Example 1 — Linear Flow
-//!
-//! Demonstrates a straight pipeline:
-//!
-//! ```text
-//! SummariseRequest ──agent──► BulletPoints ──work──► Report (terminal)
-//! ```
-//!
-//! The agent receives the raw text, distils it into bullet points, and a
-//! deterministic `work` node formats those into a Markdown report — no second
-//! LLM call needed.
-//!
-//! ## Running
-//!
-//! ```shell
-//! GEMINI_API_KEY=<key> cargo run --example linear_flow
-//! ```
+//! Linear flow example with one agent followed by one deterministic work node.
 
 use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ── Types ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct SummariseRequest {
@@ -38,7 +21,6 @@ struct Report {
     markdown: String,
 }
 
-// ── Agent ─────────────────────────────────────────────────────────────────────
 
 impl Agent for SummariseRequest {
     type Output = BulletPoints;
@@ -52,14 +34,12 @@ impl Agent for SummariseRequest {
     }
 }
 
-// ── Work node ─────────────────────────────────────────────────────────────────
 
 async fn format_bullets(bullets: BulletPoints, _ctx: Context) -> Result<Report, FlowError> {
     let markdown = bullets.points.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n");
     Ok(Report { markdown })
 }
 
-// ── Flow ──────────────────────────────────────────────────────────────────────
 
 impl Flow for SummariseRequest {
     type Output = Report;
@@ -72,7 +52,6 @@ impl Flow for SummariseRequest {
     }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -3,36 +3,21 @@ use std::sync::{Arc, Mutex};
 
 use crate::flows::{FlowHistory, HistoryEntry, HistoryStore};
 
-/// A [`HistoryStore`] that captures a full snapshot of history entries on every flush.
-///
-/// Useful for asserting that the correct messages were recorded and that compaction
-/// evicted the expected entries.
-///
-/// Clone before injecting to retain a spy handle:
-///
-/// ```rust,ignore
-/// let store = CapturingHistoryStore::new();
-/// let spy = store.clone();
-/// let mut runtime = FlowRuntime::new(input)?.with_store(store);
-/// // drive the flow …
-/// assert_eq!(spy.flush_count(), 1);
-/// let snapshot = spy.last_snapshot().unwrap();
-/// assert_eq!(snapshot.iter().filter(|e| !e.evicted).count(), 4);
-/// ```
+/// [`HistoryStore`] test double that records a full snapshot on every flush.
 #[derive(Clone)]
 pub struct CapturingHistoryStore {
     snapshots: Arc<Mutex<Vec<Vec<HistoryEntry>>>>,
 }
 
 impl CapturingHistoryStore {
-    /// Creates an empty store with no recorded snapshots.
+    /// Creates an empty store.
     pub fn new() -> Self {
         Self {
             snapshots: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// Number of times [`flush`](HistoryStore::flush) has been called.
+    /// Returns how many times `flush` has run.
     pub fn flush_count(&self) -> usize {
         self.snapshots
             .lock()
@@ -40,9 +25,7 @@ impl CapturingHistoryStore {
             .len()
     }
 
-    /// Snapshot taken during the most recent flush, or `None` if flush has not run yet.
-    ///
-    /// Each entry carries its `evicted` flag so tests can verify compaction results.
+    /// Returns the most recent flush snapshot.
     pub fn last_snapshot(&self) -> Option<Vec<HistoryEntry>> {
         self.snapshots
             .lock()
@@ -51,7 +34,7 @@ impl CapturingHistoryStore {
             .cloned()
     }
 
-    /// All snapshots in flush order, one per flush call.
+    /// Returns all snapshots in flush order.
     pub fn all_snapshots(&self) -> Vec<Vec<HistoryEntry>> {
         self.snapshots
             .lock()

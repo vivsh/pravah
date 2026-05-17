@@ -2,50 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::flows::{FlowGraph, NodeId, errors::BuildError, flows::FlowNode};
 
-
-
-
-/// Validates per-node structural rules for every node in the graph.
-///
-/// This function checks only local, self-contained invariants on each node. It does **not**
-/// require an entry point to be known and does **not** perform reachability analysis.
-/// Called by [`FlowBuilder::build`] as the first validation pass.
-///
-/// # Checks performed
-///
-/// **Agent nodes**
-/// - `exit` must differ from `id` — an agent cannot write its output to the same state slot
-///   it reads its input from, which would silently overwrite the input before execution.
-/// - `model` must be a non-empty string.
-///
-/// **Work nodes**
-/// - `exit_name` must differ from `name` — same self-overwrite guard as for agents.
-///
-/// **Fork nodes**
-/// - Must declare at least 2 children; a fork with fewer children is a degenerate branch.
-/// - No duplicate child `NodeId`s within the same fork.
-/// - Every child `NodeId` must refer to a node that is already registered in `nodes`.
-///
-/// **Join nodes**
-/// - Each join target group (identified by `target`) is validated only once; duplicate join
-///   entries for the same target are skipped after the first.
-/// - Must have at least 2 parents.
-/// - No duplicate parent `NodeId`s within the same join.
-/// - No parent `NodeId` may equal the join's own `target`.
-/// - Every parent `NodeId` must refer to a registered node.
-///
-/// **Either nodes**
-/// - `left_name` and `right_name` must be distinct; if both branches resolve to the same
-///   schema name the routing is meaningless.
-///
-/// **Flow (sub-flow) nodes**
-/// - Must have a `parent_entry` (i.e. the outer entry slot must be bound); a sub-flow with no
-///   entry context cannot be wired into the parent graph.
-/// - `parent_entry` must differ from the sub-flow's `exit`; otherwise the sub-flow output
-///   would overwrite the value it was given as input.
-///
-/// **Tool nodes**
-/// - No per-node checks; tool nodes are validated only indirectly through their owning agent.
+/// Validates node-local rules that do not depend on the graph entry point.
+/// This pass catches self-overwrites, malformed fork and join shapes, empty agent models,
+/// invalid branch targets, and sub-flows that cannot be wired safely into a parent graph.
 pub fn validate_nodes(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> Result<(), BuildError> {
     let mut problems: Vec<String> = Vec::new();
     let mut seen_join_groups: HashSet<NodeId> = HashSet::new();
@@ -200,35 +159,9 @@ pub fn validate_nodes(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> R
     }
 }
 
-/// Validates entry registration and graph-level reachability.
-///
-/// Called by [`FlowGraph::with_entry`] after an entry point has been designated. This is the
-/// second validation pass and assumes [`validate_nodes`] has already succeeded.
-///
-/// # Checks performed
-///
-/// **Entry registration**
-/// - The `entry` `NodeId` must refer to a node that is registered in `nodes`. If the entry is
-///   not found, reachability checks are skipped entirely (they would be meaningless without a
-///   valid starting point).
-///
-/// **Forward reachability** (skipped when entry is invalid)
-/// - Every non-`Tool` node must be reachable from `entry` by following successor edges:
-///   - `Agent` → `exit`
-///   - `Work` → `exit_name`
-///   - `Fork` → each child
-///   - `Join` → `target`
-///   - `Either` → `left_name`, `right_name`
-///   - `Flow` → the outer-interner translation of the inner graph's `exit`
-/// - A node that cannot be reached from `entry` is flagged as unreachable. `Tool` nodes are
-///   excluded because they are driven by agents, not by the state-transition graph.
-///
-/// **Backward reachability / liveness** (skipped when entry is invalid)
-/// - Terminal state IDs are identified as successor IDs that are **not** themselves registered
-///   nodes (i.e. they are pure output slots, not executable nodes).
-/// - Every non-`Tool` node must have at least one path leading to a terminal state ID. A node
-///   with no path to any terminal is a dead end — execution that reaches it can never produce
-///   a final value.
+/// Validates entry wiring and whole-graph reachability.
+/// This pass fails when the entry is missing, when a non-tool node is unreachable,
+/// or when a non-tool node cannot reach any terminal output slot.
 pub fn validate(
     nodes: &HashMap<NodeId, FlowNode>,
     entry: NodeId,
@@ -237,12 +170,10 @@ pub fn validate(
     let mut problems: Vec<String> = Vec::new();
     let entry_str = graph.interner.name_of(entry);
 
-    // --- Entry check ---
     if !nodes.contains_key(&entry) {
         problems.push(format!("entry '{}' is not a registered node", entry_str));
     }
 
-    // --- Reachability (only when entry is valid) ---
     if nodes.contains_key(&entry) {
         let successors: HashMap<NodeId, Vec<NodeId>> = nodes
             .iter()

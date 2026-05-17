@@ -2,10 +2,7 @@
 
 use serde_json::{Map, Value};
 
-/// Reduces a full JSON Schema to the stricter subset accepted by Gemini.
-///
-/// This inlines root definitions, drops unsupported schema annotations, and
-/// normalizes nullable types into the non-null representation Gemini expects.
+/// Reduces a JSON Schema to the stricter subset accepted by Gemini.
 #[allow(dead_code)]
 pub(super) fn sanitize_strict(schema: Value) -> Value {
     let defs = collect_defs(&schema);
@@ -13,7 +10,7 @@ pub(super) fn sanitize_strict(schema: Value) -> Value {
     clean_fields(without_refs)
 }
 
-/// Collects all entries from `definitions` or `$defs` at the root level.
+/// Collects root-level entries from `definitions` and `$defs`.
 fn collect_defs(schema: &Value) -> Map<String, Value> {
     let mut defs = Map::new();
     if let Some(obj) = schema.as_object() {
@@ -26,8 +23,7 @@ fn collect_defs(schema: &Value) -> Map<String, Value> {
     defs
 }
 
-/// Recursively replace every `{"$ref": "#/definitions/Foo"}` (or `#/$defs/Foo`)
-/// with the corresponding definition, then recurse into the substituted value.
+/// Inlines root-local `$ref` values recursively.
 fn inline_refs(value: Value, defs: &Map<String, Value>) -> Value {
     match value {
         Value::Object(mut map) => {
@@ -49,19 +45,14 @@ fn inline_refs(value: Value, defs: &Map<String, Value>) -> Value {
     }
 }
 
-/// Extract the definition name from a `$ref` string like `#/definitions/Foo`.
+/// Extracts the definition name from a `$ref` path.
 fn ref_name(r: &str) -> Option<&str> {
     r.split('/').last()
 }
 
-/// Recursively remove schema annotation keywords and normalise nullable types.
-///
-/// Keys inside a `"properties"` map are property names, not keywords, and
-/// must not be filtered even if they coincide with a keyword (e.g. a struct
-/// field literally named `title`). `clean_properties` handles that case.
-///
-/// Also injects `"properties": {}` on any `type: object` node that lacks one —
-/// Gemini rejects object schemas without an explicit `properties` key.
+/// Removes unsupported keywords and normalizes nullable types.
+/// Property names inside `properties` are preserved even when they match schema keywords.
+/// Gemini also requires object schemas to carry an explicit `properties` map.
 fn clean_fields(value: Value) -> Value {
     match value {
         Value::Object(map) => {
@@ -101,8 +92,7 @@ fn clean_fields(value: Value) -> Value {
     }
 }
 
-/// Process a `"properties"` value: recurse into each property's schema
-/// without filtering the property name keys themselves.
+/// Cleans nested property schemas without filtering the property names.
 fn clean_properties(value: Value) -> Value {
     match value {
         Value::Object(map) => {
@@ -112,8 +102,7 @@ fn clean_properties(value: Value) -> Value {
     }
 }
 
-/// Rewrites `["T", "null"]` (or `["null", "T"]`) to `"T"`.
-/// Leaves all other type values untouched.
+/// Rewrites `["T", "null"]` to `"T"`.
 fn normalize_type(value: Value) -> Value {
     if let Value::Array(types) = &value {
         let non_null: Vec<&Value> = types
@@ -132,7 +121,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// `sanitize_strict` removes `$schema` and `title` from the root and nested schemas.
+    /// Root and nested schema annotations are removed.
     #[test]
     fn strips_schema_and_title() {
         let input = json!({
@@ -149,7 +138,7 @@ mod tests {
         assert!(out["properties"]["name"].get("title").is_none());
     }
 
-    /// `sanitize_strict` inlines `$ref` entries from `definitions` and removes the definitions key.
+    /// Root-local `$ref` values are inlined.
     #[test]
     fn inlines_defs_ref() {
         let input = json!({
@@ -176,7 +165,7 @@ mod tests {
         assert!(items.get("$ref").is_none());
     }
 
-    /// `sanitize_strict` rewrites nullable array types to their non-null form.
+    /// Nullable type arrays are normalized.
     #[test]
     fn normalises_nullable_type() {
         let input = json!({
@@ -189,7 +178,7 @@ mod tests {
         assert_eq!(out["properties"]["note"]["type"], "string");
     }
 
-    /// A struct field literally named `title` must survive sanitisation as a property key.
+    /// Property keys named `title` must survive sanitization.
     #[test]
     fn preserves_property_named_title() {
         let input = json!({
@@ -210,7 +199,7 @@ mod tests {
         assert!(out["properties"]["title"].get("title").is_none());
     }
 
-    /// `sanitize_strict` removes `additionalProperties` at every nesting level.
+    /// `additionalProperties` is removed at every level.
     #[test]
     fn removes_additional_properties() {
         let input = json!({

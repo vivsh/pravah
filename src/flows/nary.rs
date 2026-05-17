@@ -5,12 +5,8 @@ use serde_json::Value;
 use crate::flows::errors::FlowError;
 use crate::flows::flows::{StateNode, node};
 
-/// Implemented by tuple types returned by a [`FlowBuilder::split`] node (1→N fan-out).
-///
-/// Arities 2–16 are covered by blanket impls.
-///
-/// You never need to import or name this trait — the bound is satisfied automatically
-/// by the tuple returned from your `split` closure.
+/// Tuple helper for [`FlowBuilder::split`].
+/// Arities 2-16 are covered automatically.
 #[doc(hidden)]
 #[allow(private_interfaces)]
 pub trait SplitOutputs: 'static {
@@ -18,12 +14,8 @@ pub trait SplitOutputs: 'static {
     fn into_nodes(self) -> Result<Vec<StateNode>, FlowError>;
 }
 
-/// Implemented by tuple types consumed by a [`FlowBuilder::merge`] node (N→1 fan-in).
-///
-/// Arities 2–16 are covered by blanket impls.
-///
-/// You never need to import or name this trait — the bound is satisfied automatically
-/// by the tuple destructured in your `merge` closure.
+/// Tuple helper for [`FlowBuilder::merge`].
+/// Arities 2-16 are covered automatically.
 #[doc(hidden)]
 pub trait MergeInputs: Sized + 'static {
     fn schema_names() -> Vec<String>;

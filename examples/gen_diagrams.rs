@@ -1,36 +1,4 @@
-//! Diagram generator — Article Production Pipeline.
-//!
-//! A realistic multi-stage content pipeline that exercises every node type:
-//!
-//! ```text
-//! ArticleRequest
-//!   ├─fork─┬─ ResearchTask  ──agent──► ResearchNotes  ─┐
-//!          └─ AudienceTask  ──agent──► AudienceProfile ─┤join
-//!                                                        ▼
-//!                                                  ContentBrief
-//!                                                  │work
-//!                                            OutlineRequest
-//!                                     (nested OutlineFlow) │work
-//!                                                          ▼
-//!                                                       Outline
-//!                                                 ┌──either──┐
-//!                                           QuickDraft     LongDraft
-//!                                           (agent)   (nested ReviewFlow)
-//!                                               │              │work
-//!                                               │         ReviewedDraft
-//!                                               │           (agent)
-//!                                               └──────────────┘
-//!                                                      ▼
-//!                                               FinalArticle ◉
-//! ```
-//!
-//! Inner flows:
-//! - **OutlineFlow**: `OutlineRequest` → agent → `Outline`
-//! - **ReviewFlow**: `LongDraft` → agent → `ReviewedDraft`
-//!
-//! ```shell
-//! cargo run --example gen_diagrams
-//! ```
+//! Diagram generation example that exercises the main flow node types.
 
 use either::Either;
 use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
@@ -39,56 +7,46 @@ use pravah::Context;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ── Domain types ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ArticleRequest {
     topic: String,
-    format: String, // "quick" | "detailed"
+    format: String,
 }
 
-// Fork outputs
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ResearchTask { topic: String }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct AudienceTask { topic: String, format: String }
 
-// Agent outputs from parallel branches
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ResearchNotes { notes: String, sources: Vec<String> }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct AudienceProfile { tone: String, reading_level: String }
 
-// Join output
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ContentBrief { notes: String, tone: String, format: String }
 
-// Nested OutlineFlow entry
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct OutlineRequest { brief: String }
 
-// Outer either-node input + OutlineFlow terminal
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct Outline { sections: Vec<String>, format: String }
 
-// Either branches
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct QuickDraft { content: String }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct LongDraft { sections: Vec<String> }
 
-// Nested ReviewFlow output
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ReviewedDraft { content: String, notes: String }
 
-// Terminal (both paths converge here)
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FinalArticle { title: String, body: String }
 
-// ── Inner flow 1: OutlineFlow (OutlineRequest → agent → Outline) ───────────────
 
 impl Agent for OutlineRequest {
     type Output = Outline;
@@ -102,7 +60,6 @@ impl Flow for OutlineRequest {
     }
 }
 
-// ── Inner flow 2: ReviewFlow (LongDraft → agent → ReviewedDraft) ───────────────
 
 impl Agent for LongDraft {
     type Output = ReviewedDraft;
@@ -116,7 +73,6 @@ impl Flow for LongDraft {
     }
 }
 
-// ── Outer flow agents ──────────────────────────────────────────────────────────
 
 impl Agent for ResearchTask {
     type Output = ResearchNotes;
@@ -138,7 +94,6 @@ impl Agent for ReviewedDraft {
     fn build() -> AgentConfig { AgentConfig::new("Polish the reviewed draft into a publication-ready article.", "gemini://gemini-2.5-flash-lite") }
 }
 
-// ── Outer flow node handlers ───────────────────────────────────────────────────
 
 fn split_request(req: ArticleRequest) -> (ResearchTask, AudienceTask) {
     (
@@ -194,28 +149,26 @@ async fn run_review_flow(draft: LongDraft, ctx: Context) -> Result<ReviewedDraft
     }
 }
 
-// ── Outer flow ─────────────────────────────────────────────────────────────────
 
 impl Flow for ArticleRequest {
     type Output = FinalArticle;
 
     fn build() -> Result<FlowGraph, FlowError> {
         FlowGraph::builder()
-            .fork(split_request)        // ArticleRequest → (ResearchTask, AudienceTask)
-            .agent::<ResearchTask>()    // ResearchTask   → ResearchNotes
-            .agent::<AudienceTask>()    // AudienceTask   → AudienceProfile
-            .join(merge_findings)       // (ResearchNotes, AudienceProfile) → ContentBrief
-            .work(prepare_outline)      // ContentBrief   → OutlineRequest
-            .work(run_outline_flow)     // OutlineRequest → Outline        (nested OutlineFlow)
-            .either(route_draft)        // Outline        → QuickDraft | LongDraft
-            .agent::<QuickDraft>()      // QuickDraft     → FinalArticle
-            .work(run_review_flow)      // LongDraft      → ReviewedDraft  (nested ReviewFlow)
-            .agent::<ReviewedDraft>()   // ReviewedDraft  → FinalArticle
+            .fork(split_request)
+            .agent::<ResearchTask>()
+            .agent::<AudienceTask>()
+            .join(merge_findings)
+            .work(prepare_outline)
+            .work(run_outline_flow)
+            .either(route_draft)
+            .agent::<QuickDraft>()
+            .work(run_review_flow)
+            .agent::<ReviewedDraft>()
             .build()
     }
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let diagram = FlowGraphDiagram::from_flow::<ArticleRequest>()?;

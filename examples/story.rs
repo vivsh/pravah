@@ -1,36 +1,4 @@
-//! # Example — Production Room: Multi-Agent Comic Writer
-//!
-//! Each panel is produced by three independent specialist agents whose notes
-//! are synthesised by a director. The story grows one panel at a time; the
-//! user steers the plot after each panel. The entire loop lives inside a single
-//! [`FlowRuntime`] — the `either` node loops back to `StoryTurn`.
-//!
-//! ```text
-//! StoryTurn ─split─┬─ ChoreographerBrief ──agent──► ChoreoNotes ──┐
-//!                  ├─ DialogueBrief ──────────agent──► DialogueNotes ├── merge ──► AllNotes
-//!                  ├─ CinematographerBrief ───agent──► CinemaNote ───┘
-//!                  └─ TurnCarry ─────────────────────────────────────┘
-//!
-//! AllNotes ─split─┬─ DirectorBrief ──agent──► ComicPanel ─┐
-//!                 └─ DirectorCarry ─────────────────────────── merge ──► DirectorPanel
-//!
-//! DirectorPanel ──work (print + read stdin)──► UserInput
-//!                                                  │
-//!                          either ◄────────────────┘
-//!                         /       \
-//!          Left: StoryTurn          Right: FinalSummary (terminal)
-//!          (loops back ↑)
-//! ```
-//!
-//! The `recap` field in `StoryTurn` is a rich text log built after every panel:
-//! scene, staging, cinematography, subtext, and dialogue. Each specialist
-//! agent receives the full recap so continuity is maintained across turns.
-//!
-//! ## Running
-//!
-//! ```shell
-//! GEMINI_API_KEY=<key> cargo run --example story
-//! ```
+//! Multi-agent comic writer example with a loop back through an `either` node.
 
 use std::io::Write;
 
@@ -40,7 +8,6 @@ use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ── Shared primitives ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct Dialogue {
@@ -48,17 +15,14 @@ struct Dialogue {
     line: String,
 }
 
-// ── Flow entry and loop-back type ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct StoryTurn {
     panel_number: usize,
-    /// Rich text log of every prior panel's scene, staging, shot, subtext, and dialogue.
     recap: String,
     direction: String,
 }
 
-// ── Specialist briefs (produced by the 4-way split) ──────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ChoreographerBrief {
@@ -80,15 +44,12 @@ struct CinematographerBrief {
     recap: String,
     direction: String,
 }
-
-/// Carries panel_number and recap through all three agent calls untouched.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct TurnCarry {
     panel_number: usize,
     recap: String,
 }
 
-// ── Specialist agent outputs ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct ChoreoNotes {
@@ -110,8 +71,6 @@ struct CinemaNote {
     lighting: String,
     colour_palette: String,
 }
-
-/// All three specialist outputs converged; ready to brief the director.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct AllNotes {
     choreo: ChoreoNotes,
@@ -121,7 +80,6 @@ struct AllNotes {
     recap: String,
 }
 
-// ── Director fork types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DirectorBrief {
@@ -131,8 +89,6 @@ struct DirectorBrief {
     dialogue: DialogueNotes,
     cinema: CinemaNote,
 }
-
-/// Carries specialist notes alongside the director agent so they survive to
 /// the join and enrich the per-panel recap entry on the next turn.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DirectorCarry {
@@ -143,7 +99,6 @@ struct DirectorCarry {
     cinema: CinemaNote,
 }
 
-// ── Panel types ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ComicPanel {
@@ -176,10 +131,6 @@ struct UserInput {
 struct FinalSummary {
     panels_written: usize,
 }
-
-// ── Split handlers ───────────────────────────────────────────────────────────
-
-/// Fans out one `StoryTurn` into four independent branches in a single step.
 fn split_crew(
     turn: StoryTurn,
 ) -> (ChoreographerBrief, DialogueBrief, CinematographerBrief, TurnCarry) {
@@ -221,10 +172,6 @@ fn split4(notes: AllNotes) -> (DirectorBrief, DirectorCarry) {
         },
     )
 }
-
-// ── Merge handlers ───────────────────────────────────────────────────────────
-
-/// Collects all three specialist outputs and the carry in a single step.
 fn merge_all_notes(
     (choreo, dialogue, cinema, carry): (ChoreoNotes, DialogueNotes, CinemaNote, TurnCarry),
 ) -> AllNotes {
@@ -250,7 +197,6 @@ fn merge_director(
     }
 }
 
-// ── Specialist agents ─────────────────────────────────────────────────────────
 
 impl Agent for ChoreographerBrief {
     type Output = ChoreoNotes;
@@ -349,7 +295,6 @@ impl Agent for DirectorBrief {
     }
 }
 
-// ── Work node ─────────────────────────────────────────────────────────────────
 
 async fn print_and_read(dp: DirectorPanel, _ctx: Context) -> Result<UserInput, FlowError> {
     let rule = "─".repeat(62);
@@ -392,7 +337,6 @@ async fn print_and_read(dp: DirectorPanel, _ctx: Context) -> Result<UserInput, F
     })
 }
 
-// ── Either handler ────────────────────────────────────────────────────────────
 
 fn route_input(
     input: UserInput,
@@ -450,7 +394,6 @@ fn route_input(
     })
 }
 
-// ── Flow ──────────────────────────────────────────────────────────────────────
 
 impl Flow for StoryTurn {
     type Output = FinalSummary;
@@ -471,7 +414,6 @@ impl Flow for StoryTurn {
     }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

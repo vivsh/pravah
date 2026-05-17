@@ -1,30 +1,4 @@
-//! # Example 5 — Debate Analyser
-//!
-//! Takes a claim from stdin and runs it through a multi-stage pipeline:
-//!
-//! ```text
-//! Outer flow
-//! ─────────────────────────────────────────────────────────────────────────────
-//!                  ┌─ ProRequest  ──agent──► ProArguments  ─┐
-//! DebateInput ─fork┤                                         ├join──► DebateDraft ──flow──► DebateReport
-//!                  └─ ConRequest  ──agent──► ConArguments  ─┘
-//!
-//! Inner flow  (DebateDraft → DebateReport)
-//! ─────────────────────────────────────────────────────────────────────────────
-//! DebateDraft ──agent──► DebateVerdict ──work──► DebateReport
-//! ```
-//!
-//! The outer flow forks into two independent agent branches, rejoins them into
-//! a draft, then delegates verdict writing to a nested sub-flow. The inner flow
-//! keeps the verdict agent isolated so it can be tested or reused on its own.
-//!
-//! ## Running
-//!
-//! ```shell
-//! GEMINI_API_KEY=<key> cargo run --example debate
-//! # or supply the claim directly:
-//! GEMINI_API_KEY=<key> cargo run --example debate -- "Remote work improves productivity"
-//! ```
+//! Debate example with fork/join plus a nested verdict flow.
 
 use std::io::{self, Write};
 
@@ -33,14 +7,12 @@ use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ── Input ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DebateInput {
     claim: String,
 }
 
-// ── Fork children ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ProRequest {
@@ -51,10 +23,6 @@ struct ProRequest {
 struct ConRequest {
     claim: String,
 }
-
-// ── Agent outputs ─────────────────────────────────────────────────────────────
-
-/// Pro arguments; echoes the original claim so the join can forward it.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ProArguments {
     claim: String,
@@ -66,7 +34,6 @@ struct ConArguments {
     points: Vec<String>,
 }
 
-// ── Inner-flow types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DebateDraft {
@@ -82,14 +49,12 @@ struct DebateVerdict {
     caveats: Vec<String>,
 }
 
-// ── Final output ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DebateReport {
     markdown: String,
 }
 
-// ── Agents ────────────────────────────────────────────────────────────────────
 
 impl Agent for ProRequest {
     type Output = ProArguments;
@@ -130,7 +95,6 @@ impl Agent for DebateDraft {
     }
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
 
 fn split_claim(input: DebateInput) -> (ProRequest, ConRequest) {
     (
@@ -168,7 +132,6 @@ async fn format_verdict(verdict: DebateVerdict, _ctx: Context) -> Result<DebateR
     Ok(DebateReport { markdown })
 }
 
-// ── Inner flow ────────────────────────────────────────────────────────────────
 
 impl Flow for DebateDraft {
     type Output = DebateReport;
@@ -181,7 +144,6 @@ impl Flow for DebateDraft {
     }
 }
 
-// ── Outer flow ────────────────────────────────────────────────────────────────
 
 impl Flow for DebateInput {
     type Output = DebateReport;
@@ -197,7 +159,6 @@ impl Flow for DebateInput {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn read_claim() -> String {
     let mut args = std::env::args().skip(1);
@@ -216,7 +177,6 @@ fn read_claim() -> String {
     }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

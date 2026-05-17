@@ -1,21 +1,15 @@
-//! Integration tests for pure workflows — no real LLM calls.
-//!
-//! Every flow here uses only `work`, `fork`, `join`, `either`, and `flow` nodes.
-//! The `testing` feature is NOT required because no agent nodes are exercised.
+//! Integration tests for work-only flow graphs.
 
 use either::Either;
-use pravah::flows::{Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{Flow, FlowError, FlowGraph, FlowRuntime, FlowStep, HumanInput, PhaseKind};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ── shared helper ─────────────────────────────────────────────────────────────
 
 fn ctx() -> Context {
     Context::new(FlowConf::default())
 }
-
-/// Drive a runtime to completion and return the output.
 /// Panics if the flow suspends or never finishes within 100 steps.
 async fn run_to_done<I: Flow>(mut rt: FlowRuntime<I>) -> I::Output {
     for _ in 0..100 {
@@ -28,9 +22,6 @@ async fn run_to_done<I: Flow>(mut rt: FlowRuntime<I>) -> I::Output {
     panic!("flow did not finish within 100 steps")
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 1: simple work chains
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct Num(i64);
@@ -47,8 +38,6 @@ impl Flow for Num {
         FlowGraph::builder().work(add1).build()
     }
 }
-
-/// Single work node — flow goes straight through one transformation.
 #[tokio::test]
 async fn test_single_work_node() {
     let out = run_to_done(FlowRuntime::new(Num(5)).unwrap()).await;
@@ -84,17 +73,12 @@ impl Flow for Chain3In {
             .build()
     }
 }
-
-/// Three chained work nodes — (n+10)*3-5.
 #[tokio::test]
 async fn test_three_chained_work_nodes() {
     let out = run_to_done(FlowRuntime::new(Chain3In(0)).unwrap()).await;
-    assert_eq!(out.0, 25); // (0+10)*3-5
+    assert_eq!(out.0, 25);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 2: either / branching
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct EitherIn {
@@ -131,8 +115,6 @@ impl Flow for EitherIn {
             .build()
     }
 }
-
-/// Either node routes even numbers left, odd numbers right.
 #[tokio::test]
 async fn test_either_left_branch() {
     let out = run_to_done(FlowRuntime::new(EitherIn { value: 4 }).unwrap()).await;
@@ -144,15 +126,12 @@ async fn test_either_right_branch() {
     let out = run_to_done(FlowRuntime::new(EitherIn { value: 7 }).unwrap()).await;
     assert_eq!(out.0, "odd:7");
 }
-
-/// Zero is even — tests the boundary of the routing predicate.
 #[tokio::test]
 async fn test_either_zero_is_even() {
     let out = run_to_done(FlowRuntime::new(EitherIn { value: 0 }).unwrap()).await;
     assert_eq!(out.0, "even:0");
 }
 
-// ─── work before routing ──────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct PreRouteIn(i64);
@@ -193,8 +172,6 @@ impl Flow for PreRouteIn {
             .build()
     }
 }
-
-/// Work node runs before either, routing positive and negative paths.
 #[tokio::test]
 async fn test_work_then_either_positive() {
     let out = run_to_done(FlowRuntime::new(PreRouteIn(3)).unwrap()).await;
@@ -207,9 +184,6 @@ async fn test_work_then_either_negative() {
     assert_eq!(out.0, "neg:-10");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 3: fork + join
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ForkJoinIn {
@@ -237,15 +211,12 @@ impl Flow for ForkJoinIn {
         FlowGraph::builder().fork(split).join(merge).build()
     }
 }
-
-/// Fork splits input, join combines both branches: (x+1) + (x*2).
 #[tokio::test]
 async fn test_fork_join_basic() {
     let out = run_to_done(FlowRuntime::new(ForkJoinIn { x: 4 }).unwrap()).await;
     assert_eq!(out.sum, 5 + 8);
 }
 
-// ─── fork → work on each branch → join ───────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FWJIn(i64);
@@ -284,15 +255,12 @@ impl Flow for FWJIn {
             .build()
     }
 }
-
-/// Independent work nodes on each branch before joining: (n+100) - (n*100).
 #[tokio::test]
 async fn test_fork_work_work_join() {
     let out = run_to_done(FlowRuntime::new(FWJIn(5)).unwrap()).await;
     assert_eq!(out.0, 105 - 500);
 }
 
-// ─── work → fork → join → work ───────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct WFJWIn(i64);
@@ -331,17 +299,12 @@ impl Flow for WFJWIn {
             .build()
     }
 }
-
-/// work → fork → join → work: ((x+1)*2 + (x+1)*3) * 10.
 #[tokio::test]
 async fn test_work_fork_join_work() {
     let out = run_to_done(FlowRuntime::new(WFJWIn(2)).unwrap()).await;
     assert_eq!(out.0, 150);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 4: nested flows
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct InnerIn(i64);
@@ -381,8 +344,6 @@ impl Flow for OuterIn {
             .build()
     }
 }
-
-/// Nested flow: outer prepares, inner runs, outer finalises.
 /// x=3 → inner gets 8 → doubled to 16 → outer adds 1 → 17.
 #[tokio::test]
 async fn test_nested_flow_basic() {
@@ -390,7 +351,6 @@ async fn test_nested_flow_basic() {
     assert_eq!(out.0, 17);
 }
 
-// ─── three levels of nesting ─────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct L2In(i64);
@@ -453,15 +413,12 @@ impl Flow for RootIn {
             .build()
     }
 }
-
-/// Three levels of nesting: (((x+1)*2)+100)-10.
 #[tokio::test]
 async fn test_doubly_nested_flow() {
     let out = run_to_done(FlowRuntime::new(RootIn(5)).unwrap()).await;
-    assert_eq!(out.0, ((5 + 1) * 2 + 100) - 10); // 102
+    assert_eq!(out.0, ((5 + 1) * 2 + 100) - 10);
 }
 
-// ─── nested flow wrapping an inner fork/join ──────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct NForkIn(i64);
@@ -523,17 +480,12 @@ impl Flow for NFWrap {
             .build()
     }
 }
-
-/// Outer flow wraps an inner fork/join. x=3 → 3*10 + (3+1000) = 1033.
 #[tokio::test]
 async fn test_nested_flow_containing_fork_join() {
     let out = run_to_done(FlowRuntime::new(NFWrap(3)).unwrap()).await;
     assert_eq!(out.0, 1033);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 5: error behaviour
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ErrKindIn(i64);
@@ -550,8 +502,6 @@ impl Flow for ErrKindIn {
         FlowGraph::builder().work(always_err).build()
     }
 }
-
-/// A work node returning an error never produces Suspend or Done.
 #[tokio::test]
 async fn test_work_error_is_not_suspend() {
     let mut rt = FlowRuntime::new(ErrKindIn(0)).unwrap();
@@ -564,9 +514,6 @@ async fn test_work_error_is_not_suspend() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 6: snapshot / restore
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct SnapIn(i64);
@@ -588,8 +535,6 @@ impl Flow for SnapIn {
         FlowGraph::builder().work(snap_step1).work(snap_step2).build()
     }
 }
-
-/// Snapshot mid-flow; restored runtime produces the same result. Also verifies
 /// the snapshot round-trips cleanly through JSON.
 #[tokio::test]
 async fn test_snapshot_restore_mid_flow() {
@@ -602,10 +547,8 @@ async fn test_snapshot_restore_mid_flow() {
 
     let rt2 = FlowRuntime::<SnapIn>::from_snapshot(snap2).unwrap();
     let out = run_to_done(rt2).await;
-    assert_eq!(out.0, 20); // (9+1)*2
+    assert_eq!(out.0, 20);
 }
-
-/// Calling next() on a completed (Done) snapshot returns an error.
 #[tokio::test]
 async fn test_snapshot_after_done_errors_on_next() {
     let mut rt = FlowRuntime::new(SnapIn(0)).unwrap();
@@ -620,16 +563,11 @@ async fn test_snapshot_after_done_errors_on_next() {
     assert!(rt2.next(ctx()).await.is_err());
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 7: build-time validation
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ValIn(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ValOut(i64);
-
-/// Building a flow with no nodes fails — entry type is not registered.
 #[tokio::test]
 async fn test_empty_flow_build_fails() {
     impl Flow for ValIn {
@@ -641,11 +579,7 @@ async fn test_empty_flow_build_fails() {
     assert!(FlowRuntime::new(ValIn(0)).is_err());
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 8: complex composed flows
-// ═══════════════════════════════════════════════════════════════════════════════
 
-// ─── either inside a nested flow ─────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct EFIn(i64);
@@ -703,8 +637,6 @@ impl Flow for EFWrap {
             .build()
     }
 }
-
-/// Outer flow wraps inner flow containing either — both branches reachable.
 #[tokio::test]
 async fn test_outer_flow_inner_either_positive() {
     let out = run_to_done(FlowRuntime::new(EFWrap(42)).unwrap()).await;
@@ -717,7 +649,6 @@ async fn test_outer_flow_inner_either_negative() {
     assert_eq!(out.0, "val=-7");
 }
 
-// ─── fork → either on left branch → join ─────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FEJIn(i64);
@@ -772,24 +703,16 @@ impl Flow for FEJIn {
             .build()
     }
 }
-
-/// Fork, left branch has either, positive: left_a(4)→40, right=8, total=48.
 #[tokio::test]
 async fn test_fork_either_join_positive() {
     let out = run_to_done(FlowRuntime::new(FEJIn(3)).unwrap()).await;
     assert_eq!(out.0, 40 + 8);
 }
-
-/// Same topology, negative: left_b(-3)→-30, right=3, total=-27.
 #[tokio::test]
 async fn test_fork_either_join_negative() {
     let out = run_to_done(FlowRuntime::new(FEJIn(-2)).unwrap()).await;
     assert_eq!(out.0, -30 + 3);
 }
-
-// ─── step count ───────────────────────────────────────────────────────────────
-
-/// Three chained work nodes produce exactly 2 Continue calls before Done.
 #[tokio::test]
 async fn test_step_count_three_work() {
     let mut rt = FlowRuntime::new(Chain3In(0)).unwrap();
@@ -804,7 +727,6 @@ async fn test_step_count_three_work() {
     assert_eq!(continues, 2);
 }
 
-// ─── error propagation ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ErrIn(bool);
@@ -825,17 +747,11 @@ impl Flow for ErrIn {
         FlowGraph::builder().work(failing_work).build()
     }
 }
-
-/// Work node returning FlowError propagates out of next().
 #[tokio::test]
 async fn test_work_error_propagates() {
     let mut rt = FlowRuntime::new(ErrIn(true)).unwrap();
     assert!(rt.next(ctx()).await.is_err());
 }
-
-// ─── routing is pure (not stateful) ──────────────────────────────────────────
-
-/// Running the same either flow across a range of signed inputs confirms pure routing.
 #[tokio::test]
 async fn test_either_routing_is_stateless() {
     for i in -3i64..=3 {
@@ -847,10 +763,6 @@ async fn test_either_routing_is_stateless() {
         }
     }
 }
-
-// ─── snapshot before fork ────────────────────────────────────────────────────
-
-/// Snapshot at the start of a fork/join flow, restore, run — result equals fresh run.
 #[tokio::test]
 async fn test_snapshot_before_fork() {
     let fresh_out = run_to_done(FlowRuntime::new(ForkJoinIn { x: 7 }).unwrap()).await;
@@ -863,7 +775,6 @@ async fn test_snapshot_before_fork() {
     assert_eq!(fresh_out.sum, out2.sum);
 }
 
-// ─── either routing errors ───────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ErrRouteIn(i64);
@@ -898,22 +809,17 @@ impl Flow for ErrRouteIn {
             .build()
     }
 }
-
-/// Either is now infallible; this test confirms success on input 999.
 #[tokio::test]
 async fn test_either_routing_error_propagates() {
     let out = run_to_done(FlowRuntime::new(ErrRouteIn(999)).unwrap()).await;
     assert_eq!(out.0, 999);
 }
-
-/// Either routing that succeeds completes normally.
 #[tokio::test]
 async fn test_either_routing_success() {
     let out = run_to_done(FlowRuntime::new(ErrRouteIn(5)).unwrap()).await;
     assert_eq!(out.0, 5);
 }
 
-// ─── work after fork/join receives the joined value ──────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FJWIn(i64);
@@ -946,33 +852,45 @@ impl Flow for FJWIn {
             .build()
     }
 }
-
-/// Work node after join receives the joined value correctly: x*x + 1000.
 #[tokio::test]
 async fn test_work_after_fork_join_receives_correct_value() {
     let out = run_to_done(FlowRuntime::new(FJWIn(6)).unwrap()).await;
     assert_eq!(out.0, 36 + 1000);
 }
+#[tokio::test]
+async fn test_inspector_reports_suspension() {
+    let mut rt = FlowRuntime::new(HumanInput {
+        prompt: "Need approval".into(),
+        choices: Vec::new(),
+        allow_other: true,
+    })
+    .unwrap();
 
-// ─── snapshot mid fork-work-join ─────────────────────────────────────────────
+    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
+    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
+    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Suspend(_)));
 
-/// Advance one step into a fork/work/join, snapshot+restore, finish — same result.
+    let inspector = rt.inspector();
+    assert_eq!(inspector.depth(), 1);
+    assert!(inspector.is_suspended());
+    assert_eq!(inspector.suspension_type(), Some("HumanOutput"));
+
+    let top = inspector.top_frame().expect("root frame should remain suspended");
+    assert_eq!(top.phase, PhaseKind::None);
+    assert!(top.locals.iter().any(|local| local.name == "PendingHumanInput"));
+}
 #[tokio::test]
 async fn test_snapshot_mid_fork_work_join() {
     let fresh = run_to_done(FlowRuntime::new(FWJIn(4)).unwrap()).await;
 
     let mut rt = FlowRuntime::new(FWJIn(4)).unwrap();
-    rt.next(ctx()).await.unwrap(); // fork step
+    rt.next(ctx()).await.unwrap();
     let snap = rt.snapshot();
     let json = serde_json::to_string(&snap).unwrap();
     let snap2: pravah::flows::FlowSnapshot = serde_json::from_str(&json).unwrap();
     let out = run_to_done(FlowRuntime::<FWJIn>::from_snapshot(snap2).unwrap()).await;
     assert_eq!(fresh.0, out.0);
 }
-
-// ─── snapshot of deeply nested flow ──────────────────────────────────────────
-
-/// Snapshot a three-level nested flow at the start; restore and complete correctly.
 #[tokio::test]
 async fn test_deep_nested_flow_snapshot_restore() {
     let fresh = run_to_done(FlowRuntime::new(RootIn(3)).unwrap()).await;
@@ -983,7 +901,6 @@ async fn test_deep_nested_flow_snapshot_restore() {
     assert_eq!(fresh.0, out.0);
 }
 
-// ─── fork / join error propagation ───────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ForkErrIn(bool);
@@ -1008,8 +925,6 @@ impl Flow for ForkErrIn {
         FlowGraph::builder().fork(fork_err_split).join(fork_err_join).build()
     }
 }
-
-/// Fork and join are now infallible; this test confirms the happy path works.
 #[tokio::test]
 async fn test_fork_error_propagates() {
     let out = run_to_done(FlowRuntime::new(ForkErrIn(false)).unwrap()).await;
@@ -1040,17 +955,11 @@ impl Flow for JoinErrIn {
         FlowGraph::builder().fork(join_split).join(join_err_merge).build()
     }
 }
-
-/// Join is now infallible; this test confirms the happy path works.
 #[tokio::test]
 async fn test_join_error_propagates() {
     let out = run_to_done(FlowRuntime::new(JoinErrIn { fail: false }).unwrap()).await;
     assert_eq!(out.0, 3);
 }
-
-// ─── large values ────────────────────────────────────────────────────────────
-
-/// Large i64 values flow through the chain without truncation.
 #[tokio::test]
 async fn test_work_large_value() {
     let out = run_to_done(FlowRuntime::new(Chain3In(i64::MAX / 4)).unwrap()).await;

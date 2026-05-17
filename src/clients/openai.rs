@@ -116,6 +116,10 @@ fn build_payload(
         "input": build_input(messages),
     });
 
+    if let Some(t) = options.temperature {
+        payload["temperature"] = json!(t);
+    }
+
     if let Some(preamble) = &options.preamble {
         payload["instructions"] = Value::String(preamble.clone());
     }

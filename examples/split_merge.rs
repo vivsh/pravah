@@ -1,34 +1,10 @@
-//! # Example — Split / Merge Flow
-//!
-//! Demonstrates fanning a single input out to three independent agent tracks
-//! and collecting all results into one merged output:
-//!
-//! ```text
-//!             ┌── TechTrack  ──agent──► TechAnalysis  ──┐
-//! Proposal ─split── MktTrack  ──agent──► MktAnalysis   ──┼──merge──► Brief (terminal)
-//!             └── RiskTrack  ──agent──► RiskAnalysis  ──┘
-//! ```
-//!
-//! `split` fans the input out to an arbitrary number of typed branches in one
-//! step — no chaining needed. `merge` fires once every branch has a value and
-//! produces a single output. Both support arities 2–16.
-//!
-//! The flow is single-threaded: the runner processes one agent call per
-//! `next()` invocation. Split and merge model information shape, not
-//! parallelism.
-//!
-//! ## Running
-//!
-//! ```shell
-//! GEMINI_API_KEY=<key> cargo run --example split_merge
-//! ```
+//! Split/merge example with three agent branches converging into one brief.
 
 use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ── Types ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct Proposal {
@@ -36,7 +12,6 @@ struct Proposal {
     description: String,
 }
 
-// Split branches ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct TechTrack {
@@ -53,7 +28,6 @@ struct RiskTrack {
     description: String,
 }
 
-// Agent outputs ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct TechAnalysis {
@@ -73,7 +47,6 @@ struct RiskAnalysis {
     mitigation: String,
 }
 
-// Merge output (terminal) ─────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct Brief {
@@ -83,7 +56,6 @@ struct Brief {
     recommendation: String,
 }
 
-// ── Agents ────────────────────────────────────────────────────────────────────
 
 impl Agent for TechTrack {
     type Output = TechAnalysis;
@@ -121,7 +93,6 @@ impl Agent for RiskTrack {
     }
 }
 
-// ── Split and merge handlers ──────────────────────────────────────────────────
 
 fn split_proposal(p: Proposal) -> (TechTrack, MktTrack, RiskTrack) {
     (
@@ -144,7 +115,6 @@ fn merge_brief((tech, mkt, risk): (TechAnalysis, MktAnalysis, RiskAnalysis)) -> 
     }
 }
 
-// ── Flow ──────────────────────────────────────────────────────────────────────
 
 impl Flow for Proposal {
     type Output = Brief;
@@ -160,7 +130,6 @@ impl Flow for Proposal {
     }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

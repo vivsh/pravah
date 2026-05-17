@@ -1,26 +1,4 @@
-//! # Example 4 — Snapshot, Save and Restore
-//!
-//! Demonstrates persisting a flow mid-execution and resuming it from a
-//! saved snapshot — useful for long-running pipelines, crash recovery, and
-//! distributed handoffs.
-//!
-//! ```text
-//! RawRecord ──work──► NormalisedRecord ──work──► EnrichedRecord ──work──► FinalRecord (terminal)
-//!                            ▲
-//!                    snapshot taken here
-//!                    (serialised to disk)
-//!                            │
-//!                    runtime restored here
-//!                    and execution continues
-//! ```
-//!
-//! This example uses `work`-only nodes so it runs without an API key.
-//!
-//! ## Running
-//!
-//! ```shell
-//! cargo run --example snapshot
-//! ```
+//! Snapshot example showing save and restore mid-execution with work-only nodes.
 
 use std::fs;
 use std::path::PathBuf;
@@ -30,7 +8,6 @@ use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ── Types ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct RawRecord {
@@ -57,7 +34,6 @@ struct FinalRecord {
     report: String,
 }
 
-// ── Node handlers ─────────────────────────────────────────────────────────────
 
 async fn normalise(rec: RawRecord, _ctx: Context) -> Result<NormalisedRecord, FlowError> {
     let value: f64 = rec
@@ -81,7 +57,6 @@ async fn format_record(rec: EnrichedRecord, _ctx: Context) -> Result<FinalRecord
     Ok(FinalRecord { id: rec.id, report })
 }
 
-// ── Flow ──────────────────────────────────────────────────────────────────────
 
 impl Flow for RawRecord {
     type Output = FinalRecord;
@@ -95,7 +70,6 @@ impl Flow for RawRecord {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn snapshot_path() -> PathBuf {
     std::env::temp_dir().join("pravah_snapshot_example.json")
@@ -115,7 +89,6 @@ fn load_snapshot() -> Result<FlowSnapshot, Box<dyn std::error::Error>> {
     Ok(snap)
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -124,23 +97,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let input = RawRecord { id: 42, raw_value: "73.5".to_string() };
 
-    // ── Phase A: run one step, snapshot, then drop the runtime ───────────────
     println!("\n=== Phase A: run step 1 then snapshot ===");
     let mut runtime = FlowRuntime::new(input)?;
 
-    // Step 1: RawRecord → NormalisedRecord
     match runtime.next(ctx.clone()).await? {
         FlowStep::Continue => println!("[phase A] step 1 complete"),
         other => panic!("unexpected: {other:?}"),
     }
 
-    // Capture and persist the snapshot after step 1.
     save_snapshot(&runtime.snapshot())?;
 
-    // Simulate a process restart — drop the original runtime entirely.
     drop(runtime);
 
-    // ── Phase B: restore from snapshot and run to completion ─────────────────
     println!("\n=== Phase B: restore and continue ===");
     let snap = load_snapshot()?;
     let mut restored = FlowRuntime::<RawRecord>::from_snapshot(snap)?;
@@ -151,7 +119,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             FlowStep::Done(record) => {
                 println!("\n=== Done ===\n{}", record.report);
 
-                // Clean up the temporary snapshot file.
                 let _ = fs::remove_file(snapshot_path());
                 break;
             }

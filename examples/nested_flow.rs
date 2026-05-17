@@ -1,34 +1,10 @@
-//! # Example 3 — Nested Flow
-//!
-//! Demonstrates composing flows: an outer flow delegates part of its work to
-//! a fully independent inner flow using the `.flow::<F>()` builder node.
-//!
-//! ```text
-//! Outer flow
-//! ──────────────────────────────────────────────────────────────
-//! BlogRequest ──work──► ResearchQuery ──flow──► ResearchResult ──agent──► FinalArticle (terminal)
-//!
-//! Inner flow  (ResearchQuery flow)
-//! ──────────────────────────────────────────────────────────────
-//! ResearchQuery ──agent──► ResearchResult (terminal)
-//! ```
-//!
-//! The `.flow::<ResearchQuery>()` node runs the inner flow to completion
-//! step-by-step and forwards its typed output into the outer flow. The inner
-//! flow is completely unaware it is being hosted by the outer flow.
-//!
-//! ## Running
-//!
-//! ```shell
-//! GEMINI_API_KEY=<key> cargo run --example nested_flow
-//! ```
+//! Nested flow example where an outer flow delegates research to an inner flow.
 
 use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ── Shared type ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ResearchQuery {
@@ -40,7 +16,6 @@ struct ResearchResult {
     findings: String,
 }
 
-// ── Inner flow ────────────────────────────────────────────────────────────────
 
 impl Agent for ResearchQuery {
     type Output = ResearchResult;
@@ -64,7 +39,6 @@ impl Flow for ResearchQuery {
     }
 }
 
-// ── Outer flow types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct BlogRequest {
@@ -78,7 +52,6 @@ struct FinalArticle {
     body: String,
 }
 
-// ── Writer agent (used in outer flow) ─────────────────────────────────────────
 
 impl Agent for ResearchResult {
     type Output = FinalArticle;
@@ -92,7 +65,6 @@ impl Agent for ResearchResult {
     }
 }
 
-// Node handlers
 
 async fn derive_query(req: BlogRequest, _ctx: Context) -> Result<ResearchQuery, FlowError> {
     Ok(ResearchQuery {
@@ -100,7 +72,6 @@ async fn derive_query(req: BlogRequest, _ctx: Context) -> Result<ResearchQuery, 
     })
 }
 
-// Outer flow
 
 impl Flow for BlogRequest {
     type Output = FinalArticle;
@@ -114,7 +85,6 @@ impl Flow for BlogRequest {
     }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

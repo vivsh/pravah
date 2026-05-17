@@ -5,6 +5,7 @@ use crate::{
     clients::{DefaultClientFactory, Message},
     flows::{
         compactor::{DynHistoryCompactor, NoopCompactor},
+        inspect::FlowInspector,
         store::{DynHistoryStore, NoopHistoryStore},
         ClientFactory, Flow, FlowError, FlowGraph, FlowHistory, FlowStep, NodeId, flows::FlowNode,
         state::{Callable, FlowState},
@@ -16,8 +17,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-/// Converts an internal `FlowStep<Value>` to the public `FlowStep<T>` by deserializing
-/// the `Done` payload. `Continue` and `Suspend` pass through unchanged.
+/// Converts an internal `FlowStep<Value>` into the public `FlowStep<T>`.
+/// Only the `Done` payload is deserialized.
 fn lift_step<T: DeserializeOwned>(step: FlowStep<Value>) -> Result<FlowStep<T>, FlowError> {
     match step {
         FlowStep::Continue => Ok(FlowStep::Continue),
@@ -28,17 +29,16 @@ fn lift_step<T: DeserializeOwned>(step: FlowStep<Value>) -> Result<FlowStep<T>, 
     }
 }
 
-/// Limits for [`FlowRuntime::run_until`]. All fields are optional; unset fields are unchecked.
+/// Limits enforced by [`FlowRuntime::run_until`].
 #[derive(Debug, Clone, Default)]
 pub struct RunLimits {
-    /// Maximum number of [`FlowRuntime::next`] calls.
+    /// Stops after this many steps.
     pub max_steps: Option<usize>,
-    /// Maximum number of LLM turns. Currently shares the step counter; will track
-    /// API calls independently once per-agent instrumentation is added.
+    /// Stops after this many model turns.
     pub max_turns: Option<usize>,
-    /// Maximum frame-stack depth (guards against pathologically deep sub-flow nesting).
+    /// Stops when the frame stack reaches this depth.
     pub max_depth: Option<usize>,
-    /// Maximum wall-clock time before returning [`LimitKind::MaxDuration`].
+    /// Stops after this wall-clock duration.
     pub max_duration: Option<std::time::Duration>,
 }
 
@@ -64,7 +64,7 @@ impl RunLimits {
     }
 }
 
-/// Reason a [`FlowRuntime::run_until`] loop was interrupted before completion.
+/// Reason a `run_until` loop stopped before completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LimitKind {
     MaxSteps,
@@ -81,7 +81,7 @@ pub enum RunOutcome<T> {
     LimitExceeded(LimitKind),
 }
 
-struct FlowCall(Arc<FlowGraph>);
+pub(crate) struct FlowCall(pub(crate) Arc<FlowGraph>);
 
 pub struct FlowRuntime<I: Flow> {
     state: FlowState,
@@ -107,8 +107,6 @@ impl<I: Flow> FlowRuntime<I> {
         let entry_id = graph.entry;
 
         let mut state = FlowState::new();
-        // 0 is callable index as root is the first callable
-
         let mut history = FlowHistory::new();
         history.push("__root__", "__runtime__", Message::user(format!("Starting flow: {}", I::node_id())));
 
@@ -145,7 +143,7 @@ impl<I: Flow> FlowRuntime<I> {
         return Ok((root_callable_index, callables));
     }
 
-    // walk the graph to collect all AgentInfo and inner FlowGraph for later dispatch during step execution
+    /// Collects callable sub-graphs so frames can jump to the correct graph at runtime.
     fn collect_callables(
         root: &mut FlowGraph,
         callables: &mut Vec<FlowCall>,
@@ -185,31 +183,34 @@ impl<I: Flow> FlowRuntime<I> {
         Ok(())
     }
 
-    /// Overrides the default [`ClientFactory`]. Useful for testing or selecting a provider.
+    /// Replaces the default [`ClientFactory`].
     pub fn with_factory(mut self, factory: impl ClientFactory + 'static) -> Self {
         self.factory = Arc::new(factory);
         self
     }
 
-    /// Sets the [`HistoryCompactor`] used to evict old turns after each step.
+    /// Replaces the history compactor.
     pub fn with_compactor(mut self, c: impl crate::flows::compactor::HistoryCompactor + 'static) -> Self {
         self.compactor = Box::new(c);
         self
     }
 
-    /// Sets the [`HistoryStore`] used to persist history after each step.
+    /// Replaces the history store.
     pub fn with_store(mut self, s: impl crate::flows::store::HistoryStore + 'static) -> Self {
         self.store = Box::new(s);
         self
     }
 
-    /// Replaces the conversation history used by agent nodes.
-    ///
-    /// Call after [`FlowRuntime::from_snapshot`] to restore the LLM context from a
-    /// previously persisted [`FlowHistory`].
+    /// Replaces the conversation history.
+    /// Call this after [`FlowRuntime::from_snapshot`] when you need the old LLM context back.
     pub fn with_history(mut self, history: FlowHistory) -> Self {
         self.history = history;
         self
+    }
+
+    /// Returns a read-only view of the runtime state and history.
+    pub fn inspector(&self) -> FlowInspector<'_> {
+        FlowInspector::new(&self.state, &self.callables, &self.history)
     }
 
     pub async fn next(&mut self, ctx: Context) -> Result<FlowStep<I::Output>, FlowError> {
@@ -218,6 +219,12 @@ impl<I: Flow> FlowRuntime<I> {
             .ok_or_else(|| FlowError::Internal { handler: "next", detail: "called after flow completed".into() })?;
         let graph = self.callables.get(callable_index)
             .ok_or_else(|| FlowError::Internal { handler: "next", detail: format!("callable index {callable_index} out of range") })?;
+        tracing::debug!(
+            flow = %I::node_id(),
+            callable_index,
+            depth = self.state.depth(),
+            "runtime step"
+        );
         let out = graph
             .0
             .next(
@@ -228,14 +235,24 @@ impl<I: Flow> FlowRuntime<I> {
             )
             .await?;
         self.run_compaction_and_flush().await;
-        lift_step(out)
+        let step = lift_step(out)?;
+        match &step {
+            FlowStep::Continue => {}
+            FlowStep::Done(_) => {
+                tracing::info!(flow = %I::node_id(), "flow completed");
+            }
+            FlowStep::Suspend(_) => {
+                tracing::info!(
+                    flow = %I::node_id(),
+                    output_type = ?self.state.suspension().map(|s| s.output_type.as_str()),
+                    "flow suspended"
+                );
+            }
+        }
+        Ok(step)
     }
 
-    /// Drives the flow to completion, checking `limits` before each step.
-    ///
-    /// Returns [`RunOutcome::Done`] when the flow completes, [`RunOutcome::Suspend`] when
-    /// the flow suspends waiting for external input, or [`RunOutcome::LimitExceeded`] when
-    /// any configured limit is reached.
+    /// Runs until the flow finishes, suspends, or hits a limit.
     pub async fn run_until(
         &mut self,
         ctx: Context,
@@ -243,24 +260,31 @@ impl<I: Flow> FlowRuntime<I> {
     ) -> Result<RunOutcome<I::Output>, FlowError> {
         let deadline = limits.max_duration.map(|d| std::time::Instant::now() + d);
         let mut steps = 0usize;
+        let log_limit = |limit: &str, steps: usize, depth: usize| {
+            tracing::warn!(flow = %I::node_id(), limit, steps, depth, "run limit exceeded");
+        };
         loop {
             if let Some(max) = limits.max_steps {
                 if steps >= max {
+                    log_limit("max_steps", steps, self.state.depth());
                     return Ok(RunOutcome::LimitExceeded(LimitKind::MaxSteps));
                 }
             }
             if let Some(max) = limits.max_turns {
                 if steps >= max {
+                    log_limit("max_turns", steps, self.state.depth());
                     return Ok(RunOutcome::LimitExceeded(LimitKind::MaxTurns));
                 }
             }
             if let Some(max) = limits.max_depth {
                 if self.state.depth() >= max {
+                    log_limit("max_depth", steps, self.state.depth());
                     return Ok(RunOutcome::LimitExceeded(LimitKind::MaxDepth));
                 }
             }
             if let Some(dl) = deadline {
                 if std::time::Instant::now() >= dl {
+                    log_limit("max_duration", steps, self.state.depth());
                     return Ok(RunOutcome::LimitExceeded(LimitKind::MaxDuration));
                 }
             }
@@ -305,7 +329,7 @@ impl<I: Flow> FlowRuntime<I> {
         lift_step(out)
     }
 
-    /// Runs per-session compaction then calls the store's flush.
+    /// Compacts each active session and then flushes the store.
     async fn run_compaction_and_flush(&mut self) {
         let session_ids: Vec<String> = self
             .state
@@ -314,7 +338,6 @@ impl<I: Flow> FlowRuntime<I> {
             .map(|s| s.to_string())
             .collect();
         for session_id in &session_ids {
-            // Clone entries so we can release the immutable borrow before calling apply_compaction.
             let owned: Vec<crate::flows::history::HistoryEntry> = self
                 .history
                 .session_entries(session_id)
@@ -328,21 +351,17 @@ impl<I: Flow> FlowRuntime<I> {
         let _ = self.store.flush_dyn(&mut self.history).await;
     }
 
-    /// Captures the current execution state as an opaque [`FlowSnapshot`].
-    ///
-    /// The snapshot can be serialized and persisted. It does not include conversation
-    /// history — manage that separately and re-attach via [`FlowRuntime::with_history`].
+    /// Captures runtime state as a serializable [`FlowSnapshot`].
+    /// History is stored separately.
     pub fn snapshot(&self) -> FlowSnapshot {
         FlowSnapshot {
             state: self.state.clone(),
         }
     }
 
-    /// Reconstructs a runtime from a previously captured [`FlowSnapshot`].
-    ///
-    /// The flow graph is rebuilt from `I::build()` — closures are never persisted.
-    /// A fresh history is created; chain `.with_history(saved_history)` to restore
-    /// the full LLM conversation context.
+    /// Rebuilds a runtime from a [`FlowSnapshot`].
+    /// The graph is rebuilt from `I::build()`, so closures are never serialized.
+    /// Re-attach history separately if you need the old conversation context.
     pub fn from_snapshot(snapshot: FlowSnapshot) -> Result<Self, FlowError> {
         let graph = Self::build_graph()?;
         let history = FlowHistory::new();
@@ -367,13 +386,8 @@ impl<I: Flow> std::fmt::Debug for FlowRuntime<I> {
     }
 }
 
-/// Opaque snapshot of a flow's execution state at a point in time.
-///
-/// Obtained via [`FlowRuntime::snapshot`]; restored via [`FlowRuntime::from_snapshot`].
-/// Safe to serialize with any `serde` format (JSON, MessagePack, etc.).
-///
-/// Does **not** include conversation history — manage [`FlowHistory`] separately and
-/// re-attach with [`FlowRuntime::with_history`] after reconstructing the runtime.
+/// Serializable runtime state captured from a [`FlowRuntime`].
+/// History is managed separately and can be re-attached with [`FlowRuntime::with_history`].
 #[derive(Serialize, Deserialize)]
 pub struct FlowSnapshot {
     state: FlowState,

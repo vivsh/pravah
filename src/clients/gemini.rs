@@ -47,7 +47,7 @@ struct GeminiClient {
     options: ClientOptions,
 }
 
-/// Builds provider messages from history.
+/// Builds Gemini messages from history.
 fn build_gemini_messages(history: &[Message]) -> Vec<GeminiMessage> {
     let mut msgs = Vec::new();
     let mut i = 0;
@@ -93,7 +93,7 @@ fn build_tools_spec(tools: &[ToolDefinition]) -> Result<Option<GeminiTool>, Clie
     }
 }
 
-/// Converts an `AssistantToolCalls` history entry into a model-role message.
+/// Converts `AssistantToolCalls` history into a model-role message.
 fn tool_calls_to_message(calls: &[ToolCall]) -> GeminiMessage {
     let parts: Vec<Part> = calls
         .iter()
@@ -118,9 +118,7 @@ fn tool_calls_to_message(calls: &[ToolCall]) -> GeminiMessage {
     }
 }
 
-/// Groups consecutive `Tool` history entries starting at `start` into one user-role message.
-///
-/// Returns the message and the number of history entries consumed.
+/// Groups consecutive `Tool` history entries into one user-role message.
 fn tool_responses_to_message(history: &[Message], start: usize) -> (GeminiMessage, usize) {
     let mut parts = Vec::new();
     let mut i = start;
@@ -146,7 +144,7 @@ fn tool_responses_to_message(history: &[Message], start: usize) -> (GeminiMessag
     (msg, i - start)
 }
 
-/// Walks backwards through `history` to find the function name for a given `call_id`.
+/// Resolves a tool call name by walking history backwards.
 fn resolve_call_name<'a>(history: &'a [Message], call_id: &'a str) -> &'a str {
     for msg in history.iter().rev() {
         if let Role::AssistantToolCalls { calls } = &msg.role {
@@ -164,7 +162,7 @@ fn resolve_call_name<'a>(history: &'a [Message], call_id: &'a str) -> &'a str {
     call_id
 }
 
-/// Converts a `ToolDefinition` to a `FunctionDeclaration` via JSON deserialization.
+/// Converts a `ToolDefinition` into a Gemini function declaration.
 fn build_fn_decl(tool: &ToolDefinition) -> Result<FunctionDeclaration, ClientError> {
     let sanitized = schema::sanitize_strict(tool.parameters.clone());
     let json = serde_json::json!({
@@ -175,7 +173,7 @@ fn build_fn_decl(tool: &ToolDefinition) -> Result<FunctionDeclaration, ClientErr
     serde_json::from_value(json).map_err(ClientError::Serialize)
 }
 
-/// Maps the raw API response to a [`ClientOutput`].
+/// Maps the raw Gemini response into a [`ClientOutput`].
 fn map_response(
     response: GenerationResponse,
     tools_enabled: bool,
@@ -241,7 +239,11 @@ impl GeminiClient {
         response_schema: Option<Value>,
     ) -> Result<GenerationResponse, ClientError> {
         let client = &self.client;
-        let thinking_budget = if self.options.thinking { i32::MAX } else { 0 };
+        let thinking_budget = if self.options.thinking {
+            self.options.thinking_budget.map(|b| b as i32).unwrap_or(i32::MAX)
+        } else {
+            0
+        };
         let mut builder = client
             .generate_content()
             .with_thinking_budget(thinking_budget);
@@ -338,7 +340,8 @@ impl Client for GeminiClient {
     }
 }
 
-/// Creates a `gemini-rust`-backed client, returning an error if the API key cannot be resolved.
+/// Creates a Gemini client.
+/// Fails when the API key cannot be resolved.
 pub fn new_client(url: &LlmUrl, options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
     let client = build_client(url)?;
     Ok(Box::new(GeminiClient { client, options }))
@@ -358,7 +361,7 @@ mod tests {
         }
     }
 
-    /// With a single user message in history, exactly one message is produced.
+    /// A single user turn produces one provider message.
     #[test]
     fn build_messages_user_only() {
         let history = vec![Message::user(r#"{"text":"hi"}"#)];
@@ -366,7 +369,7 @@ mod tests {
         assert_eq!(msgs.len(), 1);
     }
 
-    /// Preamble is passed via system_prompt; message count reflects only history.
+    /// Preambles are not duplicated into history messages.
     #[test]
     fn build_messages_preamble_is_separate() {
         let history = vec![Message::user(r#"{"text":"hi"}"#)];
@@ -374,7 +377,7 @@ mod tests {
         assert_eq!(msgs.len(), 1);
     }
 
-    /// History turns appear in order before the final user message.
+    /// History order is preserved.
     #[test]
     fn build_messages_history_in_order() {
         let history = vec![
@@ -389,7 +392,7 @@ mod tests {
         assert!(debug.contains("prev answer"));
     }
 
-    /// Tool role messages are grouped into a user-role function-response message.
+    /// Tool responses are grouped into a function-response message.
     #[test]
     fn build_messages_tool_role_included() {
         let history = vec![
@@ -414,7 +417,7 @@ mod tests {
         assert!(debug.contains("read_file"));
     }
 
-    /// Full ReAct exchange: user seed + model tool call + tool result = 3 messages.
+    /// Tool results keep the exchange length aligned with history.
     #[test]
     fn build_messages_continue_after_tool_result() {
         let history = vec![

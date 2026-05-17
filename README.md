@@ -24,13 +24,13 @@ Agentic systems are one application of this model — not the model itself.
 
 ```toml
 [dependencies]
-pravah = "0.3"
+pravah = "0.3.5"
 ```
 
 To enable only selected providers:
 
 ```toml
-pravah = { version = "0.3", default-features = false, features = ["provider-openai"] }
+pravah = { version = "0.3.5", default-features = false, features = ["provider-openai"] }
 ```
 
 Available provider features: `provider-openai`, `provider-anthropic`,
@@ -227,6 +227,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 See the [`examples/`](examples/) directory for runnable examples.
 
+## Tracing
+
+Pravah emits `tracing` events for runtime steps, LLM dispatches, tool calls,
+retries, rate limiting, suspension, and run limits.
+
+Add a subscriber in your application:
+
+```toml
+[dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+```
+
+```rust
+use tracing_subscriber::{EnvFilter, fmt};
+
+fn init_tracing() {
+    let _ = fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,pravah=debug")),
+        )
+        .try_init();
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    init_tracing();
+
+    let ctx = Context::default();
+    let input = SummariseRequest { topic: "Rust ownership".into() };
+    let mut runtime = FlowRuntime::new(input)?;
+
+    loop {
+        match runtime.next(ctx.clone()).await? {
+            FlowStep::Continue => {}
+            FlowStep::Done(v) => {
+                let report: Report = serde_json::from_value(v)?;
+                println!("{}", report.text);
+                break;
+            }
+            FlowStep::Suspend(_) => break,
+        }
+    }
+
+    Ok(())
+}
+```
+
+Set `RUST_LOG=pravah=trace` when you need the full engine trace.
+
 ## Execution Model
 
 Pravah is intentionally:
@@ -245,16 +295,16 @@ The runtime itself stays predictable and replayable.
 
 ## Node Types
 
-| Builder method      | What it does                                                               |
-| ------------------- | -------------------------------------------------------------------------- |
-| `agent::<A>()`      | LLM-backed node; structured output or tool loop                            |
+| Builder method      | What it does                                                              |
+| ------------------- | ------------------------------------------------------------------------- |
+| `agent::<A>()`      | LLM-backed node; structured output or tool loop                           |
 | `work(f)`           | Effectful async transform; `async fn(I, Context) -> Result<O, FlowError>` |
-| `map(f)`            | Pure sync transform; `fn(I) -> O`, infallible, no `Context`                |
+| `map(f)`            | Pure sync transform; `fn(I) -> O`, infallible, no `Context`               |
 | `either(f)`         | Routes to one branch; `fn(I) -> Either<A, B>`, infallible (cycles ok)     |
 | `split(f)`          | Fans out to N branches; `fn(I) -> (A, B, ...)`, infallible                |
 | `merge(f)`          | Collects N branches once all ready; `fn((A, B, ...)) -> O`, infallible    |
-| `suspend::<I, O>()` | Pauses the flow; caller resumes with a value of type `O`                   |
-| `flow::<F>()`       | Embeds another `Flow` as a node                                            |
+| `suspend::<I, O>()` | Pauses the flow; caller resumes with a value of type `O`                  |
+| `flow::<F>()`       | Embeds another `Flow` as a node                                           |
 
 `split` and `merge` support arities 2–16. `fork`/`join` are binary-only
 aliases for `split`/`merge`.

@@ -96,6 +96,10 @@ fn build_payload(
         "messages": build_messages(messages),
     });
 
+    if let Some(t) = options.temperature {
+        payload["temperature"] = json!(t);
+    }
+
     let mut system = Vec::new();
     if let Some(preamble) = &options.preamble {
         system.push(preamble.clone());

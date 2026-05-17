@@ -17,34 +17,33 @@ pub(super) mod schema;
 
 pub use crate::tools::ToolDefinition;
 
-/// Role of a message in the conversation history.
+/// Role of a message in provider-facing history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Role {
     System,
     User,
     Assistant,
-    /// An assistant turn that contains tool calls.
-    /// `content` on the enclosing [`Message`] holds the accompanying thought text (may be empty).
+    /// Assistant turn that carries tool calls.
+    /// The enclosing [`Message`] keeps any accompanying text in `content`.
     AssistantToolCalls {
         calls: Vec<ToolCall>,
     },
-    /// A tool result being fed back to the model.
-    /// `call_id` must match the id from the originating [`ToolCall`].
+    /// Tool result fed back to the model.
+    /// `call_id` must match the originating [`ToolCall`].
     Tool {
         call_id: String,
     },
 }
 
-/// A single turn in the conversation history.
-///
-/// Wire-format only — carries no pravah-internal metadata (session, agent).
-/// Metadata lives on [`crate::flows::HistoryEntry`].
+/// One provider-facing history message.
+/// This type is wire-format only.
+/// Pravah metadata such as session and agent ids lives on [`crate::flows::HistoryEntry`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
-    /// Token usage reported by the provider for this message (set on assistant turns only).
+    /// Provider-reported token usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
 }
@@ -74,7 +73,7 @@ impl Message {
         }
     }
 
-    /// Creates a message by JSON-serializing `value` as the content.
+    /// Builds a message by JSON-encoding `value`.
     pub fn from_json(role: Role, value: &impl serde::Serialize) -> Result<Self, serde_json::Error> {
         Ok(Message {
             role,
@@ -91,34 +90,33 @@ impl Message {
     }
 }
 
-/// A tool invocation requested by the LLM.
+/// Tool call requested by the model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
-    /// Correlation id — must be echoed back in a [`Role::Tool`] message.
+    /// Correlation id that must be echoed back in [`Role::Tool`].
     pub id: String,
     pub name: String,
     pub args: Value,
-    /// Opaque bytes returned by Gemini 2.5 thinking models alongside a tool call.
-    /// Must be echoed back verbatim on the next turn — do not decode or reconstruct.
-    /// `None` for all non-Gemini providers and for Gemini responses without thinking.
+    /// Provider-specific continuation data from Gemini thinking models.
+    /// Echo this back unchanged on the next turn when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signatures: Option<Vec<String>>,
 }
 
-/// Raw response from one LLM call.
+/// Output from a single model call.
 #[derive(Debug)]
 pub enum ClientOutput {
-    /// Model produced structured output (JSON value).
+    /// Structured output payload.
     Output(Value),
-    /// Model requested one or more tool calls.
+    /// Tool calls requested by the model.
     ToolCalls {
-        /// Reasoning/thought text the model emitted alongside the tool calls (if any).
+        /// Accompanying text emitted with the tool calls.
         thought: Option<String>,
         calls: Vec<ToolCall>,
     },
 }
 
-/// Provider-normalized response from one LLM call.
+/// Provider-normalized result from one model call.
 #[derive(Debug)]
 pub struct ClientResponse {
     pub output: ClientOutput,
@@ -155,12 +153,12 @@ impl ClientResponse {
     }
 }
 
-/// Token counts reported by the provider for a single call.
+/// Token counts reported for a single call.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
-    /// Tokens consumed by the input (prompt, history, tool definitions).
+    /// Input-side tokens.
     pub input: Option<u32>,
-    /// Tokens produced by the model in the response.
+    /// Output-side tokens.
     pub output: Option<u32>,
 }
 
@@ -173,7 +171,7 @@ impl TokenUsage {
     }
 }
 
-/// Errors produced during a [`Client::execute`] call.
+/// Errors returned by a client call.
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("failed to serialize input: {0}")]
@@ -203,7 +201,7 @@ pub enum ClientError {
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
-/// LLM provider backend.
+/// Supported provider backends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Provider {
     Gemini,
@@ -225,18 +223,9 @@ impl Provider {
     }
 }
 
-/// Parsed representation of an LLM URL.
-///
-/// Format: `scheme://[key@]model-name` for cloud providers,
-/// or `ollama://host:port/model-name` for local Ollama.
-///
-/// Examples:
-/// - `gemini://gemini-2.5-flash-lite`          (key from `GEMINI_API_KEY`)
-/// - `gemini://mykey@gemini-2.5-flash-lite`    (key inline)
-/// - `openai://gpt-4o`                         (key from `OPENAI_API_KEY`)
-/// - `anthropic://claude-opus-4-5`             (key from `ANTHROPIC_API_KEY`)
-/// - `claude://claude-opus-4-5`                (alias for `anthropic://...`)
-/// - `ollama://localhost:11434/qwen3:8b`        (no key, base_url extracted)
+/// Parsed model URL.
+/// Cloud providers use `scheme://[key@]model`.
+/// Ollama uses `ollama://host:port/model`.
 #[derive(Debug, Clone)]
 pub struct LlmUrl {
     pub provider: Provider,
@@ -246,7 +235,7 @@ pub struct LlmUrl {
 }
 
 impl LlmUrl {
-    /// Parses an LLM URL string into a structured [`LlmUrl`].
+    /// Parses a model URL.
     pub fn parse(s: &str) -> Result<Self, ClientError> {
         let (scheme, rest) = s.split_once("://").ok_or_else(|| {
             ClientError::InvalidUrl(format!(
@@ -321,37 +310,39 @@ impl LlmUrl {
     }
 }
 
-/// Controls whether the model must, may, or may not invoke tools.
+/// Controls whether the model may call tools.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ToolChoice {
-    /// Provider decides (usually auto-selects based on context).
+    /// Let the provider decide.
     #[default]
     Auto,
-    /// Model must call at least one tool.
+    /// Require at least one tool call.
     Required,
-    /// No tool calls; model produces text/structured output only.
+    /// Disable tool calls.
     Disabled,
 }
 
-/// Call-time configuration for a [`Client::execute`] invocation.
+/// Per-call client settings.
 #[derive(Debug, Clone, Default)]
 pub struct ClientOptions {
-    /// Optional label for tracing/logging.
+    /// Optional label for tracing.
     pub name: Option<String>,
-    /// System-level preamble sent before the conversation history.
+    /// Preamble sent before history.
     pub preamble: Option<String>,
-    /// Tools the model may invoke. Empty means structured-output mode.
+    /// Tools available to the model.
     pub tools: Vec<ToolDefinition>,
-    /// Enable chain-of-thought reasoning (provider-specific).
+    /// Enables provider-specific reasoning modes.
     pub thinking: bool,
-    /// Whether tool invocation is forced, optional, or disabled.
+    /// Tool-call policy.
     pub tool_choice: ToolChoice,
-    /// JSON Schema describing the structure of the user-message input.
-    /// Appended to the preamble as a hint for the model.
+    /// JSON Schema for the user payload.
     pub input_schema: Option<Value>,
-    /// JSON Schema describing the expected structured output.
-    /// Used by backends to configure provider-native structured-output mode.
+    /// JSON Schema for structured output.
     pub output_schema: Option<Value>,
+    /// Sampling temperature.
+    pub temperature: Option<f32>,
+    /// Reasoning budget. Ignored unless `thinking` is enabled.
+    pub thinking_budget: Option<u32>,
 }
 
 impl ClientOptions {
@@ -380,26 +371,43 @@ impl ClientOptions {
         self
     }
 
-    /// Sets the JSON Schema describing the structure of the user-message input.
-    ///
-    /// Backends may append this to the preamble as a hint to help the model
-    /// understand the shape of each user turn.
+    /// Sets the input schema.
     pub fn with_input_schema(mut self, schema: Value) -> Self {
         self.input_schema = Some(schema);
         self
     }
 
-    /// Sets the JSON Schema describing the expected structured output.
-    ///
-    /// Backends use this to configure provider-native structured-output mode
-    /// when no tools are present.
+    /// Sets the structured-output schema.
     pub fn with_output_schema(mut self, schema: Value) -> Self {
         self.output_schema = Some(schema);
         self
     }
 
-    /// Constructs a client backed by the appropriate provider for the given LLM URL.
-    ///
+    /// Sets the sampling temperature.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Sets the sampling temperature from an `Option`.
+    pub fn with_temperature_opt(mut self, temperature: Option<f32>) -> Self {
+        self.temperature = temperature;
+        self
+    }
+
+    /// Sets the reasoning budget.
+    pub fn with_thinking_budget(mut self, budget: u32) -> Self {
+        self.thinking_budget = Some(budget);
+        self
+    }
+
+    /// Sets the reasoning budget from an `Option`.
+    pub fn with_thinking_budget_opt(mut self, budget: Option<u32>) -> Self {
+        self.thinking_budget = budget;
+        self
+    }
+
+    /// Builds a provider client for the given model URL.
     pub fn create(self, llm_url: &str) -> Result<Box<dyn Client>, ClientError> {
         let url = LlmUrl::parse(llm_url)?;
         match url.provider {

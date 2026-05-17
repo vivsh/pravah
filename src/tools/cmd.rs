@@ -18,9 +18,9 @@ pub struct RunCommandOutput {
 /// Runs an allowed shell command inside the working directory.
 #[derive(Deserialize, JsonSchema)]
 pub struct RunCommand {
-    /// The executable to run (e.g. `"cargo"`, `"git"`). Must be in the allowlist.
+    /// Executable name. It must be allowlisted.
     pub command: String,
-    /// Arguments to pass to the command (e.g. `["test", "--", "--nocapture"]`).
+    /// Command arguments.
     pub args: Vec<String>,
 }
 
@@ -91,7 +91,6 @@ mod tests {
         .await
         .unwrap();
         let stdout = out.stdout.trim().to_owned();
-        // Normalise in case of symlinks (macOS /var → /private/var).
         let stdout_canon = std::path::PathBuf::from(&stdout)
             .canonicalize()
             .unwrap_or(std::path::PathBuf::from(&stdout));
@@ -130,7 +129,6 @@ mod tests {
     #[tokio::test]
     async fn run_command_captures_nonzero_exit_code() {
         let dir = tempfile::tempdir().unwrap();
-        // `false` always exits with code 1.
         let out = RunCommand {
             command: "false".into(),
             args: vec![],

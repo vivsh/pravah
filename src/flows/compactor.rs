@@ -3,23 +3,15 @@ use async_trait::async_trait;
 use crate::clients::{Message, Role};
 use crate::flows::history::HistoryEntry;
 
-/// Result returned by a [`HistoryCompactor`].
-///
-/// `evict_indices` are 0-based indices into the `session_entries` slice that was passed
-/// to [`HistoryCompactor::compact`]. `summary` is an optional replacement message that
-/// [`FlowHistory::apply_compaction`] inserts at the eviction site.
+/// Compaction decision for one session slice.
+/// `evict_indices` are relative to the slice passed into `compact`.
 pub struct CompactionResult {
     pub evict_indices: Vec<usize>,
     pub summary: Option<Message>,
 }
 
-/// Decides which history entries for a single session should be evicted.
-///
-/// # Session isolation
-///
-/// The `entries` slice contains only one session's non-evicted entries.
-/// [`FlowRuntime`](crate::flows::FlowRuntime) drives a per-session loop, so structural
-/// contamination across sessions is impossible.
+/// Chooses which history entries to evict for one session.
+/// The runtime always passes entries from a single session.
 pub trait HistoryCompactor: Send + Sync {
     fn compact(
         &self,
@@ -27,8 +19,6 @@ pub trait HistoryCompactor: Send + Sync {
         entries: &[&HistoryEntry],
     ) -> impl std::future::Future<Output = CompactionResult> + Send;
 }
-
-// ── dyn-safe internal erasure ──────────────────────────────────────────────
 
 #[async_trait]
 pub(crate) trait DynHistoryCompactor: Send + Sync {
@@ -42,9 +32,7 @@ impl<T: HistoryCompactor> DynHistoryCompactor for T {
     }
 }
 
-// ── built-in implementations ───────────────────────────────────────────────
-
-/// Compactor that never evicts anything.
+/// Compactor that never evicts.
 pub struct NoopCompactor;
 
 impl HistoryCompactor for NoopCompactor {
@@ -56,13 +44,8 @@ impl HistoryCompactor for NoopCompactor {
     }
 }
 
-/// Evicts the oldest complete assistant turns until the session is within `max_turns`.
-///
-/// A turn is either:
-/// - A single `Role::Assistant` message, or
-/// - A `Role::AssistantToolCalls` message **plus** all its matching `Role::Tool` results.
-///
-/// Incomplete turns (missing some tool results) are never evicted.
+/// Drops the oldest complete turns until the session fits the configured window.
+/// Incomplete tool turns are never evicted.
 pub struct SlidingWindowCompactor {
     pub max_turns_per_session: usize,
 }
@@ -95,9 +78,7 @@ impl HistoryCompactor for SlidingWindowCompactor {
     }
 }
 
-/// Counts complete assistant turns in a session slice.
-///
-/// An `AssistantToolCalls` turn is complete only when every expected tool result is present.
+/// Counts complete assistant turns in one session slice.
 fn count_complete_turns(entries: &[&HistoryEntry]) -> usize {
     let mut count = 0;
     let mut i = 0;
@@ -129,8 +110,7 @@ fn count_complete_turns(entries: &[&HistoryEntry]) -> usize {
     count
 }
 
-/// Returns the relative indices (into `entries`) of the first complete turn that has not
-/// already been included in `already_evicted`.
+/// Returns the first complete turn not already marked for eviction.
 fn first_complete_turn_indices(
     entries: &[&HistoryEntry],
     already_evicted: &[usize],

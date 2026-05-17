@@ -3,22 +3,19 @@ use uuid::Uuid;
 use crate::clients::{ClientError, Message, Role, TokenUsage};
 use crate::flows::compactor::CompactionResult;
 
-/// A single entry in conversation history, wrapping a wire-format [`Message`] with
-/// pravah-internal metadata needed for persistence and compaction.
-///
-/// Construction is exclusively via [`FlowHistory::push`] — external code never builds
-/// this directly.
+/// One history row with Pravah metadata around a wire-format [`Message`].
+/// External code should create entries through [`FlowHistory::push`].
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
-    /// Stable row identity for persistence (UPDATE/DELETE by id).
+    /// Stable row id for persistence.
     pub id: Uuid,
-    /// Monotonic ordering counter stamped by [`FlowHistory::push`].
+    /// Monotonic position assigned by [`FlowHistory::push`].
     pub position: u64,
     pub session_id: String,
     pub agent_id: String,
-    /// Set by [`FlowHistory::apply_compaction`]; cleared by [`FlowHistory::prune_evicted`].
+    /// Marks entries scheduled for pruning after a successful flush.
     pub evicted: bool,
-    /// Wire-format message — no agent/session metadata.
+    /// Provider-facing message payload.
     pub message: Message,
 }
 
@@ -35,12 +32,8 @@ impl HistoryEntry {
     }
 }
 
-/// Append-only conversation store for all flow agents.
-///
-/// `FlowHistory` is the sole constructor of [`HistoryEntry`] values. Compaction and
-/// persistence consumers read entries but never build them.
-///
-/// Token accounting is updated automatically on every [`push`](FlowHistory::push).
+/// Append-only history for all active agent sessions.
+/// Token counters are updated on every [`push`](FlowHistory::push).
 #[derive(Debug, Clone, Default)]
 pub struct FlowHistory {
     entries: Vec<HistoryEntry>,
@@ -55,9 +48,7 @@ impl FlowHistory {
         Self::default()
     }
 
-    /// Appends a new entry for `(session_id, agent_id, message)`.
-    ///
-    /// Stamps `position`, generates a fresh `id`, and extracts token usage from the message.
+    /// Appends a new history entry.
     pub fn push(&mut self, session_id: &str, agent_id: &str, message: Message) {
         if let Some(u) = message.usage {
             self.last_usage = Some(u);
@@ -70,10 +61,8 @@ impl FlowHistory {
         self.entries.push(entry);
     }
 
-    /// Returns all non-evicted entries for `session_id` as borrowed refs.
-    ///
-    /// Pass the returned vec back into [`apply_compaction`](FlowHistory::apply_compaction)
-    /// so indices in [`CompactionResult`] reference the same slice.
+    /// Returns the live entries for one session.
+    /// Pass this exact slice back to [`apply_compaction`](FlowHistory::apply_compaction).
     pub fn session_entries(&self, session_id: &str) -> Vec<&HistoryEntry> {
         self.entries
             .iter()
@@ -81,9 +70,7 @@ impl FlowHistory {
             .collect()
     }
 
-    /// Returns all non-evicted messages for `session_id`, unwrapped from their entries.
-    ///
-    /// This is the slice passed to the LLM client on every dispatch.
+    /// Returns the live messages for one session.
     pub fn for_session(&self, session_id: &str) -> Vec<Message> {
         self.entries
             .iter()
@@ -92,8 +79,7 @@ impl FlowHistory {
             .collect()
     }
 
-    /// Checks that the most recent non-evicted message for `session_id` is not an
-    /// unresolved `AssistantToolCalls`. Called before dispatching to the LLM.
+    /// Rejects sessions that still end with unresolved tool calls.
     pub fn validate_for_session(&self, session_id: &str) -> Result<(), ClientError> {
         let last = self
             .entries
@@ -111,21 +97,14 @@ impl FlowHistory {
         Ok(())
     }
 
-    /// All entries including evicted. Intended for [`HistoryStore`] consumers only.
+    /// Returns all entries, including evicted ones.
     pub fn entries(&self) -> &[HistoryEntry] {
         &self.entries
     }
 
-    /// Applies a compaction result for one session.
-    ///
-    /// `session_slice` must be the exact slice returned by
-    /// [`session_entries`](FlowHistory::session_entries) for this `session_id`.
-    /// Indices in `result.evict_indices` reference positions within it.
-    ///
-    /// Marks targeted entries evicted, then inserts an optional summary entry whose
-    /// `position` equals the first evicted entry's position.
-    ///
-    /// Returns an error if any index is out of bounds.
+    /// Applies one compaction decision.
+    /// `session_slice` must match the slice returned by [`session_entries`](FlowHistory::session_entries).
+    /// Returns an error when a compactor reports an out-of-bounds index.
     pub fn apply_compaction(
         &mut self,
         session_id: &str,
@@ -177,9 +156,7 @@ impl FlowHistory {
         Ok(())
     }
 
-    /// Physically removes all entries marked `evicted`.
-    ///
-    /// Called by [`HistoryStore::flush`] after the DB has acknowledged deletions.
+    /// Removes entries already marked as evicted.
     pub fn prune_evicted(&mut self) {
         self.entries.retain(|e| !e.evicted);
     }
@@ -208,7 +185,7 @@ impl FlowHistory {
         self.total_output
     }
 
-    /// Cumulative input + output tokens, or `None` if either is missing.
+    /// Returns cumulative input and output tokens when both are known.
     pub fn total_usage(&self) -> Option<u32> {
         match (self.total_input, self.total_output) {
             (Some(i), Some(o)) => Some(i + o),

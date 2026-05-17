@@ -116,6 +116,10 @@ fn build_payload(
         "stream": false,
     });
 
+    if let Some(t) = options.temperature {
+        payload["temperature"] = json!(t);
+    }
+
     if tools_enabled {
         payload["tools"] = Value::Array(build_tools(&options.tools));
         if options.tool_choice == ToolChoice::Required {
@@ -343,7 +347,7 @@ mod tests {
         assert_eq!(payload["response_format"]["type"], "json_object");
     }
 
-    /// Structured-output mode includes the provided output schema in the Ollama payload.
+    /// Structured-output mode includes the provided output schema.
     #[test]
     fn payload_uses_output_schema_when_present() {
         let schema = json!({

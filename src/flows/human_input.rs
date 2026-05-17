@@ -6,33 +6,27 @@ use crate::context::Context;
 use crate::flows::errors::FlowError;
 use crate::flows::flows::{Flow, FlowGraph};
 
-/// A single selectable option presented to the human.
+/// One option shown to the human.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Choice {
-    /// Short label displayed to the human and used by the LLM to identify the option.
+    /// Label shown to the human.
     pub label: String,
-    /// Optional elaboration shown below the label to help the human decide.
+    /// Optional helper text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Optional emoji or icon identifier (e.g. `"✅"`, `"warning"`) shown alongside the label.
-    /// Renders in both CLI and web UIs.
+    /// Optional icon hint for CLI and web renderers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    /// Optional URL of a preview image. Ignored by the CLI renderer; web callers
-    /// can display it when rendering the suspended [`PendingHumanInput`].
+    /// Optional preview image URL for web renderers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
 }
 
-/// A prompt with optional choices sent to a human for review or decision.
-///
-/// When `choices` is empty the human is asked to type a free-text answer.
-/// When `choices` is non-empty and `allow_other` is `true`, the human may
-/// either select a choice or type a custom answer.
-///
-/// Embed in an agent toolbox with `ToolBox::flow::<HumanInput>()`.
-/// Place [`CliMode`] in [`Context`] deps to read from stdin; otherwise the
-/// flow suspends so a web handler can supply the answer via `resume()`.
+/// Prompt sent to a human.
+/// An empty `choices` list means free text.
+/// When `allow_other` is true, the human may type a custom answer even if choices exist.
+/// Put [`CliMode`] in [`Context`] when the answer should be read from stdin.
+/// Without it, the flow suspends and waits for `resume()`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(
     description = "A question or decision point presented to a human. Set `choices` to offer \
@@ -40,34 +34,33 @@ pub struct Choice {
     choices."
 )]
 pub struct HumanInput {
-    /// The question, instruction, or context to display.
+    /// Prompt text.
     pub prompt: String,
-    /// Ordered list of labelled options. Empty means free-text only.
+    /// Ordered options.
     #[schemars(
         description = "Zero or more options. Index 0 = first item. Omit or leave empty to ask \
         for a free-text answer."
     )]
     pub choices: Vec<Choice>,
-    /// When `true`, the human may type a custom answer instead of (or in addition to) a choice.
+    /// Allows a custom text answer.
     pub allow_other: bool,
 }
 
-/// The human's response to a [`HumanInput`] prompt.
-///
-/// Exactly one of `choice` or `text` is set.
+/// Human response to a [`HumanInput`] prompt.
+/// Exactly one of `choice` or `text` should be present.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(
     description = "The human's answer. `choice` holds the zero-based index of a selected option. \
     `text` holds a free-text reply. Exactly one field is populated."
 )]
 pub struct HumanOutput {
-    /// Zero-based index of the selected choice. `None` when the human typed a free-text answer.
+    /// Zero-based choice index.
     pub choice: Option<usize>,
-    /// Free-text answer. Present when `allow_other` is `true` or `choices` is empty.
+    /// Free-text answer.
     pub text: Option<String>,
 }
 
-/// Marker placed in [`Context`] deps to enable stdin interaction.
+/// Marker dependency that enables stdin input.
 ///
 /// ```rust,ignore
 /// use std::sync::Arc;
@@ -80,18 +73,13 @@ pub struct HumanOutput {
 /// ```
 pub struct CliMode;
 
-/// Wraps a [`HumanInput`] on the suspend path so its node key differs from `"HumanInput"`.
-///
-/// In web mode, downcast a [`crate::flows::SuspendedValue`] to this type to
-/// inspect the pending prompt, then call `resume()` with a [`HumanOutput`].
+/// Wrapper used on the suspend path so the pending prompt has its own node type.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PendingHumanInput(pub HumanInput);
 
-/// Internal routing type — not part of the public API.
-///
+/// Internal routing type.
 /// `Either<HumanOutput, PendingHumanInput>` cannot be used directly because the
-/// `either` crate only implements `JsonSchema` for schemars v1 while this crate
-/// uses v0.8.
+/// `either` crate exposes the wrong `JsonSchema` version for this crate.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum HumanInputDecision {

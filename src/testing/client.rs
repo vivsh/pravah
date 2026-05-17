@@ -23,7 +23,7 @@ impl ScriptedInner {
     }
 }
 
-/// Scripted LLM client — created per-dispatch by [`ScriptedFactory`].
+/// Scripted client used by tests.
 struct ScriptedClient {
     inner: Arc<Mutex<ScriptedInner>>,
     model_url: String,
@@ -51,36 +51,22 @@ impl Client for ScriptedClient {
     }
 }
 
-/// A [`ClientFactory`] that replays a pre-programmed sequence of responses.
-///
-/// Each call to [`ClientFactory::create`] produces a [`Client`] that shares the
-/// same response queue and call log, so responses are consumed in order regardless
-/// of which model URL triggered the dispatch.
-///
-/// Clone the factory before injecting it to keep an inspection handle:
-///
-/// ```rust,ignore
-/// let factory = ScriptedFactory::new()
-///     .then_output(serde_json::json!({ "answer": "yes" }));
-/// let spy = factory.clone();
-/// let mut runtime = FlowRuntime::new(input)?.with_factory(factory);
-/// // drive the flow …
-/// assert_eq!(spy.calls().len(), 1);
-/// ```
+/// [`ClientFactory`] that replays a programmed sequence of responses.
+/// All created clients share the same response queue and call log.
 #[derive(Clone)]
 pub struct ScriptedFactory {
     inner: Arc<Mutex<ScriptedInner>>,
 }
 
 impl ScriptedFactory {
-    /// Creates an empty factory with no queued responses.
+    /// Creates an empty factory.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(ScriptedInner::new())),
         }
     }
 
-    /// Enqueues a pre-built response.
+    /// Queues a pre-built response.
     pub fn then(self, response: ClientResponse) -> Self {
         self.inner
             .lock()
@@ -90,7 +76,7 @@ impl ScriptedFactory {
         self
     }
 
-    /// Enqueues a client error as the next response.
+    /// Queues a client error.
     pub fn then_err(self, err: ClientError) -> Self {
         self.inner
             .lock()
@@ -100,17 +86,17 @@ impl ScriptedFactory {
         self
     }
 
-    /// Enqueues a structured-output response with the given JSON `value`.
+    /// Queues a structured-output response.
     pub fn then_output(self, value: Value) -> Self {
         self.then(output_response(value))
     }
 
-    /// Enqueues a tool-call response.
+    /// Queues a tool-call response.
     pub fn then_tool_calls(self, calls: Vec<ToolCall>) -> Self {
         self.then(tool_call_response(calls))
     }
 
-    /// Enqueues a tool-call response accompanied by a model thought string.
+    /// Queues a tool-call response with model thought text.
     pub fn then_tool_calls_with_thought(
         self,
         thought: impl Into<String>,
@@ -119,7 +105,7 @@ impl ScriptedFactory {
         self.then(tool_call_response_with_thought(thought.into(), calls))
     }
 
-    /// Snapshot of all `(model_url, messages)` pairs sent to the LLM so far.
+    /// Returns all `(model_url, messages)` pairs sent so far.
     pub fn calls(&self) -> Vec<(String, Vec<Message>)> {
         self.inner
             .lock()
@@ -128,7 +114,7 @@ impl ScriptedFactory {
             .clone()
     }
 
-    /// Number of responses still waiting in the queue.
+    /// Returns the number of queued responses left.
     pub fn remaining(&self) -> usize {
         self.inner
             .lock()
@@ -157,12 +143,12 @@ impl ClientFactory for ScriptedFactory {
     }
 }
 
-/// Builds a [`ClientResponse`] wrapping a structured JSON output value.
+/// Builds a structured-output test response.
 pub fn output_response(value: Value) -> ClientResponse {
     ClientResponse::new(Provider::OpenAi, ClientOutput::Output(value))
 }
 
-/// Builds a [`ClientResponse`] wrapping tool calls with no thought text.
+/// Builds a tool-call test response without thought text.
 pub fn tool_call_response(calls: Vec<ToolCall>) -> ClientResponse {
     ClientResponse::new(
         Provider::OpenAi,
@@ -173,7 +159,7 @@ pub fn tool_call_response(calls: Vec<ToolCall>) -> ClientResponse {
     )
 }
 
-/// Builds a [`ClientResponse`] wrapping tool calls with a model thought string.
+/// Builds a tool-call test response with thought text.
 pub fn tool_call_response_with_thought(thought: String, calls: Vec<ToolCall>) -> ClientResponse {
     ClientResponse::new(
         Provider::OpenAi,
@@ -184,9 +170,7 @@ pub fn tool_call_response_with_thought(thought: String, calls: Vec<ToolCall>) ->
     )
 }
 
-/// Constructs a [`ToolCall`] for use in scripted test responses.
-///
-/// `args` must be a [`serde_json::Value`]; use `serde_json::json!({…})` inline.
+/// Builds a [`ToolCall`] for scripted test responses.
 pub fn mock_tool_call(
     id: impl Into<String>,
     name: impl Into<String>,

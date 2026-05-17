@@ -1,11 +1,7 @@
-//! Flow graph diagram generation.
+//! Diagram rendering for flow graphs.
+//! [`FlowGraphDiagram`] snapshots graph topology and renders Mermaid or DOT output.
+//! With `diagram-text`, the Mermaid source can also be rendered as text.
 //!
-//! [`FlowGraphDiagram`] holds a snapshot of a flow graph's topology and can
-//! render it as a Graphviz DOT file or a Mermaid flowchart.  With the
-//! `diagram-text` feature enabled it can also render the Mermaid source to
-//! Unicode box-drawing text or plain ASCII via the `mermaid-text` crate.
-//!
-//! # Example
 //! ```ignore
 //! let diagram = FlowGraphDiagram::for_flow::<MyFlow>()?;
 //! println!("{}", diagram.dot());
@@ -20,24 +16,21 @@ use crate::flows::flows::FlowNode;
 use super::errors::FlowError;
 use super::flows::Flow;
 
-// ── Public data model ──────────────────────────────────────────────────────
-
-/// The kind of node in the flow graph.
+/// Node kind used by the diagram renderers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagramNodeKind {
     Agent,
     Work,
-    /// Pure synchronous transform: `fn(I) -> O`.
+    /// Pure synchronous transform.
     Map,
     Fork,
     Join,
     Either,
     /// Flow-level suspend point.
     Suspend,
-    /// An embedded sub-flow node.
+    /// Embedded child flow.
     Flow,
-    /// A node that is the target of an edge but has no definition in the graph
-    /// (i.e. the flow terminates there).
+    /// Edge target with no node definition in the graph.
     Terminal,
 }
 
@@ -57,14 +50,14 @@ impl DiagramNodeKind {
     }
 }
 
-/// A single node in the flow graph.
+/// One diagram node.
 #[derive(Debug, Clone)]
 pub struct DiagramNode {
     pub id: String,
     pub kind: DiagramNodeKind,
 }
 
-/// A directed edge between two nodes.
+/// One directed edge in the diagram.
 #[derive(Debug, Clone)]
 pub struct DiagramEdge {
     pub from: String,
@@ -72,9 +65,7 @@ pub struct DiagramEdge {
     pub label: &'static str,
 }
 
-/// A snapshot of a flow graph's topology suitable for diagram rendering.
-///
-/// Obtain via [`FlowGraph::diagram`](super::flows::FlowGraph::diagram).
+/// Snapshot of a flow graph topology for diagram rendering.
 #[derive(Debug, Clone)]
 pub struct FlowGraphDiagram {
     entry: String,
@@ -83,16 +74,14 @@ pub struct FlowGraphDiagram {
 }
 
 impl FlowGraphDiagram {
-    /// Build and return a diagram for flow `F`.
-    ///
-    /// Calls `F::build()`, validates the graph, and snapshots the topology.
-    /// No LLM calls are made.
+    /// Builds a diagram for flow `F`.
+    /// This only inspects the graph definition.
     pub fn from_flow<F: Flow>() -> Result<Self, FlowError> {
         let graph = FlowGraph::from_flow::<F>()?;
         Ok(diagram_from_graph(&graph))
     }
 
-    /// Construct a new diagram. Called by [`FlowGraph::diagram`].
+    /// Constructs a new diagram.
     pub(crate) fn new(entry: String, nodes: Vec<DiagramNode>, edges: Vec<DiagramEdge>) -> Self {
         Self {
             entry,
@@ -101,39 +90,30 @@ impl FlowGraphDiagram {
         }
     }
 
-    /// The entry node id.
+    /// Returns the entry node id.
     pub fn entry(&self) -> &str {
         &self.entry
     }
 
-    /// All nodes in the diagram (including terminal nodes).
+    /// Returns all diagram nodes, including terminals.
     pub fn nodes(&self) -> &[DiagramNode] {
         &self.nodes
     }
 
-    /// All directed edges in the diagram.
+    /// Returns all directed edges.
     pub fn edges(&self) -> &[DiagramEdge] {
         &self.edges
     }
 
-    // ── Mermaid ────────────────────────────────────────────────────────────
-
-    /// Render the graph as a Mermaid `flowchart LR` source string.
-    ///
-    /// The output can be pasted into [mermaid.live](https://mermaid.live) or
-    /// embedded in Markdown. With the `diagram-text` feature, pass the result
-    /// to [`Self::render_text`] / [`Self::render_ascii`].
+    /// Renders the graph as Mermaid `flowchart LR` source.
     pub fn mermaid(&self) -> String {
         let mut out = String::from("flowchart LR\n");
 
-        // Sentinel start node
         out.push_str("    _start(( ))\n");
 
-        // Node declarations
         for node in &self.nodes {
             let safe_id = mermaid_id(&node.id);
             let decl = match node.kind {
-                // Rectangle with label + kind
                 DiagramNodeKind::Agent | DiagramNodeKind::Work | DiagramNodeKind::Map => {
                     format!(
                         "    {}[\"{} ({})\"]",
@@ -142,7 +122,6 @@ impl FlowGraphDiagram {
                         node.kind.label_suffix()
                     )
                 }
-                // Diamond for fork / either (branching)
                 DiagramNodeKind::Fork | DiagramNodeKind::Either => {
                     format!(
                         "    {}{{\"{} ({})\"}}",
@@ -151,7 +130,6 @@ impl FlowGraphDiagram {
                         node.kind.label_suffix()
                     )
                 }
-                // Hexagon for suspend
                 DiagramNodeKind::Suspend => {
                     format!(
                         "    {}{{{{\"{}  (suspend)\"}}}}",
@@ -159,7 +137,6 @@ impl FlowGraphDiagram {
                         node.id
                     )
                 }
-                // Stadium for join / terminal
                 DiagramNodeKind::Join => {
                     format!("    {}([\"{}  (join)\"])", safe_id, node.id)
                 }
@@ -174,10 +151,8 @@ impl FlowGraphDiagram {
             out.push('\n');
         }
 
-        // Entry edge from sentinel
         out.push_str(&format!("    _start --> {}\n", mermaid_id(&self.entry)));
 
-        // Graph edges
         for edge in &self.edges {
             out.push_str(&format!(
                 "    {} -->|{}| {}\n",
@@ -190,20 +165,14 @@ impl FlowGraphDiagram {
         out
     }
 
-    // ── DOT ───────────────────────────────────────────────────────────────
-
-    /// Render the graph as a Graphviz DOT source string.
-    ///
-    /// Pass the result to `dot -Tpng -o flow.png` or similar.
+    /// Renders the graph as Graphviz DOT source.
     pub fn dot(&self) -> String {
         let mut out = String::from("digraph {\n    rankdir=LR;\n");
 
-        // Sentinel start node
         out.push_str(
             "    _start [label=\"\" shape=circle style=filled fillcolor=black width=0.3];\n",
         );
 
-        // Node declarations
         for node in &self.nodes {
             let safe_id = dot_id(&node.id);
             let attrs = match node.kind {
@@ -231,10 +200,8 @@ impl FlowGraphDiagram {
             out.push_str(&format!("    {} [{}];\n", safe_id, attrs));
         }
 
-        // Entry edge from sentinel
         out.push_str(&format!("    _start -> {};\n", dot_id(&self.entry)));
 
-        // Graph edges
         for edge in &self.edges {
             out.push_str(&format!(
                 "    {} -> {} [label=\"{}\"];\n",
@@ -248,12 +215,8 @@ impl FlowGraphDiagram {
         out
     }
 
-    /// Render the graph as an indented tree showing the execution path from
-    /// the entry node through all branches and convergence points.
-    ///
-    /// Nodes reached via multiple branches (e.g. join targets) are rendered
-    /// in full on the first visit and marked `↩` on subsequent visits,
-    /// so the complete topology can be read top-to-bottom without loops.
+    /// Renders the graph as an indented execution tree.
+    /// Revisited nodes are marked with `↩` instead of being expanded again.
     ///
     /// ```text
     /// ● ArticleRequest (fork)
@@ -304,10 +267,7 @@ impl FlowGraphDiagram {
     }
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-/// Sanitise a node id for use as a Mermaid node identifier.
-/// Mermaid identifiers must be alphanumeric + underscore only.
+/// Sanitizes a node id for Mermaid.
 fn mermaid_id(id: &str) -> String {
     id.chars()
         .map(|c| {
@@ -320,13 +280,10 @@ fn mermaid_id(id: &str) -> String {
         .collect()
 }
 
-/// Sanitise a node id for use as a DOT identifier (wrap in quotes).
+/// Wraps a node id for DOT output.
 fn dot_id(id: &str) -> String {
-    // DOT allows any string inside double-quotes; escape existing quotes.
     format!("\"{}\"", id.replace('"', "\\\""))
 }
-
-// ── Tree renderer helper ───────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 fn tree_write_node(
@@ -408,17 +365,14 @@ fn tree_write_node(
     }
 }
 
-// ── Build helper (called from flows.rs) ────────────────────────────────────
-
-/// Snapshot node kinds from the private `FlowNode` enum.
-/// We pass an iterator of `(id, kind, edges)` tuples.
+/// Diagram-ready node description derived from `FlowNode`.
 pub(crate) struct NodeDesc {
     pub id: String,
     pub kind: DiagramNodeKind,
     pub succs: Vec<(String, &'static str)>,
 }
 
-/// Build a [`FlowGraphDiagram`] from a description of nodes.
+/// Builds a [`FlowGraphDiagram`] from node descriptions.
 pub(crate) fn build_diagram(entry: String, descs: Vec<NodeDesc>) -> FlowGraphDiagram {
     let defined_ids: HashSet<&str> = descs.iter().map(|d| d.id.as_str()).collect();
 
@@ -433,9 +387,7 @@ pub(crate) fn build_diagram(entry: String, descs: Vec<NodeDesc>) -> FlowGraphDia
     let mut edges: Vec<DiagramEdge> = Vec::new();
     let mut terminal_ids: HashSet<String> = HashSet::new();
 
-    // Collect edges; mark targets that are not registered nodes as terminals.
-    // Join nodes are registered under each *parent* key, both emitting an edge
-    // to the same target — dedup the terminal detection but keep both edges.
+    // Mark edge targets without node definitions as terminals.
     for desc in &descs {
         for (to, label) in &desc.succs {
             edges.push(DiagramEdge {
@@ -507,7 +459,6 @@ fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
                     let exit_str = inner.interner.name_of(exit).to_string();
                     (DiagramNodeKind::Flow, vec![(exit_str, "flow")])
                 }
-                // Tool nodes are implementation details not shown in diagrams.
                 FlowNode::Tool(_) | FlowNode::AgentTool(_) | FlowNode::FlowTool { .. } => return None,
             };
             Some(NodeDesc {

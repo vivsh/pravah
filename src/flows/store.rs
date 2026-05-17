@@ -2,11 +2,9 @@ use async_trait::async_trait;
 
 use crate::flows::history::{FlowHistory, HistoryEntry};
 
-/// Persists and loads flow conversation history.
-///
-/// Implementors own the storage backend (SQLite, Postgres, in-memory, etc.).
-/// After a successful flush, evicted entries should be pruned via
-/// [`FlowHistory::prune_evicted`] so they don't accumulate in memory.
+/// Persists and loads flow history.
+/// After a successful flush, implementations should allow
+/// [`FlowHistory::prune_evicted`] to remove dead rows from memory.
 pub trait HistoryStore: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
 
@@ -20,8 +18,6 @@ pub trait HistoryStore: Send + Sync {
         session_ids: &[&str],
     ) -> impl std::future::Future<Output = Result<Vec<HistoryEntry>, Self::Error>> + Send;
 }
-
-// ── dyn-safe internal erasure ──────────────────────────────────────────────
 
 #[async_trait]
 pub(crate) trait DynHistoryStore: Send + Sync {
@@ -53,11 +49,7 @@ impl<T: HistoryStore> DynHistoryStore for T {
     }
 }
 
-// ── built-in implementations ───────────────────────────────────────────────
-
-/// No-op store that immediately prunes evicted entries from memory.
-///
-/// Suitable for ephemeral flows that don't require persistence.
+/// No-op store that prunes evicted entries in memory.
 pub struct NoopHistoryStore;
 
 impl HistoryStore for NoopHistoryStore {

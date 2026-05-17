@@ -13,7 +13,7 @@ use crate::clients::ToolCall;
 use crate::context::Context;
 use crate::deps::DepsError;
 
-/// Error produced when a tool invocation fails.
+/// Error returned by tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
     #[error("io error: {0}")]
@@ -36,19 +36,26 @@ pub enum ToolError {
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
-/// Internal outcome of a tool dispatch, distinct from a true error.
-/// `Exit` and `Suspend` are orchestrator signals; they never reach user code.
+impl ToolError {
+    /// Returns `true` when the error should abort the flow instead of going back to the model.
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, ToolError::PathEscape(_) | ToolError::ForbiddenCommand(_))
+    }
+}
+
+/// Internal tool dispatch outcome.
+/// `Exit` and `Suspend` are control signals, not user-facing errors.
 pub(crate) enum ToolOutcome {
-    /// Normal tool result serialized as JSON.
+    /// Normal tool result.
     Value(Value),
-    /// The auto-generated exit sentinel was called; carries the agent's final output.
+    /// Exit sentinel result carrying the agent's final output.
     Exit(Value),
-    /// A suspend-tool was called; flow pauses until resumed with a matching value.
+    /// Suspend tool result carrying the pending value and expected resume type.
     Suspend { value: SuspendedValue, output_type: String },
 }
 
 impl Context {
-    /// Returns `Ok(())` if `cmd` appears in the `commands` allowlist.
+    /// Rejects commands outside the configured allowlist.
     pub fn check_command(&self, cmd: &str) -> Result<(), ToolError> {
         if self.commands().iter().any(|c| c == cmd) {
             Ok(())
@@ -57,11 +64,8 @@ impl Context {
         }
     }
 
-    /// Resolves `raw` to an absolute path and verifies it stays within `working_dir`.
-    ///
-    /// Relative paths are resolved against `working_dir`. `..` components are
-    /// collapsed without hitting the filesystem, so this check is safe for
-    /// paths that do not yet exist (e.g. write targets).
+    /// Resolves a path and rejects escapes from `working_dir`.
+    /// Relative paths are normalized without requiring the target to exist.
     pub fn resolve(&self, raw: &str) -> Result<PathBuf, ToolError> {
         let working_dir = normalize_path(self.working_dir());
         let path = Path::new(raw);
@@ -129,7 +133,7 @@ fn resolve_within_root(raw: &str, root: &Path, relative: &Path) -> Result<PathBu
     Ok(resolved)
 }
 
-/// Collapses `.` and `..` components without touching the filesystem.
+/// Collapses `.` and `..` without touching the filesystem.
 fn normalize_path(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -144,10 +148,8 @@ fn normalize_path(path: &Path) -> PathBuf {
     out
 }
 
-/// Typed input from an LLM suspend-tool call surfaced as [`crate::flows::FlowStep::Suspend`].
-///
-/// Downcast to the concrete input type registered via [`ToolBox::suspend`] using
-/// [`downcast`](Self::downcast) or [`downcast_ref`](Self::downcast_ref).
+/// Type-erased input captured from a suspend tool call.
+/// Downcast it with [`downcast`](Self::downcast) or [`downcast_ref`](Self::downcast_ref).
 pub struct SuspendedValue(Box<dyn std::any::Any + Send>);
 
 impl SuspendedValue {
@@ -155,12 +157,13 @@ impl SuspendedValue {
         Self(Box::new(value))
     }
 
-    /// Attempts to downcast to `T`, consuming `self`. Returns `Err(self)` if the type doesn't match.
+    /// Attempts to downcast to `T`.
+    /// Returns `Err(self)` when the type does not match.
     pub fn downcast<T: 'static>(self) -> Result<T, Self> {
         self.0.downcast::<T>().map(|b| *b).map_err(SuspendedValue)
     }
 
-    /// Borrows the inner value as `&T`, returning `None` if the type doesn't match.
+    /// Borrows the inner value as `&T`.
     pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
         self.0.downcast_ref::<T>()
     }
@@ -172,34 +175,29 @@ impl std::fmt::Debug for SuspendedValue {
     }
 }
 
-/// Metadata the orchestrator sends to the LLM to advertise a tool.
+/// Tool metadata exposed to the model.
 #[derive(Debug, Clone)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
-    /// JSON Schema `object` describing the tool's input shape.
+    /// JSON Schema describing the tool input.
     pub parameters: Value,
 }
 
-/// Typed tool trait where `Self` is both the tool and its deserialized input.
-///
-/// Implement this trait on a struct that derives [`serde::Deserialize`] and
-/// [`JsonSchema`]. The struct's fields become the LLM-callable arguments.
-/// [`ToolDefinition`] is derived automatically via [`Tool::definition`].
+/// Typed tool trait.
+/// Implement it on the struct that represents the tool input.
 pub trait Tool: DeserializeOwned + JsonSchema + Sized + Send {
-    /// Typed output this tool produces. Must be `Serialize` so `ErasedTool` can
-    /// convert it to `serde_json::Value` after dispatch without the caller
-    /// building raw JSON.
+    /// Typed output produced by the tool.
     type Output: serde::Serialize + JsonSchema + DeserializeOwned + Send;
 
     fn name() -> &'static str;
 
     fn description() -> &'static str;
 
-    /// Execute the tool, consuming `self` (the parsed input).
+    /// Executes the tool.
     fn call(self, ctx: Context) -> impl Future<Output = Result<Self::Output, ToolError>> + Send;
 
-    /// Derives a [`ToolDefinition`] from this tool's metadata and input schema.
+    /// Builds the advertised [`ToolDefinition`].
     fn definition() -> ToolDefinition {
         let parameters = serde_json::to_value(schemars::schema_for!(Self))
             .unwrap_or_else(|e| {
@@ -214,31 +212,26 @@ pub trait Tool: DeserializeOwned + JsonSchema + Sized + Send {
     }
 }
 
-/// Creates a heap-allocated type-erased dispatcher for tool type `T`.
-/// Crate-internal; used by [`ToolBoxBuilder::tool`] and `commons`.
+/// Creates a type-erased dispatcher for tool type `T`.
 pub(crate) fn make_dispatcher<T: Tool + 'static>() -> Box<dyn ErasedTool> {
     Box::new(ToolDispatcher::<T>(PhantomData))
 }
 
-/// Object-safe wrapper around [`Tool`] for use in heterogeneous collections.
-///
-/// Do not implement this directly — use the blanket impl via [`Tool`].
+/// Object-safe wrapper around [`Tool`] for heterogeneous collections.
 pub(crate) trait ErasedTool: Send + Sync {
     fn name(&self) -> &str;
     fn definition(&self) -> ToolDefinition;
 
-    /// Schema name of the type the LLM provides as args (the tool's input type).
+    /// Schema name of the tool input type.
     fn input_type(&self) -> String;
     fn output_type(&self) -> String;
 
-    /// Returns `false` for flow/agent tool dispatchers whose nodes are registered
-    /// by graph injectors (as `FlowNode::FlowTool` / `FlowNode::AgentTool`), so the
-    /// flow builder knows not to overwrite them with a plain `FlowNode::Tool`.
+    /// Returns `false` when graph injection already registered the tool node.
     fn needs_tool_node(&self) -> bool {
         true
     }
 
-    /// Deserializes `args` into the concrete tool type, calls it, returns the outcome.
+    /// Deserializes `args`, calls the concrete tool, and returns the outcome.
     fn call_raw<'a>(
         &'a self,
         ctx: Context,
@@ -246,7 +239,7 @@ pub(crate) trait ErasedTool: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<ToolOutcome, ToolError>> + Send + 'a>>;
 }
 
-/// Zero-sized adapter that makes any [`Tool`] object-safe as [`ErasedTool`].
+/// Zero-sized adapter that exposes any [`Tool`] as an [`ErasedTool`].
 struct ToolDispatcher<T>(PhantomData<fn() -> T>);
 
 impl<T: Tool + 'static> ErasedTool for ToolDispatcher<T> {
@@ -279,21 +272,16 @@ impl<T: Tool + 'static> ErasedTool for ToolDispatcher<T> {
     }
 }
 
-/// Registers a tool type `T` — suspension tools are added via [`.suspend()`](ToolBox::suspend).
-///
-/// Build with [`ToolBox::new`]; dispatch with [`ToolBox::call`].
+/// Registry of tools exposed to an agent.
 pub struct ToolBox {
     tools: Vec<Box<dyn ErasedTool>>,
     exit_name: String,
-    /// Type-erased closures that inject `FlowNode::AgentTool` / `FlowNode::FlowTool` nodes
-    /// into the outer graph at `FlowBuilder::agent` time. Stored here so `ToolBox` stays
-    /// crate-agnostic; drained by `ToolBox::with_agent` in `commons.rs`.
-    /// `Fn + Sync` so that `Arc<ToolBox>` is `Send + Sync`.
+    /// Closures that inject flow-backed and agent-backed tool nodes during agent registration.
     pub(crate) graph_injectors: Vec<Box<dyn Fn(&str, &mut crate::flows::FlowGraph) + Send + Sync>>,
 }
 
 impl ToolBox {
-    /// Creates an empty [`ToolBox`] with the default exit sentinel name (`"submit"`).
+    /// Creates an empty toolbox.
     pub fn new() -> Self {
         Self {
             tools: Vec::new(),
@@ -302,21 +290,20 @@ impl ToolBox {
         }
     }
 
-    /// Overrides the name of the auto-generated exit sentinel tool (default: `"submit"`).
+    /// Renames the auto-generated exit sentinel tool.
     pub fn with_exit_name(mut self, name: impl Into<String>) -> Self {
         self.exit_name = name.into();
         self
     }
 
-    /// Registers a tool type `T`. Call multiple times to add more tools.
+    /// Registers a tool type.
     pub fn tool<T: Tool + 'static>(mut self) -> Self {
         self.tools.push(make_dispatcher::<T>());
         self
     }
 
-    /// Registers a typed suspension point. The LLM calls this tool with a value of type `T`;
-    /// the flow pauses and surfaces a [`SuspendedValue`] wrapping the deserialized `T` as
-    /// [`crate::flows::FlowStep::Suspend`]. Call `resume()` with a value of type `Out`.
+    /// Registers a typed suspension point.
+    /// `resume()` must later supply a value of type `Out`.
     pub fn suspend<T, Out>(mut self) -> Self
     where
         T: JsonSchema + serde::de::DeserializeOwned + Send + 'static,
@@ -337,17 +324,17 @@ impl ToolBox {
         self
     }
 
-    /// Returns the name used for the auto-generated exit sentinel tool.
+    /// Returns the exit sentinel name.
     pub fn exit_name(&self) -> &str {
         &self.exit_name
     }
 
-    /// Returns the [`ToolDefinition`] for every registered tool.
+    /// Returns all advertised tool definitions.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.iter().map(|t| t.definition()).collect()
     }
 
-    /// Returns `true` if no tools have been registered.
+    /// Returns `true` when no tools are registered.
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
@@ -357,10 +344,8 @@ impl ToolBox {
         self.tools.len()
     }
 
-    /// Returns the name of the tool at position `i`.
-    ///
-    /// # Panics
-    /// Panics if `i >= len()`.
+    /// Returns the tool name at position `i`.
+    /// Panics when `i` is out of bounds.
     pub(crate) fn name_at(&self, i: usize) -> &str {
         self.tools[i].name()
     }
@@ -373,14 +358,12 @@ impl ToolBox {
         self.tools[i].output_type()
     }
 
-    /// Returns `false` for tools whose flow graph nodes are registered by injectors
-    /// (i.e. `FlowToolDispatcher` and `AgentToolDispatcher`), so the builder loop
-    /// does not overwrite them with a plain `FlowNode::Tool`.
+    /// Returns `false` when graph injection already registered the tool node.
     pub(crate) fn needs_tool_node_at(&self, i: usize) -> bool {
         self.tools[i].needs_tool_node()
     }
 
-    /// Invokes the tool at position `i` by its slot index.
+    /// Invokes the tool at position `i`.
     pub(crate) async fn call_at_index(
         &self,
         i: usize,
@@ -390,12 +373,12 @@ impl ToolBox {
         self.tools[i].call_raw(ctx, args).await
     }
 
-    /// Appends a pre-boxed tool. `pub(crate)` so only `commons` can inject the sentinel.
+    /// Appends a pre-boxed tool.
     pub(crate) fn push_erased(&mut self, tool: Box<dyn ErasedTool>) {
         self.tools.push(tool);
     }
 
-    /// Dispatches `tool_call` to the matching tool, using `ctx` for execution.
+    /// Dispatches a tool call by name.
     pub async fn call(&self, tool_call: &ToolCall, ctx: Context) -> Result<Value, ToolError> {
         let tool = self
             .tools
@@ -411,7 +394,7 @@ impl ToolBox {
     }
 }
 
-/// Hidden tool registered via [`ToolBox::suspend`]. Returns [`ToolOutcome::Suspend`].
+/// Internal suspend tool registered by [`ToolBox::suspend`].
 struct SuspendTool {
     def: ToolDefinition,
     input_type: String,

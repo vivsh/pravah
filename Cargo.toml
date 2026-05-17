@@ -1,6 +1,6 @@
 [package]
 name = "pravah"
-version = "0.3.2"
+version = "0.3.5"
 edition = "2024"
 description = "Typed, stepwise agentic information flows for Rust"
 license = "MIT OR Apache-2.0"
@@ -18,7 +18,7 @@ provider-genai = ["dep:genai"]
 testing = []
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "time"] }
 schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

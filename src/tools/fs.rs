@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 use super::base::{Tool, ToolError};
 use crate::context::Context;
 
-// ── Output types ──────────────────────────────────────────────────────────────
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadFileOutput {
     pub path: String,
@@ -44,10 +42,10 @@ pub struct PatchLinesOutput {
     pub inserted_lines: usize,
 }
 
-/// Reads a file and returns its full text content.
+/// Reads a file.
 #[derive(Deserialize, JsonSchema)]
 pub struct ReadFile {
-    /// Path to the file to read.
+    /// File path.
     pub path: String,
 }
 
@@ -70,12 +68,12 @@ impl Tool for ReadFile {
     }
 }
 
-/// Writes content to a file, creating parent directories as needed.
+/// Writes a file, creating parent directories when needed.
 #[derive(Deserialize, JsonSchema)]
 pub struct WriteFile {
     /// Destination path.
     pub path: String,
-    /// Content to write.
+    /// File contents.
     pub content: String,
 }
 
@@ -100,10 +98,10 @@ impl Tool for WriteFile {
     }
 }
 
-/// Lists entries in a directory (non-recursive).
+/// Lists directory entries without recursion.
 #[derive(Deserialize, JsonSchema)]
 pub struct ListDir {
-    /// Path to the directory to list.
+    /// Directory path.
     pub path: String,
 }
 
@@ -132,25 +130,22 @@ impl Tool for ListDir {
     }
 }
 
-/// A single `(old, new)` replacement within a file.
+/// One exact text replacement.
 #[derive(Deserialize, JsonSchema)]
 pub struct Replacement {
-    /// Exact text to find. Must appear exactly once in the file.
+    /// Exact text to find.
     pub old: String,
-    /// Text to substitute in place of `old`.
+    /// Replacement text.
     pub new: String,
 }
 
-/// Replaces one exact text fragment in a file without rewriting the whole file.
-///
-/// The agent only needs to provide the lines being changed plus enough surrounding
-/// context to make `old` unique — far fewer tokens than reading and rewriting the
-/// entire file.
+/// Replaces one exact text fragment in a file.
+/// Fails when `old` matches zero or multiple locations.
 #[derive(Deserialize, JsonSchema)]
 pub struct PatchFile {
-    /// Path to the file to patch.
+    /// File path.
     pub path: String,
-    /// Exact text to find. Must appear exactly once in the file.
+    /// Exact text to find.
     pub old: String,
     /// Replacement text.
     pub new: String,
@@ -179,16 +174,13 @@ impl Tool for PatchFile {
     }
 }
 
-/// Applies multiple text replacements to a file in a single round-trip.
-///
-/// Replacements are applied sequentially. This lets an agent make several
-/// independent edits while sending only the changed regions, minimising token usage.
+/// Applies multiple exact replacements to a file in order.
+/// Each `old` must be unique when it is applied.
 #[derive(Deserialize, JsonSchema)]
 pub struct MultiPatchFile {
-    /// Path to the file to patch.
+    /// File path.
     pub path: String,
-    /// Ordered list of replacements to apply. Each `old` must be unique at the
-    /// point it is applied (i.e. after previous replacements have been made).
+    /// Ordered replacements.
     pub replacements: Vec<Replacement>,
 }
 
@@ -218,7 +210,7 @@ impl Tool for MultiPatchFile {
     }
 }
 
-/// Finds `old` exactly once in `source` and returns the patched string.
+/// Applies one exact replacement to `source`.
 fn apply_patch(source: &str, old: &str, new: &str) -> Result<String, ToolError> {
     let count = source.matches(old).count();
     match count {
@@ -236,20 +228,17 @@ fn apply_patch(source: &str, old: &str, new: &str) -> Result<String, ToolError> 
     }
 }
 
-/// Replaces a contiguous range of lines in a file with new content.
-///
-/// Line numbers come directly from `file_outline` or `get_symbol` output, making
-/// this a low-token alternative to `patch_file` when the agent already knows the
-/// line range but the text is large or repetitive.
+/// Replaces a contiguous line range.
+/// Fails when the requested range is invalid or out of bounds.
 #[derive(Deserialize, JsonSchema)]
 pub struct PatchLines {
-    /// Path to the file.
+    /// File path.
     pub path: String,
-    /// First line to replace (1-based, inclusive). Must be at least 1.
+    /// First line to replace, 1-based and inclusive.
     pub start_line: usize,
-    /// Last line to replace (1-based, inclusive).
+    /// Last line to replace, 1-based and inclusive.
     pub end_line: usize,
-    /// Lines to write in place of the replaced range. May be empty to delete the range.
+    /// Replacement lines. Use an empty list to delete the range.
     pub new_lines: Vec<String>,
 }
 

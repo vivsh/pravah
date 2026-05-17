@@ -59,10 +59,7 @@ struct GenaiClient {
 }
 
 /// Builds provider messages from history.
-///
-/// For Qwen3 (model name starts with "qwen3") when `thinking` is `false`,
-/// prepends `/no_think` to the first user message so the model does not emit
-/// verbose chain-of-thought prose.
+/// Qwen3 gets a `/no_think` prefix on the first user turn when thinking is disabled.
 fn build_genai_messages(
     history: &[Message],
     preamble: Option<&str>,
@@ -132,7 +129,7 @@ fn build_chat_options(schema: Value) -> ChatOptions {
         .with_response_format(ChatResponseFormat::JsonSpec(spec))
 }
 
-/// Maps the raw API response to a [`ClientOutput`].
+/// Maps the raw `genai` response into a [`ClientOutput`].
 fn map_response(
     response: ChatResponse,
     tools_enabled: bool,
@@ -200,12 +197,6 @@ impl Client for GenaiClient {
         let tools_enabled =
             !self.options.tools.is_empty() && self.options.tool_choice != ToolChoice::Disabled;
         validate_tools(Provider::Genai, &self.options.tools)?;
-        if self.options.tool_choice == ToolChoice::Required {
-            return Err(ClientError::UnsupportedCapability {
-                provider: Provider::Genai,
-                capability: "required tool choice is not exposed by the genai adapter".into(),
-            });
-        }
         let chat_messages = build_genai_messages(
             messages,
             self.options.preamble.as_deref(),
@@ -223,6 +214,11 @@ impl Client for GenaiClient {
             build_chat_options(schema)
         } else {
             ChatOptions::default().with_capture_usage(true)
+        };
+        let chat_options = if let Some(t) = self.options.temperature {
+            chat_options.with_temperature(t as f64)
+        } else {
+            chat_options
         };
 
         let response = self
@@ -248,7 +244,7 @@ impl Client for GenaiClient {
     }
 }
 
-/// Creates a `genai`-backed client returning a type-erased [`Box<dyn Client>`].
+/// Creates a `genai`-backed client.
 pub fn create_client(url: &LlmUrl, options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
     Ok(Box::new(GenaiClient {
         client: build_http_client(url),
@@ -271,7 +267,7 @@ mod tests {
         }
     }
 
-    /// With a single user message in history, exactly one chat message is produced.
+    /// A single user turn produces one chat message.
     #[test]
     fn build_messages_user_only() {
         let history = vec![Message::user(r#"{"text":"hi"}"#)];
@@ -289,7 +285,7 @@ mod tests {
         assert!(debug.contains("You are helpful."));
     }
 
-    /// History turns appear between the preamble and the user message.
+    /// History order is preserved after the preamble.
     #[test]
     fn build_messages_history_in_order() {
         let history = vec![
@@ -304,7 +300,7 @@ mod tests {
         assert!(debug.contains("prev answer"));
     }
 
-    /// A Tool-role history entry is mapped with its call_id into the message list.
+    /// Tool responses keep their call ids.
     #[test]
     fn build_messages_tool_role_included() {
         let history = vec![Message {
@@ -320,7 +316,7 @@ mod tests {
         assert!(debug.contains("call-42"));
     }
 
-    /// Full tool exchange: messages match history length exactly.
+    /// Tool exchanges preserve the expected message count.
     #[test]
     fn build_messages_continue_after_tool_result() {
         let history = vec![
@@ -346,7 +342,7 @@ mod tests {
         assert!(debug.contains("call-1"));
     }
 
-    /// Qwen3 prepends `/no_think` to the first user message when thinking is off.
+    /// Qwen3 adds `/no_think` when thinking is disabled.
     #[test]
     fn build_messages_no_think_prefix_for_qwen3() {
         let history = vec![Message::user("do the thing")];
@@ -355,7 +351,7 @@ mod tests {
         assert!(debug.contains("/no_think"));
     }
 
-    /// Non-qwen3 models do not prepend `/no_think`.
+    /// Other models do not get the `/no_think` prefix.
     #[test]
     fn build_messages_no_prefix_for_gemini() {
         let history = vec![Message::user("do the thing")];

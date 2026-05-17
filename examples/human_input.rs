@@ -1,22 +1,4 @@
-//! # Example — Human-in-the-Loop via Tool Call
-//!
-//! Demonstrates Gemini using `HumanInput` as a tool call to pause and collect
-//! a decision from the human before producing its final answer.
-//!
-//! ```text
-//! BlogRequest ──agent(HumanInput tool)──► HumanInput sub-flow ──► FinalResult
-//! ```
-//!
-//! The agent drafts a short blog post, then calls the `HumanInput` tool with
-//! the draft and three choices. Because [`CliMode`] is in context the sub-flow
-//! reads the answer from stdin. The `HumanOutput` is returned to the agent as
-//! a tool result and the agent submits the [`FinalResult`].
-//!
-//! ## Running
-//!
-//! ```shell
-//! GEMINI_API_KEY=<key> cargo run --example human_input
-//! ```
+//! Human-in-the-loop example using `HumanInput` as a tool call.
 
 use pravah::deps::Deps;
 use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
@@ -26,21 +8,17 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-// ── Types ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct BlogRequest {
-    /// The topic to write about.
     topic: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FinalResult {
-    /// A short message describing the outcome based on the human's decision.
     outcome: String,
 }
 
-// ── Agent ─────────────────────────────────────────────────────────────────────
 
 impl Agent for BlogRequest {
     type Output = FinalResult;
@@ -62,7 +40,6 @@ impl Agent for BlogRequest {
     }
 }
 
-// ── Flow ──────────────────────────────────────────────────────────────────────
 
 impl Flow for BlogRequest {
     type Output = FinalResult;
@@ -72,7 +49,6 @@ impl Flow for BlogRequest {
     }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,12 +1,7 @@
-//! Integration tests for the agent tool-call machinery.
-//!
-//! Tests are driven by [`ScriptedFactory`], which replays a pre-programmed
-//! sequence of LLM responses without any real network calls. Each test exercises
-//! one distinct path through the tool-call dispatch logic in `dispatch_agent` /
-//! `handle_tool` / `handle_child_agent`.
+//! Integration tests for agent tool-call dispatch.
 
 use pravah::clients::{ClientError, Role};
-use pravah::flows::{Agent, AgentConfig, AgentError, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, AgentError, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep, PhaseKind};
 use pravah::testing::{CapturingHistoryStore, ScriptedFactory, mock_tool_call};
 use pravah::tools::{Tool, ToolBox, ToolError};
 use pravah::{Context, FlowConf};
@@ -14,13 +9,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-// ── shared helpers ────────────────────────────────────────────────────────────
 
 fn ctx() -> Context {
     Context::new(FlowConf::default())
 }
-
-/// Drives a runtime with a [`ScriptedFactory`] to completion and returns the output.
 /// Returns `Err` if the flow errors or suspends unexpectedly.
 async fn run_to_done<I: Flow>(mut rt: FlowRuntime<I>) -> Result<I::Output, FlowError> {
     for _ in 0..60 {
@@ -40,8 +32,6 @@ async fn run_to_done<I: Flow>(mut rt: FlowRuntime<I>) -> Result<I::Output, FlowE
         detail: "flow did not finish within 60 steps".into(),
     })
 }
-
-/// Same as `run_to_done` but expects the flow to error; returns the error.
 async fn run_to_err<I: Flow>(mut rt: FlowRuntime<I>) -> FlowError {
     for _ in 0..60 {
         match rt.next(ctx()).await {
@@ -54,9 +44,6 @@ async fn run_to_err<I: Flow>(mut rt: FlowRuntime<I>) -> FlowError {
     panic!("flow did not error within 60 steps")
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Shared tool types
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct EchoInput {
@@ -107,9 +94,6 @@ impl Tool for BrokenInput {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 1: direct response (no tool calls)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DirectIn {
@@ -131,8 +115,6 @@ impl Flow for DirectIn {
         FlowGraph::builder().agent::<DirectIn>().build()
     }
 }
-
-/// Agent returns a structured-output response with no tool calls; flow completes in one LLM turn.
 #[tokio::test]
 async fn test_direct_response() {
     let factory = ScriptedFactory::new()
@@ -149,9 +131,6 @@ async fn test_direct_response() {
     assert_eq!(spy.remaining(), 0);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 2: valid single tool call followed by exit
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ValidIn {
@@ -174,15 +153,11 @@ impl Flow for ValidIn {
         FlowGraph::builder().agent::<ValidIn>().build()
     }
 }
-
-/// Agent calls `echo`, receives the result, then calls `submit` with a final value.
 /// The exit sentinel causes the agent to complete with the submitted value.
 #[tokio::test]
 async fn test_valid_tool_call_then_exit() {
     let factory = ScriptedFactory::new()
-        // Turn 1: issue one tool call
         .then_tool_calls(vec![mock_tool_call("c1", "echo", json!({ "text": "hello" }))])
-        // Turn 2 (after tool result in history): call the exit sentinel
         .then_tool_calls(vec![mock_tool_call("c2", "submit", json!({ "result": "echoed:hello" }))]);
     let spy = factory.clone();
 
@@ -194,10 +169,84 @@ async fn test_valid_tool_call_then_exit() {
     assert_eq!(out.result, "echoed:hello");
     assert_eq!(spy.calls().len(), 2, "expected two LLM dispatches");
 }
+#[tokio::test]
+async fn test_inspector_tracks_tool_turns() {
+    let factory = ScriptedFactory::new()
+        .then_tool_calls(vec![mock_tool_call("c1", "echo", json!({ "text": "hello" }))])
+        .then_tool_calls(vec![mock_tool_call("c2", "submit", json!({ "result": "echoed:hello" }))]);
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 3: multiple tool calls in one LLM turn
-// ═══════════════════════════════════════════════════════════════════════════════
+    let mut rt = FlowRuntime::new(ValidIn { query: "echo hello".into() })
+        .unwrap()
+        .with_factory(factory);
+
+    let inspector = rt.inspector();
+    assert_eq!(inspector.depth(), 1);
+    let top = inspector.top_frame().expect("root frame should exist");
+    assert_eq!(top.phase, PhaseKind::None);
+    assert_eq!(top.callable_entry, "ValidIn");
+    assert!(top.locals.iter().any(|local| local.name == "ValidIn"));
+    let root_local = top
+        .locals
+        .iter()
+        .find(|local| local.name == "ValidIn")
+        .expect("root local should be name-resolved");
+    assert_eq!(inspector.name_of(root_local.node_id), Some("ValidIn"));
+    assert_eq!(inspector.history().entries().len(), 1);
+
+    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
+    let inspector = rt.inspector();
+    assert_eq!(inspector.depth(), 2);
+    assert_eq!(
+        inspector.top_frame().expect("agent frame should exist").phase,
+        PhaseKind::Entry
+    );
+
+    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
+    let inspector = rt.inspector();
+    let top = inspector.top_frame().expect("pending tool frame should exist");
+    match &top.phase {
+        PhaseKind::PendingTool {
+            active_calls,
+            waiting_count,
+        } => {
+            assert_eq!(active_calls, &vec!["echo".to_owned()]);
+            assert_eq!(*waiting_count, 0);
+        }
+        other => panic!("expected pending tool phase, got {other:?}"),
+    }
+    let tool_local = top
+        .locals
+        .iter()
+        .find(|local| local.name.starts_with("ValidIn::"))
+        .expect("tool local should be visible while pending");
+    assert_eq!(inspector.name_of(tool_local.node_id), Some(tool_local.name));
+    assert_eq!(inspector.history().entries().len(), 3);
+
+    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
+    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
+    let inspector = rt.inspector();
+    assert_eq!(
+        inspector.top_frame().expect("agent frame should still exist").phase,
+        PhaseKind::Dispatch
+    );
+    let entries = inspector.history().entries();
+    assert!(matches!(entries.last().map(|entry| &entry.message.role), Some(Role::Tool { call_id }) if call_id == "c1"));
+
+    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
+    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
+    let step = rt.next(ctx()).await.unwrap();
+    match step {
+        FlowStep::Done(out) => assert_eq!(out.result, "echoed:hello"),
+        other => panic!("expected completion, got {other:?}"),
+    }
+
+    let inspector = rt.inspector();
+    assert_eq!(inspector.depth(), 0);
+    assert!(inspector.top_frame().is_none());
+    assert!(!inspector.is_suspended());
+    assert_eq!(inspector.suspension_type(), None);
+}
+
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct MultiToolIn {
@@ -220,18 +269,14 @@ impl Flow for MultiToolIn {
         FlowGraph::builder().agent::<MultiToolIn>().build()
     }
 }
-
-/// Agent issues two distinct tool calls in one turn; both execute, then it submits.
 /// Verifies the multi-tool pending loop in `handle_child_agent`.
 #[tokio::test]
 async fn test_multiple_tool_calls_in_one_turn() {
     let factory = ScriptedFactory::new()
-        // Turn 1: two tool calls at once
         .then_tool_calls(vec![
             mock_tool_call("c1", "echo",    json!({ "text": "hi" })),
             mock_tool_call("c2", "reverse", json!({ "text": "hi" })),
         ])
-        // Turn 2: submit after seeing both tool results
         .then_tool_calls(vec![mock_tool_call("c3", "submit", json!({ "summary": "done" }))]);
 
     let rt = FlowRuntime::new(MultiToolIn { text: "hi".into() })
@@ -242,9 +287,6 @@ async fn test_multiple_tool_calls_in_one_turn() {
     assert_eq!(out.summary, "done");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 4: duplicate tool call (same tool twice in one turn)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DupIn {
@@ -267,15 +309,30 @@ impl Flow for DupIn {
         FlowGraph::builder().agent::<DupIn>().build()
     }
 }
-
-/// LLM issues two calls to the same tool (`echo`) in a single turn.
-/// The flow engine must reject this with `AgentError::DuplicateToolCall`.
+/// Both must execute serially (the second is queued behind the first) and then the agent submits.
 #[tokio::test]
-async fn test_duplicate_tool_call_is_rejected() {
+async fn test_same_tool_twice_runs_serially() {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![
             mock_tool_call("c1", "echo", json!({ "text": "a" })),
             mock_tool_call("c2", "echo", json!({ "text": "b" })),
+        ])
+        .then_tool_calls(vec![mock_tool_call("c3", "submit", json!({ "result": "done" }))]);
+
+    let rt = FlowRuntime::new(DupIn { text: "test".into() })
+        .unwrap()
+        .with_factory(factory);
+
+    let out = run_to_done(rt).await.unwrap();
+    assert_eq!(out.result, "done");
+}
+/// The flow engine must reject this with `AgentError::DuplicateToolCall`.
+#[tokio::test]
+async fn test_duplicate_call_id_is_rejected() {
+    let factory = ScriptedFactory::new()
+        .then_tool_calls(vec![
+            mock_tool_call("c1", "echo", json!({ "text": "a" })),
+            mock_tool_call("c1", "echo", json!({ "text": "b" })),
         ]);
 
     let rt = FlowRuntime::new(DupIn { text: "test".into() })
@@ -284,16 +341,11 @@ async fn test_duplicate_tool_call_is_rejected() {
 
     let err = run_to_err(rt).await;
     match err {
-        FlowError::Agent(AgentError::DuplicateToolCall { tool, .. }) => {
-            assert_eq!(tool, "echo");
-        }
+        FlowError::Agent(AgentError::DuplicateToolCall { .. }) => {}
         other => panic!("expected DuplicateToolCall, got: {other}"),
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 5: unknown / missing tool name
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct UnknownIn {
@@ -316,30 +368,21 @@ impl Flow for UnknownIn {
         FlowGraph::builder().agent::<UnknownIn>().build()
     }
 }
-
-/// LLM calls a tool name that is not registered on the agent.
-/// The flow engine must reject this with `AgentError::UnknownTool`.
+/// The error is surfaced as a tool-result so the LLM can recover; the flow must not crash.
 #[tokio::test]
-async fn test_unknown_tool_name_is_rejected() {
+async fn test_unknown_tool_name_becomes_error_result() {
     let factory = ScriptedFactory::new()
-        .then_tool_calls(vec![mock_tool_call("c1", "nonexistent_tool", json!({}))]);
+        .then_tool_calls(vec![mock_tool_call("c1", "nonexistent_tool", json!({}))])
+        .then_tool_calls(vec![mock_tool_call("c2", "submit", json!({ "result": "recovered" }))]);
 
     let rt = FlowRuntime::new(UnknownIn { text: "test".into() })
         .unwrap()
         .with_factory(factory);
 
-    let err = run_to_err(rt).await;
-    match err {
-        FlowError::Agent(AgentError::UnknownTool { tool, .. }) => {
-            assert_eq!(tool, "nonexistent_tool");
-        }
-        other => panic!("expected UnknownTool, got: {other}"),
-    }
+    let out = run_to_done(rt).await.unwrap();
+    assert_eq!(out.result, "recovered");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 6: tool execution error (tool returns Err)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct BrokenIn {
@@ -362,31 +405,21 @@ impl Flow for BrokenIn {
         FlowGraph::builder().agent::<BrokenIn>().build()
     }
 }
-
-/// LLM calls a tool whose `call` implementation always returns `Err`.
-/// The flow engine must surface this as `AgentError::ToolFailed`.
+/// The error is surfaced as a tool-result so the LLM can recover; the flow must not crash.
 #[tokio::test]
-async fn test_tool_execution_error_surfaces_as_tool_failed() {
+async fn test_non_fatal_tool_error_becomes_tool_result() {
     let factory = ScriptedFactory::new()
-        .then_tool_calls(vec![mock_tool_call("c1", "broken", json!({ "_x": 1 }))]);
+        .then_tool_calls(vec![mock_tool_call("c1", "broken", json!({ "_x": 1 }))])
+        .then_tool_calls(vec![mock_tool_call("c2", "submit", json!({ "y": 42 }))]);
 
     let rt = FlowRuntime::new(BrokenIn { x: 1 })
         .unwrap()
         .with_factory(factory);
 
-    let err = run_to_err(rt).await;
-    match err {
-        FlowError::Agent(AgentError::ToolFailed { tool, reason }) => {
-            assert_eq!(tool, "broken");
-            assert!(reason.contains("tool deliberately broken"), "unexpected reason: {reason}");
-        }
-        other => panic!("expected ToolFailed, got: {other}"),
-    }
+    let out = run_to_done(rt).await.unwrap();
+    assert_eq!(out.y, 42);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 7: invalid tool arguments (deserialization failure)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct InvalidArgsIn {
@@ -409,31 +442,21 @@ impl Flow for InvalidArgsIn {
         FlowGraph::builder().agent::<InvalidArgsIn>().build()
     }
 }
-
-/// LLM calls a valid tool but passes args that cannot be deserialized into the
-/// tool's input type. The flow engine surfaces this as `AgentError::ToolFailed`.
+/// The deserialization error is non-fatal: surfaced as a tool-result so the LLM can recover.
 #[tokio::test]
-async fn test_invalid_tool_args_surface_as_tool_failed() {
+async fn test_invalid_tool_args_become_error_result() {
     let factory = ScriptedFactory::new()
-        // `echo` expects `{ "text": string }` — send a wrong shape instead
-        .then_tool_calls(vec![mock_tool_call("c1", "echo", json!({ "wrong_field": 99 }))]);
+        .then_tool_calls(vec![mock_tool_call("c1", "echo", json!({ "wrong_field": 99 }))])
+        .then_tool_calls(vec![mock_tool_call("c2", "submit", json!({ "answer": "recovered" }))]);
 
     let rt = FlowRuntime::new(InvalidArgsIn { query: "test".into() })
         .unwrap()
         .with_factory(factory);
 
-    let err = run_to_err(rt).await;
-    match err {
-        FlowError::Agent(AgentError::ToolFailed { tool, .. }) => {
-            assert_eq!(tool, "echo");
-        }
-        other => panic!("expected ToolFailed, got: {other}"),
-    }
+    let out = run_to_done(rt).await.unwrap();
+    assert_eq!(out.answer, "recovered");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 8: multiple exit-sentinel calls in one turn
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct MultiExitIn {
@@ -456,10 +479,7 @@ impl Flow for MultiExitIn {
         FlowGraph::builder().agent::<MultiExitIn>().build()
     }
 }
-
-/// LLM calls the exit sentinel (`submit`) twice in one turn.
 /// Both calls target the same tool entry slot, so the second triggers
-/// `AgentError::DuplicateToolCall` — multiple exits are not permitted.
 #[tokio::test]
 async fn test_multiple_exit_calls_are_rejected() {
     let factory = ScriptedFactory::new()
@@ -481,9 +501,6 @@ async fn test_multiple_exit_calls_are_rejected() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 9: valid exit via submit (structured exit sentinel)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ExitOnlyIn {
@@ -496,7 +513,6 @@ struct ExitOnlyOut {
 impl Agent for ExitOnlyIn {
     type Output = ExitOnlyOut;
     fn build() -> AgentConfig {
-        // Has a tool so that structured-output mode is bypassed and submit is injected
         AgentConfig::new("Submit immediately.", "test://model")
             .with_tools(ToolBox::new().tool::<EchoInput>())
     }
@@ -507,8 +523,6 @@ impl Flow for ExitOnlyIn {
         FlowGraph::builder().agent::<ExitOnlyIn>().build()
     }
 }
-
-/// LLM calls `submit` directly in the first turn without using any other tool.
 /// Verifies the exit sentinel path completes the agent correctly.
 #[tokio::test]
 async fn test_valid_exit_via_submit_sentinel() {
@@ -525,9 +539,6 @@ async fn test_valid_exit_via_submit_sentinel() {
     assert_eq!(spy.calls().len(), 1, "expected exactly one LLM dispatch");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 10: history message ordering — tool result reaches the LLM
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct HistoryIn {
@@ -550,10 +561,7 @@ impl Flow for HistoryIn {
         FlowGraph::builder().agent::<HistoryIn>().build()
     }
 }
-
-/// After one tool call and before the second LLM dispatch, the messages seen by the
 /// LLM must include, in order:
-///   User message → AssistantToolCalls (with call_id "tc1") → Tool result (call_id "tc1").
 /// This verifies that tool output actually flows through history to the next dispatch.
 #[tokio::test]
 async fn test_tool_result_present_in_second_dispatch() {
@@ -573,19 +581,16 @@ async fn test_tool_result_present_in_second_dispatch() {
 
     let second_msgs = &calls[1].1;
 
-    // There must be an AssistantToolCalls message containing call_id "tc1".
     let has_atc = second_msgs.iter().any(|m| {
         matches!(&m.role, Role::AssistantToolCalls { calls } if calls.iter().any(|c| c.id == "tc1"))
     });
     assert!(has_atc, "second dispatch must include AssistantToolCalls with id tc1; got: {second_msgs:?}");
 
-    // There must be a Tool result message echoing call_id "tc1".
     let has_tool_result = second_msgs.iter().any(|m| {
         matches!(&m.role, Role::Tool { call_id } if call_id == "tc1")
     });
     assert!(has_tool_result, "second dispatch must include Tool result for tc1; got: {second_msgs:?}");
 
-    // AssistantToolCalls must come before the Tool result.
     let atc_pos = second_msgs.iter().position(|m| {
         matches!(&m.role, Role::AssistantToolCalls { .. })
     }).unwrap();
@@ -597,8 +602,6 @@ async fn test_tool_result_present_in_second_dispatch() {
         "AssistantToolCalls (pos {atc_pos}) must precede Tool result (pos {tool_pos})"
     );
 }
-
-/// After two tool calls in one turn, both tool result messages must appear in the
 /// second dispatch, one for each call_id.
 #[tokio::test]
 async fn test_both_tool_results_present_after_multi_call_turn() {
@@ -626,9 +629,6 @@ async fn test_both_tool_results_present_after_multi_call_turn() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 11: multi-round tool chaining (three LLM turns)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ChainIn {
@@ -651,8 +651,6 @@ impl Flow for ChainIn {
         FlowGraph::builder().agent::<ChainIn>().build()
     }
 }
-
-/// Agent calls `echo` three times in separate turns before submitting.
 /// Verifies that the pending-tool state machine handles multiple sequential rounds.
 #[tokio::test]
 async fn test_three_sequential_tool_call_rounds() {
@@ -672,8 +670,6 @@ async fn test_three_sequential_tool_call_rounds() {
     assert_eq!(spy.calls().len(), 4, "expected four LLM dispatches");
     assert_eq!(spy.remaining(), 0);
 }
-
-/// Each subsequent dispatch must include the tool result from the previous turn.
 /// Turn 2 must contain the result for r1; turn 3 must contain results for r1 and r2.
 #[tokio::test]
 async fn test_tool_results_accumulate_across_rounds() {
@@ -691,14 +687,12 @@ async fn test_tool_results_accumulate_across_rounds() {
 
     let calls = spy.calls();
 
-    // Turn 2 sees r1 result.
     let t2 = &calls[1].1;
     assert!(
         t2.iter().any(|m| matches!(&m.role, Role::Tool { call_id } if call_id == "r1")),
         "turn 2 must carry r1 result"
     );
 
-    // Turn 3 sees both r1 and r2 results.
     let t3 = &calls[2].1;
     for id in ["r1", "r2"] {
         assert!(
@@ -708,9 +702,6 @@ async fn test_tool_results_accumulate_across_rounds() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 12: LLM client error mid-flow
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct LlmErrIn {
@@ -733,8 +724,6 @@ impl Flow for LlmErrIn {
         FlowGraph::builder().agent::<LlmErrIn>().build()
     }
 }
-
-/// LLM client returns an error on the very first dispatch.
 /// The error must propagate as `AgentError::LlmFailed`.
 #[tokio::test]
 async fn test_llm_error_on_first_dispatch_propagates() {
@@ -753,8 +742,6 @@ async fn test_llm_error_on_first_dispatch_propagates() {
         other => panic!("expected LlmFailed, got: {other}"),
     }
 }
-
-/// LLM succeeds on the first call (tool call), then errors on the second dispatch.
 /// Verifies the error path is clean after partial state has been written.
 #[tokio::test]
 async fn test_llm_error_on_second_dispatch_propagates() {
@@ -775,9 +762,6 @@ async fn test_llm_error_on_second_dispatch_propagates() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 13: structured output in tool mode (LLM bypasses submit)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct StructModeIn {
@@ -790,8 +774,6 @@ struct StructModeOut {
 impl Agent for StructModeIn {
     type Output = StructModeOut;
     fn build() -> AgentConfig {
-        // registered with tools so the exit sentinel is injected,
-        // but the LLM returns a direct Output rather than calling submit
         AgentConfig::new("Answer directly.", "test://model")
             .with_tools(ToolBox::new().tool::<EchoInput>())
     }
@@ -802,8 +784,6 @@ impl Flow for StructModeIn {
         FlowGraph::builder().agent::<StructModeIn>().build()
     }
 }
-
-/// Even when a toolbox is registered (so submit is injected), the LLM may return a
 /// `ClientOutput::Output` directly. The agent must complete normally with that value.
 #[tokio::test]
 async fn test_direct_output_in_tool_mode_completes_agent() {
@@ -820,9 +800,6 @@ async fn test_direct_output_in_tool_mode_completes_agent() {
     assert_eq!(spy.calls().len(), 1);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 14: submit payload shape mismatch
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct MismatchIn {
@@ -845,10 +822,7 @@ impl Flow for MismatchIn {
         FlowGraph::builder().agent::<MismatchIn>().build()
     }
 }
-
-/// LLM calls `submit` with a JSON payload that does not match `MismatchOut`'s schema
 /// (missing `required_field`). The error must be surfaced — either at the exit-sentinel
-/// boundary or at the final `Done` deserialization step — rather than silently producing
 /// a corrupted output.
 #[tokio::test]
 async fn test_submit_payload_mismatch_is_rejected() {
@@ -859,8 +833,6 @@ async fn test_submit_payload_mismatch_is_rejected() {
         .unwrap()
         .with_factory(factory);
 
-    // The error may surface during flow execution or at Done deserialization.
-    // Either way the output must NOT silently succeed with a zero-value struct.
     let result: Result<MismatchOut, _> = run_to_done(rt).await;
     match result {
         Err(_) => {}
@@ -873,9 +845,6 @@ async fn test_submit_payload_mismatch_is_rejected() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 15: history captured by CapturingHistoryStore
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct StoreIn {
@@ -898,14 +867,9 @@ impl Flow for StoreIn {
         FlowGraph::builder().agent::<StoreIn>().build()
     }
 }
-
-/// CapturingHistoryStore receives a flush after every step.
 /// After two LLM turns (echo + submit) the final snapshot must contain:
-///   - a User message (agent input)
 ///   - an AssistantToolCalls message
-///   - a Tool result message
 ///   - an AssistantToolCalls message (submit)
-/// and the flush count must equal the number of completed steps.
 #[tokio::test]
 async fn test_capturing_store_receives_all_messages() {
     let factory = ScriptedFactory::new()
@@ -936,8 +900,6 @@ async fn test_capturing_store_receives_all_messages() {
     let has_tool = non_evicted.iter().any(|e| matches!(&e.message.role, Role::Tool { call_id } if call_id == "s1"));
     assert!(has_tool, "snapshot must contain the Tool result for s1");
 }
-
-/// Flush is called after every step, so flush_count must grow monotonically
 /// and be at least as large as the number of LLM dispatches.
 #[tokio::test]
 async fn test_store_flush_count_matches_steps() {
@@ -955,21 +917,13 @@ async fn test_store_flush_count_matches_steps() {
 
     run_to_done(rt).await.unwrap();
 
-    // Two LLM turns → at minimum two steps that trigger compaction+flush
     assert!(
         store_spy.flush_count() >= 2,
         "flush count {} too low for a two-turn flow",
         store_spy.flush_count()
     );
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 16: all scripted responses consumed (no leftover queue entries)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// After a successful run every scripted response must have been consumed.
 /// Leftover queue entries indicate the flow took fewer LLM turns than expected,
-/// which means a behaviour change silently under-exercised the scripted scenario.
 #[tokio::test]
 async fn test_no_scripted_responses_remain_after_valid_run() {
     let factory = ScriptedFactory::new()
@@ -990,8 +944,6 @@ async fn test_no_scripted_responses_remain_after_valid_run() {
         spy.remaining()
     );
 }
-
-/// After a direct-output (no tools) run the one queued response must be consumed.
 #[tokio::test]
 async fn test_no_scripted_responses_remain_after_direct_run() {
     let factory = ScriptedFactory::new()
