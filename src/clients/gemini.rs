@@ -1,18 +1,18 @@
 use async_trait::async_trait;
 use gemini_rust::{
-    Content, FunctionCall as GeminiFunctionCall, FunctionCallingMode, FunctionDeclaration,
-    FunctionResponse as GeminiFunctionResponse, Gemini, GenerationResponse,
-    Message as GeminiMessage, Part, Role as GeminiRole, TaskType, Tool as GeminiTool,
-    client::Model as GeminiModel,
+    Blob, Content, FileData as GeminiFileData, FunctionCall as GeminiFunctionCall,
+    FunctionCallingMode, FunctionDeclaration, FunctionResponse as GeminiFunctionResponse,
+    Gemini, GenerationResponse, Message as GeminiMessage, Part, Role as GeminiRole, TaskType,
+    Tool as GeminiTool, client::Model as GeminiModel,
 };
 use serde_json::Value;
 
 use super::super::tools::ToolDefinition;
 use super::schema;
 use super::{
-    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest, EmbedResponse,
-    EmbedTaskType, LlmUrl, Message, Provider, Role,
-    TokenUsage, ToolCall, ToolChoice, parse_json_output, validate_tools,
+    Attachment, Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest,
+    EmbedResponse, EmbedTaskType, LlmUrl, Message, Provider, Role,
+    TokenUsage, ToolCall, ToolChoice, decode_output_text, validate_tools,
 };
 
 fn format_error_chain(e: &dyn std::error::Error) -> String {
@@ -57,7 +57,7 @@ fn build_gemini_messages(history: &[Message]) -> Vec<GeminiMessage> {
                 i += 1;
             }
             Role::User => {
-                msgs.push(GeminiMessage::user(history[i].content.clone()));
+                msgs.push(user_to_message(&history[i]));
                 i += 1;
             }
             Role::Assistant => {
@@ -76,6 +76,51 @@ fn build_gemini_messages(history: &[Message]) -> Vec<GeminiMessage> {
         }
     }
     msgs
+}
+
+fn gemini_part_from_attachment(att: &Attachment) -> Option<Part> {
+    match att {
+        Attachment::Inline { mime_type, data } => Some(Part::InlineData {
+            inline_data: Blob::new(mime_type, data),
+            media_resolution: None,
+        }),
+        Attachment::Url { mime_type, url } => Some(Part::FileData {
+            file_data: GeminiFileData {
+                mime_type: mime_type.clone(),
+                file_uri: url.clone(),
+            },
+        }),
+        Attachment::File { path, .. } => {
+            tracing::warn!(path = %path, "file attachment was not materialized before Gemini serialization; dropping");
+            None
+        }
+    }
+}
+
+fn user_to_message(message: &Message) -> GeminiMessage {
+    if message.attachments.is_empty() {
+        return GeminiMessage::user(message.content.clone());
+    }
+
+    let mut parts = message
+        .attachments
+        .iter()
+        .filter_map(gemini_part_from_attachment)
+        .collect::<Vec<_>>();
+    if !message.content.is_empty() {
+        parts.push(Part::Text {
+            text: message.content.clone(),
+            thought: None,
+            thought_signature: None,
+        });
+    }
+    GeminiMessage {
+        content: Content {
+            parts: Some(parts),
+            role: Some(GeminiRole::User),
+        },
+        role: GeminiRole::User,
+    }
 }
 
 fn build_tools_spec(tools: &[ToolDefinition]) -> Result<Option<GeminiTool>, ClientError> {
@@ -132,6 +177,14 @@ fn tool_responses_to_message(history: &[Message], start: usize) -> (GeminiMessag
         parts.push(Part::FunctionResponse {
             function_response: GeminiFunctionResponse::new(name, val),
         });
+        // Append any attachments produced by this tool call as additional parts.
+        for part in history[i]
+            .attachments
+            .iter()
+            .filter_map(gemini_part_from_attachment)
+        {
+            parts.push(part);
+        }
         i += 1;
     }
     let msg = GeminiMessage {
@@ -177,6 +230,7 @@ fn build_fn_decl(tool: &ToolDefinition) -> Result<FunctionDeclaration, ClientErr
 fn map_response(
     response: GenerationResponse,
     tools_enabled: bool,
+    wants_json_output: bool,
 ) -> Result<ClientResponse, ClientError> {
     let usage = response.usage_metadata.as_ref().map(|usage| TokenUsage {
         input: usage.prompt_token_count.map(|v| v as u32),
@@ -224,11 +278,25 @@ fn map_response(
     }
     Ok(ClientResponse::new(
         Provider::Gemini,
-        ClientOutput::Output(parse_json_output(&text)?),
+        ClientOutput::Output(decode_output_text(&text, wants_json_output)?),
     )
     .with_usage(usage)
     .with_provider_model(provider_model)
     .with_raw_metadata(raw_metadata))
+}
+
+fn wants_json_output(options: &ClientOptions, tools_enabled: bool) -> bool {
+    !tools_enabled && options.wants_json_output()
+}
+
+fn response_schema(options: &ClientOptions, tools_enabled: bool) -> Option<Value> {
+    if !wants_json_output(options, tools_enabled) {
+        return None;
+    }
+    options
+        .output_schema
+        .as_ref()
+        .map(|value| schema::sanitize_strict(value.clone()))
 }
 
 impl GeminiClient {
@@ -236,6 +304,7 @@ impl GeminiClient {
         &self,
         messages: Vec<GeminiMessage>,
         tools_enabled: bool,
+        wants_json_output: bool,
         response_schema: Option<Value>,
     ) -> Result<GenerationResponse, ClientError> {
         let client = &self.client;
@@ -247,8 +316,8 @@ impl GeminiClient {
         let mut builder = client
             .generate_content()
             .with_thinking_budget(thinking_budget);
-        if let Some(p) = &self.options.preamble {
-            builder = builder.with_system_prompt(p.clone());
+        if let Some(p) = self.options.effective_preamble() {
+            builder = builder.with_system_prompt(p);
         }
         builder = builder.with_messages(messages);
         if tools_enabled {
@@ -261,10 +330,11 @@ impl GeminiClient {
                     .with_tool(tool_spec)
                     .with_function_calling_mode(mode);
             }
-        } else if let Some(schema) = response_schema {
-            builder = builder
-                .with_response_mime_type("application/json")
-                .with_response_schema(schema);
+        } else if wants_json_output {
+            builder = builder.with_response_mime_type("application/json");
+            if let Some(schema) = response_schema {
+                builder = builder.with_response_schema(schema);
+            }
         }
         builder
             .execute()
@@ -294,19 +364,13 @@ impl Client for GeminiClient {
         let tools_enabled =
             !self.options.tools.is_empty() && self.options.tool_choice != ToolChoice::Disabled;
         validate_tools(Provider::Gemini, &self.options.tools)?;
-        let response_schema = if !tools_enabled {
-            self.options
-                .output_schema
-                .as_ref()
-                .map(|s| schema::sanitize_strict(s.clone()))
-        } else {
-            None
-        };
+        let wants_json_output = wants_json_output(&self.options, tools_enabled);
+        let response_schema = response_schema(&self.options, tools_enabled);
         let gemini_messages = build_gemini_messages(messages);
         let response = self
-            .call_api(gemini_messages, tools_enabled, response_schema)
+            .call_api(gemini_messages, tools_enabled, wants_json_output, response_schema)
             .await?;
-        map_response(response, tools_enabled)
+        map_response(response, tools_enabled, wants_json_output)
     }
 
     async fn embed(&self, request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {
@@ -369,6 +433,31 @@ mod tests {
         assert_eq!(msgs.len(), 1);
     }
 
+    /// User attachments are converted into Gemini inline or file parts.
+    #[test]
+    fn build_messages_user_with_attachment_adds_inline_part() {
+        let history = vec![Message {
+            role: Role::User,
+            content: "describe this".into(),
+            attachments: vec![Attachment::Inline {
+                mime_type: "image/png".into(),
+                data: "aGVsbG8=".into(),
+            }],
+            usage: None,
+        }];
+        let msgs = build_gemini_messages(&history);
+        let parts = msgs[0]
+            .content
+            .parts
+            .as_ref()
+            .expect("user message parts should be present");
+        assert!(matches!(parts.first(), Some(Part::InlineData { .. })));
+        assert!(matches!(
+            parts.last(),
+            Some(Part::Text { text, .. }) if text == "describe this"
+        ));
+    }
+
     /// Preambles are not duplicated into history messages.
     #[test]
     fn build_messages_preamble_is_separate() {
@@ -401,6 +490,7 @@ mod tests {
                     calls: vec![make_call("call-42", "read_file")],
                 },
                 content: String::new(),
+                attachments: Vec::new(),
                 usage: None,
             },
             Message {
@@ -408,6 +498,7 @@ mod tests {
                     call_id: "call-42".into(),
                 },
                 content: r#"{"temp":22}"#.into(),
+                attachments: Vec::new(),
                 usage: None,
             },
         ];
@@ -427,6 +518,7 @@ mod tests {
                     calls: vec![make_call("c1", "project_outline")],
                 },
                 content: String::new(),
+                attachments: Vec::new(),
                 usage: None,
             },
             Message {
@@ -434,10 +526,38 @@ mod tests {
                     call_id: "c1".into(),
                 },
                 content: r#"{"files":[]}"}"#.into(),
+                attachments: Vec::new(),
                 usage: None,
             },
         ];
         let msgs = build_gemini_messages(&history);
         assert_eq!(msgs.len(), 3);
+    }
+
+    #[test]
+    fn response_mode_requires_input_schema() {
+        let no_schema = ClientOptions::default();
+        assert!(!wants_json_output(&no_schema, false));
+        assert!(response_schema(&no_schema, false).is_none());
+
+        let with_schema = ClientOptions::default()
+            .with_input_schema(json!({ "type": "object" }))
+            .with_output_schema(json!({
+                "type": "object",
+                "properties": {
+                    "answer": { "type": "string" }
+                },
+                "required": ["answer"]
+            }));
+        assert!(wants_json_output(&with_schema, false));
+        assert!(response_schema(&with_schema, false).is_some());
+    }
+
+    #[test]
+    fn response_mode_without_output_schema_still_uses_json_when_input_schema_is_present() {
+        let with_input_schema = ClientOptions::default()
+            .with_input_schema(json!({ "type": "object" }));
+        assert!(wants_json_output(&with_input_schema, false));
+        assert!(response_schema(&with_input_schema, false).is_none());
     }
 }

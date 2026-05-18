@@ -4,26 +4,27 @@ use serde_json::{Value, json};
 
 use super::super::tools::ToolDefinition;
 use super::{
-    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmUrl, Message, Provider,
-    Role, TokenUsage, ToolCall, ToolChoice, parse_json_output, validate_tools,
+    Attachment, Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmUrl, Message,
+    Provider, Role, TokenUsage, ToolCall, ToolChoice, configured_base_url,
+    decode_output_text, required_api_key, validate_tools,
 };
+
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 
 struct AnthropicClient {
     http: HttpClient,
     api_key: String,
+    base_url: String,
     model: String,
     options: ClientOptions,
 }
 
 pub fn new_client(url: &LlmUrl, options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
-    let api_key = url
-        .api_key
-        .clone()
-        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .ok_or_else(|| ClientError::Llm("ANTHROPIC_API_KEY is not set".into()))?;
+    let api_key = required_api_key(url, "ANTHROPIC_API_KEY")?;
     Ok(Box::new(AnthropicClient {
         http: HttpClient::new(),
         api_key,
+        base_url: configured_base_url(url, DEFAULT_BASE_URL),
         model: url.model.clone(),
         options,
     }))
@@ -48,24 +49,77 @@ impl Client for AnthropicClient {
 
         let tools_enabled =
             !self.options.tools.is_empty() && self.options.tool_choice != ToolChoice::Disabled;
+        let wants_json_output = !tools_enabled && self.options.wants_json_output();
         let payload = build_payload(&self.model, &self.options, messages, tools_enabled);
+        let response = send_messages_request(
+            &self.http,
+            messages_endpoint(&self.base_url),
+            &self.api_key,
+            &payload,
+        )
+        .await?;
 
-        let response: Value = self
-            .http
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| ClientError::Llm(e.to_string()))?
-            .error_for_status()
-            .map_err(|e| ClientError::Llm(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| ClientError::Llm(e.to_string()))?;
+        map_response(response, tools_enabled, wants_json_output)
+    }
+}
 
-        map_response(response, tools_enabled)
+async fn send_messages_request(
+    http: &HttpClient,
+    endpoint: String,
+    api_key: &str,
+    payload: &Value,
+) -> Result<Value, ClientError> {
+    let response = http
+        .post(endpoint)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(payload)
+        .send()
+        .await
+        .map_err(|e| ClientError::Llm(e.to_string()))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| ClientError::Llm(e.to_string()))?;
+    if !status.is_success() {
+        return Err(ClientError::Llm(format_anthropic_http_error(status.as_u16(), &body)));
+    }
+
+    serde_json::from_str(&body).map_err(|e| ClientError::Deserialize {
+        source: e,
+        raw: body,
+    })
+}
+
+fn messages_endpoint(base_url: &str) -> String {
+    format!("{}/messages", base_url.trim_end_matches('/'))
+}
+
+fn format_anthropic_http_error(status: u16, body: &str) -> String {
+    let response: Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(_) => {
+            let trimmed = body.trim();
+            if trimmed.is_empty() {
+                return format!("Anthropic API request failed with HTTP {status}");
+            }
+            return format!("Anthropic API request failed with HTTP {status}: {trimmed}");
+        }
+    };
+
+    let error = response.get("error").unwrap_or(&response);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown Anthropic error");
+    let error_type = error.get("type").and_then(Value::as_str);
+    match error_type {
+        Some(error_type) => format!(
+            "Anthropic API request failed with HTTP {status} ({error_type}): {message}"
+        ),
+        None => format!("Anthropic API request failed with HTTP {status}: {message}"),
     }
 }
 
@@ -101,8 +155,8 @@ fn build_payload(
     }
 
     let mut system = Vec::new();
-    if let Some(preamble) = &options.preamble {
-        system.push(preamble.clone());
+    if let Some(preamble) = options.effective_preamble() {
+        system.push(preamble);
     }
     for msg in messages {
         if matches!(msg.role, Role::System) {
@@ -118,7 +172,7 @@ fn build_payload(
         if options.tool_choice == ToolChoice::Required {
             payload["tool_choice"] = json!({ "type": "any" });
         }
-    } else {
+    } else if options.wants_json_output() {
         let schema_hint = options
             .output_schema
             .as_ref()
@@ -139,7 +193,7 @@ fn build_messages(messages: &[Message]) -> Vec<Value> {
     for msg in messages {
         match &msg.role {
             Role::System => {}
-            Role::User => out.push(json!({ "role": "user", "content": msg.content })),
+            Role::User => out.push(build_user_message(msg)),
             Role::Assistant => out.push(json!({ "role": "assistant", "content": msg.content })),
             Role::AssistantToolCalls { calls } => {
                 let mut content = Vec::new();
@@ -156,17 +210,69 @@ fn build_messages(messages: &[Message]) -> Vec<Value> {
                 }
                 out.push(json!({ "role": "assistant", "content": content }));
             }
-            Role::Tool { call_id } => out.push(json!({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": call_id,
-                    "content": msg.content,
-                }]
-            })),
+            Role::Tool { call_id } => {
+                let mut content = anthropic_image_blocks(&msg.attachments);
+                content.push(json!({ "type": "text", "text": msg.content }));
+                out.push(json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": call_id,
+                        "content": content,
+                    }]
+                }));
+            }
         }
     }
     out
+}
+
+fn build_user_message(msg: &Message) -> Value {
+    if msg.attachments.is_empty() {
+        return json!({ "role": "user", "content": msg.content });
+    }
+
+    let mut content = anthropic_image_blocks(&msg.attachments);
+    if !msg.content.is_empty() {
+        content.push(json!({ "type": "text", "text": msg.content }));
+    }
+    json!({ "role": "user", "content": content })
+}
+
+fn anthropic_image_blocks(attachments: &[Attachment]) -> Vec<Value> {
+    attachments
+        .iter()
+        .filter_map(anthropic_image_block)
+        .collect()
+}
+
+fn anthropic_image_block(att: &Attachment) -> Option<Value> {
+    match att {
+        Attachment::Inline { mime_type, data } if mime_type.starts_with("image/") => Some(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime_type,
+                "data": data,
+            }
+        })),
+        Attachment::Url { mime_type, url } if mime_type.starts_with("image/") => Some(json!({
+            "type": "image",
+            "source": {
+                "type": "url",
+                "media_type": mime_type,
+                "url": url,
+            }
+        })),
+        Attachment::Inline { mime_type, .. } | Attachment::Url { mime_type, .. } => {
+            tracing::warn!(mime_type = %mime_type, "Anthropic attachment support is image-only for this path; dropping attachment");
+            None
+        }
+        Attachment::File { path, .. } => {
+            tracing::warn!(path = %path, "file attachment was not materialized before Anthropic serialization; dropping");
+            None
+        }
+    }
 }
 
 fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
@@ -182,7 +288,11 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
-fn map_response(response: Value, tools_enabled: bool) -> Result<ClientResponse, ClientError> {
+fn map_response(
+    response: Value,
+    tools_enabled: bool,
+    wants_json_output: bool,
+) -> Result<ClientResponse, ClientError> {
     let usage = response.get("usage").map(usage_from_value);
     let provider_model = response
         .get("model")
@@ -212,7 +322,7 @@ fn map_response(response: Value, tools_enabled: bool) -> Result<ClientResponse, 
     let text = text.ok_or(ClientError::EmptyResponse)?;
     Ok(ClientResponse::new(
         Provider::Anthropic,
-        ClientOutput::Output(parse_json_output(&text)?),
+        ClientOutput::Output(decode_output_text(&text, wants_json_output)?),
     )
     .with_usage(usage)
     .with_provider_model(provider_model)
@@ -272,6 +382,34 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn custom_base_url_builds_anthropic_messages_endpoint() {
+        assert_eq!(
+            messages_endpoint("https://anthropic-proxy.example/v1/"),
+            "https://anthropic-proxy.example/v1/messages"
+        );
+    }
+
+    /// Anthropic HTTP errors keep the API's structured message and type.
+    #[test]
+    fn formats_structured_http_errors() {
+        let msg = format_anthropic_http_error(
+            404,
+            r#"{"type":"error","error":{"type":"not_found_error","message":"model claude-3-5-haiku-latest not found"}}"#,
+        );
+        assert!(msg.contains("HTTP 404"));
+        assert!(msg.contains("not_found_error"));
+        assert!(msg.contains("model claude-3-5-haiku-latest not found"));
+    }
+
+    /// Anthropic HTTP errors fall back to the raw body when it is not valid JSON.
+    #[test]
+    fn formats_unstructured_http_errors() {
+        let msg = format_anthropic_http_error(500, "upstream unavailable");
+        assert!(msg.contains("HTTP 500"));
+        assert!(msg.contains("upstream unavailable"));
+    }
+
+    #[test]
     fn messages_encode_tool_exchange() {
         let msgs = build_messages(&[
             Message::user("hi"),
@@ -284,8 +422,7 @@ mod tests {
                         thought_signatures: None,
                     }],
                 },
-                content: "checking".into(),
-                usage: None,
+                content: "checking".into(),                attachments: Vec::new(),                usage: None,
             },
             Message::tool_output("toolu_1".into(), r#"{"ok":true}"#),
         ]);
@@ -301,11 +438,120 @@ mod tests {
             "usage": {"input_tokens": 7, "output_tokens": 3},
             "content": [{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"q":"x"}}]
         });
-        let mapped = map_response(response, true).unwrap();
+        let mapped = map_response(response, true, false).unwrap();
         assert_eq!(mapped.usage.unwrap().total(), Some(10));
         match mapped.output {
             ClientOutput::ToolCalls { calls, .. } => assert_eq!(calls[0].id, "toolu_1"),
             _ => panic!("expected tool call"),
+        }
+    }
+
+    #[test]
+    fn payload_appends_input_schema_to_system_prompt() {
+        let options = ClientOptions::default()
+            .with_preamble("You are helpful.")
+            .with_input_schema(json!({
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string" }
+                },
+                "required": ["kind"]
+            }));
+
+        let payload = build_payload("claude", &options, &[Message::user("hi")], false);
+
+        let system = payload["system"]
+            .as_str()
+            .expect("system prompt should be a string");
+        assert!(system.contains("You are helpful."));
+        assert!(system.contains("The user message is JSON."));
+        assert!(system.contains("\"required\":[\"kind\"]"));
+    }
+
+    #[test]
+    fn payload_without_input_schema_keeps_text_mode() {
+        let payload = build_payload(
+            "claude",
+            &ClientOptions::default().with_preamble("You are helpful."),
+            &[Message::user("hi")],
+            false,
+        );
+        assert_eq!(payload["system"], "You are helpful.");
+    }
+
+    #[test]
+    fn payload_with_input_schema_and_no_output_schema_requests_json_textually() {
+        let payload = build_payload(
+            "claude",
+            &ClientOptions::default()
+                .with_preamble("You are helpful.")
+                .with_input_schema(json!({ "type": "object" })),
+            &[Message::user("hi")],
+            false,
+        );
+        let system = payload["system"].as_str().expect("system prompt should be present");
+        assert!(system.contains("Return only valid JSON."));
+    }
+
+    /// User attachments are emitted as Anthropic image blocks ahead of text.
+    #[test]
+    fn user_attachments_use_image_blocks() {
+        let msgs = build_messages(&[Message {
+            role: Role::User,
+            content: "describe this".into(),
+            attachments: vec![Attachment::Inline {
+                mime_type: "image/png".into(),
+                data: "aGVsbG8=".into(),
+            }],
+            usage: None,
+        }]);
+
+        assert_eq!(msgs[0]["content"][0]["type"], "image");
+        assert_eq!(msgs[0]["content"][1]["type"], "text");
+    }
+
+    #[test]
+    fn schema_and_tools_anthropic_prefers_tools_over_output_hint() {
+        let options = ClientOptions::default()
+            .with_preamble("You are helpful.")
+            .with_tool_choice(ToolChoice::Required)
+            .with_output_schema(json!({
+                "type": "object",
+                "properties": {
+                    "answer": { "type": "string" }
+                },
+                "required": ["answer"]
+            }))
+            .with_tools(vec![ToolDefinition {
+                name: "submit".into(),
+                description: "Submit the final answer.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string" }
+                    },
+                    "required": ["answer"]
+                }),
+            }]);
+
+        let payload = build_payload("claude", &options, &[Message::user("hi")], true);
+
+        assert_eq!(payload["system"], "You are helpful.");
+        assert_eq!(payload["tool_choice"]["type"], "any");
+        assert_eq!(payload["tools"][0]["name"], "submit");
+    }
+
+    #[test]
+    fn map_response_without_json_mode_returns_string() {
+        let response = json!({
+            "id": "msg_1",
+            "model": "claude-x",
+            "content": [{"type":"text","text":"plain text"}]
+        });
+        let mapped = map_response(response, false, false).unwrap();
+        match mapped.output {
+            ClientOutput::Output(Value::String(text)) => assert_eq!(text, "plain text"),
+            _ => panic!("expected string output"),
         }
     }
 }

@@ -17,8 +17,11 @@ use crate::flows::phase::Phase;
 use crate::flows::state::{Callable, FlowState};
 use crate::flows::validation::{validate, validate_nodes};
 use crate::{
-    clients::{ClientFactory, ClientOptions, ClientOutput, Message, Role, ToolChoice},
-    commons::Agent,
+    clients::{
+        ClientFactory, ClientOptions, ClientOutput, Message, Role, ToolChoice,
+        materialize_messages,
+    },
+    commons::{Agent, make_agent_message},
     context::Context,
     tools::{SuspendedValue, ToolBox},
     tools::base::ToolOutcome,
@@ -33,7 +36,9 @@ pub(crate) struct StateNode {
 pub(crate) struct AgentInfo {
     pub(crate) id: NodeId,
     pub(crate) tool_box: Arc<ToolBox>,
+    pub(crate) make_message: fn(Value, &Context) -> Result<Message, FlowError>,
     pub(crate) preamble: String,
+    pub(crate) input_schema: Value,
     pub(crate) model: String,
     pub(crate) exit: NodeId,
     pub(crate) output_schema: Value,
@@ -427,7 +432,7 @@ impl FlowGraph {
             .call_at_index(node.tool_index, input, ctx)
             .await
         {
-            Ok(ToolOutcome::Value(value)) => {
+            Ok(ToolOutcome::Value(value, attachments)) => {
                 tracing::debug!(tool = %tool_name, "tool executed");
                 if !states.set_state(node.exit, value, Some(node.entry)) {
                     return Err(FlowError::Internal {
@@ -435,6 +440,7 @@ impl FlowGraph {
                         detail: "frame stack empty on set_state".into(),
                     });
                 }
+                states.set_tool_attachments(node.exit, attachments);
                 Ok(FlowStep::Continue)
             }
             Ok(ToolOutcome::Exit(value)) => {
@@ -514,7 +520,7 @@ impl FlowGraph {
     /// Pushes a child frame for a flow-backed tool.
     fn handle_flow_tool(
         inner: &Arc<FlowGraph>,
-        outer: &FlowGraph,
+        _outer: &FlowGraph,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
         let tool_node_id = inner.parent_entry.ok_or_else(|| FlowError::Internal {
@@ -593,12 +599,8 @@ impl FlowGraph {
                     .clone();
 
                 let agent_name = flow.interner.name_of(node.id);
-                history.push(
-                    &session_id,
-                    agent_name,
-                    Message::from_json(Role::User, &input)
-                        .map_err(AgentError::Serialize)?,
-                );
+                let message = (node.make_message)(input, &ctx)?;
+                history.push(&session_id, agent_name, message);
 
                 // Entry is consumed once the user message is in history.
                 let dispatch_val = serde_json::to_value(AgentContinuation::Dispatch)
@@ -610,7 +612,7 @@ impl FlowGraph {
                     });
                 }
 
-                Self::dispatch_agent(node, flow, factory, history, states).await
+                Self::dispatch_agent(node, flow, factory, ctx, history, states).await
             }
 
             Phase::Continue(val) => {
@@ -638,13 +640,14 @@ impl FlowGraph {
                         // Collect finished tool results and append them to history.
                         for (exit_id, (call_id, _)) in active.iter() {
                             if let Some(value) = states.take_state(*exit_id) {
+                                let attachments = states.take_tool_attachments(*exit_id);
+                                let content = serde_json::to_string(&value).map_err(AgentError::Serialize)?;
+                                let mut msg = Message::tool_output(call_id.clone(), content);
+                                msg.attachments = attachments;
                                 history.push(
                                     &session_id,
                                     agent_id,
-                                    Message::tool_output(
-                                        call_id.clone(),
-                                        serde_json::to_string(&value).map_err(AgentError::Serialize)?,
-                                    ),
+                                    msg,
                                 );
                                 completions.push(*exit_id);
                             }
@@ -698,7 +701,7 @@ impl FlowGraph {
                         return Ok(FlowStep::Continue);
                     }
                     Some(AgentContinuation::Dispatch) => {
-                        Self::dispatch_agent(node, flow, factory, history, states).await
+                        Self::dispatch_agent(node, flow, factory, ctx, history, states).await
                     }
                     None => Ok(FlowStep::Continue),
                 }
@@ -713,6 +716,7 @@ impl FlowGraph {
         node: &AgentInfo,
         flow: &FlowGraph,
         factory: &dyn ClientFactory,
+        ctx: Context,
         history: &mut FlowHistory,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
@@ -731,6 +735,7 @@ impl FlowGraph {
 
         let options = ClientOptions::default()
             .with_preamble(node.preamble.clone())
+            .with_input_schema(node.input_schema.clone())
             .with_tools(defs)
             .with_tool_choice(tool_choice)
             .with_output_schema(node.output_schema.clone())
@@ -757,7 +762,22 @@ impl FlowGraph {
             }
         })?;
 
-        let session_msgs = history.for_session(&session_id);
+        let session_msgs = materialize_messages(&history.for_session(&session_id), &ctx)
+            .await
+            .map_err(|e| {
+                tracing::error!(agent = %agent_name, error = %e, "message materialization failed");
+                AgentError::LlmFailed {
+                    agent: agent_name.clone(),
+                    reason: e.to_string(),
+                }
+            })?;
+        tracing::debug!(
+            agent = %agent_name,
+            session_id = %session_id,
+            message_count = session_msgs.len(),
+            last_message = ?session_msgs.last(),
+            "LLM request history"
+        );
 
         let response =
             client
@@ -770,6 +790,13 @@ impl FlowGraph {
                         reason: e.to_string(),
                     }
                 })?;
+
+        tracing::debug!(
+            agent = %agent_name,
+            session_id = %session_id,
+            response = ?response,
+            "LLM response"
+        );
 
         let usage = response.usage;
 
@@ -809,6 +836,7 @@ impl FlowGraph {
                         calls: calls.clone(),
                     },
                     content: thought.unwrap_or_default(),
+                    attachments: Vec::new(),
                     usage,
                 };
                 history.push(&session_id, &agent_name, atc_msg);
@@ -1076,6 +1104,14 @@ impl FlowBuilder {
             return self;
         }
         let mut schema_gen = schemars::r#gen::SchemaGenerator::default();
+        let input_schema = match serde_json::to_value(schema_gen.root_schema_for::<A>()) {
+            Ok(v) => v,
+            Err(e) => {
+                self.errors
+                    .push(format!("agent '{}' input schema: {e}", name_str));
+                return self;
+            }
+        };
         let output_schema = match serde_json::to_value(schema_gen.root_schema_for::<A::Output>()) {
             Ok(v) => v,
             Err(e) => {
@@ -1102,7 +1138,9 @@ impl FlowBuilder {
         let agent_info = AgentInfo {
             id: name,
             tool_box: Arc::clone(&tool_box),
+            make_message: make_agent_message::<A>,
             preamble: config.preamble,
+            input_schema,
             model: config.model_url,
             exit: output_id,
             output_schema,
@@ -1490,5 +1528,300 @@ impl FlowBuilder {
         }
         validate_nodes(&self.flow.nodes, &self.flow)?;
         Ok(self.flow)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::clients::{
+        Attachment, Client, ClientError, ClientFactory, ClientOptions, ClientOutput,
+        ClientResponse, Message, Provider, ToolCall,
+    };
+    use crate::commons::{Agent, AgentConfig};
+    use crate::context::Context;
+    use crate::tools::{Tool, ToolBox, ToolError, ToolOutput};
+
+    #[derive(Clone)]
+    enum ResponseMode {
+        Output(Value),
+        ToolCall { name: String, args: Value },
+    }
+
+    #[derive(Clone)]
+    struct CapturingFactory {
+        options: Arc<Mutex<Vec<ClientOptions>>>,
+        mode: ResponseMode,
+    }
+
+    struct CapturingClient {
+        mode: ResponseMode,
+    }
+
+    impl CapturingFactory {
+        fn new(mode: ResponseMode) -> Self {
+            Self {
+                options: Arc::new(Mutex::new(Vec::new())),
+                mode,
+            }
+        }
+
+        fn captured(&self) -> Vec<ClientOptions> {
+            self.options
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl Client for CapturingClient {
+        fn provider(&self) -> Provider {
+            Provider::OpenAi
+        }
+
+        async fn execute(&self, _messages: &[Message]) -> Result<ClientResponse, ClientError> {
+            match &self.mode {
+                ResponseMode::Output(value) => Ok(ClientResponse::new(
+                    Provider::OpenAi,
+                    ClientOutput::Output(value.clone()),
+                )),
+                ResponseMode::ToolCall { name, args } => Ok(ClientResponse::new(
+                    Provider::OpenAi,
+                    ClientOutput::ToolCalls {
+                        thought: None,
+                        calls: vec![ToolCall {
+                            id: "call-1".into(),
+                            name: name.clone(),
+                            args: args.clone(),
+                            thought_signatures: None,
+                        }],
+                    },
+                )),
+            }
+        }
+    }
+
+    impl ClientFactory for CapturingFactory {
+        fn create(
+            &self,
+            _model_url: &str,
+            options: ClientOptions,
+        ) -> Result<Box<dyn Client>, ClientError> {
+            self.options
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(options);
+            Ok(Box::new(CapturingClient {
+                mode: self.mode.clone(),
+            }))
+        }
+    }
+
+    #[derive(Clone, Serialize, Deserialize, JsonSchema)]
+    struct PlainAgentInput {
+        topic: String,
+    }
+
+    #[derive(Clone, Serialize, Deserialize, JsonSchema)]
+    struct PlainAgentOutput {
+        answer: String,
+    }
+
+    impl Agent for PlainAgentInput {
+        type Output = PlainAgentOutput;
+
+        fn build() -> AgentConfig {
+            AgentConfig::new("Answer briefly.", "openai://test-model")
+        }
+    }
+
+    impl Flow for PlainAgentInput {
+        type Output = PlainAgentOutput;
+
+        fn build() -> Result<FlowGraph, FlowError> {
+            FlowGraph::builder().agent::<PlainAgentInput>().build()
+        }
+    }
+
+    #[derive(Clone, Serialize, Deserialize, JsonSchema)]
+    struct MessageAgentInput {
+        topic: String,
+    }
+
+    #[derive(Clone, Serialize, Deserialize, JsonSchema)]
+    struct MessageAgentOutput {
+        answer: String,
+    }
+
+    impl Agent for MessageAgentInput {
+        type Output = MessageAgentOutput;
+
+        fn to_message(self, _ctx: &Context) -> Result<Message, FlowError> {
+            let mut message = Message::user(format!("Inspect this screenshot about {}", self.topic));
+            message.attachments.push(Attachment::Inline {
+                mime_type: "image/png".into(),
+                data: "aGVsbG8=".into(),
+            });
+            Ok(message)
+        }
+
+        fn build() -> AgentConfig {
+            AgentConfig::new("Answer briefly.", "openai://test-model")
+        }
+    }
+
+    impl Flow for MessageAgentInput {
+        type Output = MessageAgentOutput;
+
+        fn build() -> Result<FlowGraph, FlowError> {
+            FlowGraph::builder().agent::<MessageAgentInput>().build()
+        }
+    }
+
+    /// Looks up a thing.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[schemars(rename = "lookup")]
+    struct LookupTool {
+        query: String,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+    struct LookupToolOutput {
+        result: String,
+    }
+
+    impl Tool for LookupTool {
+        type Output = LookupToolOutput;
+
+        async fn call(self, _ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError> {
+            Ok(ToolOutput::plain(LookupToolOutput { result: self.query }))
+        }
+    }
+
+    #[derive(Clone, Serialize, Deserialize, JsonSchema)]
+    struct ToolAgentInput {
+        topic: String,
+    }
+
+    #[derive(Clone, Serialize, Deserialize, JsonSchema)]
+    struct ToolAgentOutput {
+        answer: String,
+    }
+
+    impl Agent for ToolAgentInput {
+        type Output = ToolAgentOutput;
+
+        fn build() -> AgentConfig {
+            AgentConfig::new("Use tools before answering.", "openai://test-model")
+                .with_tools(ToolBox::new().tool::<LookupTool>())
+        }
+    }
+
+    impl Flow for ToolAgentInput {
+        type Output = ToolAgentOutput;
+
+        fn build() -> Result<FlowGraph, FlowError> {
+            FlowGraph::builder().agent::<ToolAgentInput>().build()
+        }
+    }
+
+    /// Agents without tools stay in structured-output mode and send no submit sentinel.
+    #[tokio::test]
+    async fn schema_and_tools_dispatch_without_tools_uses_structured_output() {
+        let factory = CapturingFactory::new(ResponseMode::Output(json!({ "answer": "done" })));
+        let mut runtime = crate::flows::runtime::FlowRuntime::new(PlainAgentInput {
+            topic: "rust".into(),
+        })
+        .expect("runtime should build")
+        .with_factory(factory.clone());
+
+        let _ = runtime.next(Context::default()).await.expect("entry step should run");
+        let _ = runtime.next(Context::default()).await.expect("dispatch step should run");
+
+        let captured = factory.captured();
+        assert_eq!(captured.len(), 1);
+        let options = &captured[0];
+        assert!(options.tools.is_empty());
+        assert_eq!(options.tool_choice, crate::clients::ToolChoice::Disabled);
+        let expected = serde_json::to_value(schemars::schema_for!(PlainAgentOutput))
+            .expect("output schema should serialize");
+        assert_eq!(options.output_schema.as_ref(), Some(&expected));
+    }
+
+    /// Agent entry uses `to_message` to populate the first user turn.
+    #[tokio::test]
+    async fn agent_entry_uses_custom_to_message() {
+        let mut runtime = crate::flows::runtime::FlowRuntime::new(MessageAgentInput {
+            topic: "rust".into(),
+        })
+        .expect("runtime should build")
+        .with_factory(CapturingFactory::new(ResponseMode::Output(json!({ "answer": "done" }))));
+
+        let _ = runtime.next(Context::default()).await.expect("entry step should run");
+        let _ = runtime.next(Context::default()).await.expect("dispatch step should run");
+
+        let entry = runtime
+            .inspector()
+            .history()
+            .entries()
+            .iter()
+            .find(|entry| entry.message.content == "Inspect this screenshot about rust")
+            .expect("custom user message should be recorded");
+
+        assert!(matches!(entry.message.role, Role::User));
+        assert!(matches!(
+            entry.message.attachments.as_slice(),
+            [Attachment::Inline { mime_type, data }]
+                if mime_type == "image/png" && data == "aGVsbG8="
+        ));
+    }
+
+    /// Agents with tools carry the output schema twice: as metadata and as the submit tool schema.
+    #[tokio::test]
+    async fn schema_and_tools_dispatch_with_tools_injects_exit_tool() {
+        let exit_name = ToolBox::new().exit_name().to_owned();
+        let factory = CapturingFactory::new(ResponseMode::ToolCall {
+            name: exit_name.clone(),
+            args: json!({ "answer": "done" }),
+        });
+        let mut runtime = crate::flows::runtime::FlowRuntime::new(ToolAgentInput {
+            topic: "rust".into(),
+        })
+        .expect("runtime should build")
+        .with_factory(factory.clone());
+
+        let _ = runtime.next(Context::default()).await.expect("entry step should run");
+        let _ = runtime.next(Context::default()).await.expect("dispatch step should run");
+
+        let captured = factory.captured();
+        assert_eq!(captured.len(), 1);
+        let options = &captured[0];
+        assert_eq!(options.tool_choice, crate::clients::ToolChoice::Required);
+        assert_eq!(options.tools.len(), 2);
+
+        let lookup = options
+            .tools
+            .iter()
+            .find(|tool| tool.name == "lookup")
+            .expect("user tool should be present");
+        assert!(lookup.parameters.is_object());
+
+        let submit = options
+            .tools
+            .iter()
+            .find(|tool| tool.name == exit_name)
+            .expect("submit sentinel should be present");
+        let expected = serde_json::to_value(schemars::schema_for!(ToolAgentOutput))
+            .expect("output schema should serialize");
+        assert_eq!(options.output_schema.as_ref(), Some(&expected));
+        assert_eq!(submit.parameters, expected);
     }
 }

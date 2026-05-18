@@ -3,7 +3,7 @@
 use pravah::clients::{ClientError, Role};
 use pravah::flows::{Agent, AgentConfig, AgentError, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep, PhaseKind};
 use pravah::testing::{CapturingHistoryStore, ScriptedFactory, mock_tool_call};
-use pravah::tools::{Tool, ToolBox, ToolError};
+use pravah::tools::{Tool, ToolBox, ToolError, ToolOutput};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,9 @@ async fn run_to_err<I: Flow>(mut rt: FlowRuntime<I>) -> FlowError {
 }
 
 
+/// Echoes the input text.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(rename = "echo")]
 struct EchoInput {
     text: String,
 }
@@ -55,14 +57,14 @@ struct EchoOutput {
 }
 impl Tool for EchoInput {
     type Output = EchoOutput;
-    fn name() -> &'static str { "echo" }
-    fn description() -> &'static str { "Echoes the input text." }
-    async fn call(self, _ctx: Context) -> Result<Self::Output, ToolError> {
-        Ok(EchoOutput { echoed: self.text })
+    async fn call(self, _ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError> {
+        Ok(ToolOutput::plain(EchoOutput { echoed: self.text }))
     }
 }
 
+/// Reverses the input text.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(rename = "reverse")]
 struct ReverseInput {
     text: String,
 }
@@ -72,14 +74,14 @@ struct ReverseOutput {
 }
 impl Tool for ReverseInput {
     type Output = ReverseOutput;
-    fn name() -> &'static str { "reverse" }
-    fn description() -> &'static str { "Reverses the input text." }
-    async fn call(self, _ctx: Context) -> Result<Self::Output, ToolError> {
-        Ok(ReverseOutput { reversed: self.text.chars().rev().collect() })
+    async fn call(self, _ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError> {
+        Ok(ToolOutput::plain(ReverseOutput { reversed: self.text.chars().rev().collect() }))
     }
 }
 
+/// Always fails.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(rename = "broken")]
 struct BrokenInput {
     _x: i64,
 }
@@ -87,9 +89,7 @@ struct BrokenInput {
 struct BrokenOutput;
 impl Tool for BrokenInput {
     type Output = BrokenOutput;
-    fn name() -> &'static str { "broken" }
-    fn description() -> &'static str { "Always fails." }
-    async fn call(self, _ctx: Context) -> Result<Self::Output, ToolError> {
+    async fn call(self, _ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError> {
         Err(ToolError::Other("tool deliberately broken".into()))
     }
 }

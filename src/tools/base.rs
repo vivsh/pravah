@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::clients::ToolCall;
+use crate::clients::{Attachment, ToolCall};
 use crate::context::Context;
 use crate::deps::DepsError;
 
@@ -43,11 +43,40 @@ impl ToolError {
     }
 }
 
+/// Output returned by a [`Tool`] implementation.
+/// Use [`ToolOutput::plain`] for tools that return only JSON data.
+/// Use [`ToolOutput::with_attachment`] or set `attachments` directly when the
+/// tool also produces binary data (images, audio, etc.) that the model should see.
+pub struct ToolOutput<T: serde::Serialize> {
+    /// The structured data output, serialized as JSON and returned to the LLM.
+    pub data: T,
+    /// Binary or URL attachments propagated alongside the tool result.
+    pub attachments: Vec<Attachment>,
+}
+
+impl<T: serde::Serialize> ToolOutput<T> {
+    /// Creates a plain output with no attachments.
+    pub fn plain(data: T) -> Self {
+        Self { data, attachments: Vec::new() }
+    }
+
+    /// Creates an output with a single attachment.
+    pub fn with_attachment(data: T, attachment: Attachment) -> Self {
+        Self { data, attachments: vec![attachment] }
+    }
+}
+
+impl<T: serde::Serialize> From<T> for ToolOutput<T> {
+    fn from(data: T) -> Self {
+        Self::plain(data)
+    }
+}
+
 /// Internal tool dispatch outcome.
 /// `Exit` and `Suspend` are control signals, not user-facing errors.
 pub(crate) enum ToolOutcome {
-    /// Normal tool result.
-    Value(Value),
+    /// Normal tool result plus any binary attachments the tool produced.
+    Value(Value, Vec<Attachment>),
     /// Exit sentinel result carrying the agent's final output.
     Exit(Value),
     /// Suspend tool result carrying the pending value and expected resume type.
@@ -186,35 +215,62 @@ pub struct ToolDefinition {
 
 /// Typed tool trait.
 /// Implement it on the struct that represents the tool input.
+/// The tool name defaults to the snake_case form of the struct name.
+/// Override with `#[schemars(rename = "my_name")]`.
+/// The tool description is taken from the struct's doc comment.
 pub trait Tool: DeserializeOwned + JsonSchema + Sized + Send {
     /// Typed output produced by the tool.
     type Output: serde::Serialize + JsonSchema + DeserializeOwned + Send;
 
-    fn name() -> &'static str;
-
-    fn description() -> &'static str;
-
     /// Executes the tool.
-    fn call(self, ctx: Context) -> impl Future<Output = Result<Self::Output, ToolError>> + Send;
+    fn call(self, ctx: Context) -> impl Future<Output = Result<ToolOutput<Self::Output>, ToolError>> + Send;
 
     /// Builds the advertised [`ToolDefinition`].
     fn definition() -> ToolDefinition {
-        let parameters = serde_json::to_value(schemars::schema_for!(Self))
-            .unwrap_or_else(|e| {
-                tracing::error!(tool = Self::name(), error = %e, "tool schema serialization failed; parameters will be empty");
-                Value::Object(Default::default())
-            });
-        ToolDefinition {
-            name: Self::name().to_owned(),
-            description: Self::description().to_owned(),
-            parameters,
-        }
+        let name = pascal_to_snake(Self::schema_name().as_ref());
+        let schema = schemars::schema_for!(Self);
+        let description = schema
+            .schema
+            .metadata
+            .as_ref()
+            .and_then(|m| m.description.as_deref())
+            .unwrap_or_default()
+            .to_owned();
+        let parameters = serde_json::to_value(schema).unwrap_or_else(|e| {
+            tracing::error!(tool = %name, error = %e, "tool schema serialization failed; parameters will be empty");
+            Value::Object(Default::default())
+        });
+        ToolDefinition { name, description, parameters }
     }
+}
+
+/// Converts a PascalCase (or camelCase) identifier to snake_case.
+/// Handles acronym runs: `HTTPRequest` → `http_request`.
+fn pascal_to_snake(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    let chars: Vec<char> = s.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            let prev = chars[i - 1];
+            let next = chars.get(i + 1).copied();
+            if prev.is_lowercase()
+                || prev.is_ascii_digit()
+                || (prev.is_uppercase() && next.map_or(false, |n| n.is_lowercase()))
+            {
+                out.push('_');
+            }
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
 }
 
 /// Creates a type-erased dispatcher for tool type `T`.
 pub(crate) fn make_dispatcher<T: Tool + 'static>() -> Box<dyn ErasedTool> {
-    Box::new(ToolDispatcher::<T>(PhantomData))
+    Box::new(ToolDispatcher::<T> {
+        name: pascal_to_snake(T::schema_name().as_ref()),
+        _phantom: PhantomData,
+    })
 }
 
 /// Object-safe wrapper around [`Tool`] for heterogeneous collections.
@@ -239,12 +295,15 @@ pub(crate) trait ErasedTool: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<ToolOutcome, ToolError>> + Send + 'a>>;
 }
 
-/// Zero-sized adapter that exposes any [`Tool`] as an [`ErasedTool`].
-struct ToolDispatcher<T>(PhantomData<fn() -> T>);
+/// Adapter that exposes any [`Tool`] as an [`ErasedTool`], caching the derived name.
+struct ToolDispatcher<T> {
+    name: String,
+    _phantom: PhantomData<fn() -> T>,
+}
 
 impl<T: Tool + 'static> ErasedTool for ToolDispatcher<T> {
     fn name(&self) -> &str {
-        T::name()
+        &self.name
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -267,7 +326,8 @@ impl<T: Tool + 'static> ErasedTool for ToolDispatcher<T> {
         Box::pin(async move {
             let input: T = serde_json::from_value(args).map_err(ToolError::Deserialize)?;
             let output = input.call(ctx).await?;
-            serde_json::to_value(output).map_err(ToolError::Serialize).map(ToolOutcome::Value)
+            let value = serde_json::to_value(output.data).map_err(ToolError::Serialize)?;
+            Ok(ToolOutcome::Value(value, output.attachments))
         })
     }
 }
@@ -386,7 +446,7 @@ impl ToolBox {
             .find(|t| t.name() == tool_call.name)
             .ok_or_else(|| ToolError::UnknownTool(tool_call.name.clone()))?;
         match tool.call_raw(ctx, tool_call.args.clone()).await? {
-            ToolOutcome::Value(v) => Ok(v),
+            ToolOutcome::Value(v, _) => Ok(v),
             ToolOutcome::Exit(_) | ToolOutcome::Suspend { .. } => {
                 unreachable!("internal sentinel tools must not be dispatched via ToolBox::call")
             }
@@ -437,69 +497,79 @@ impl ErasedTool for SuspendTool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
-
     use serde_json::json;
-    use tempfile::NamedTempFile;
 
     use super::*;
     use crate::context::FlowConf;
-    use crate::tools::fs::{ReadFile, WriteFile};
 
-    fn ctx(dir: &std::path::Path) -> Context {
-        Context::new(FlowConf {
-            working_dir: Some(dir.to_path_buf()),
-            ..Default::default()
-        })
+    fn ctx() -> Context {
+        Context::new(FlowConf::default())
     }
 
-    /// Verifies that all registered tool definitions are collected with correct names.
+    /// Simple inline tool used only in these unit tests.
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    #[schemars(rename = "greet")]
+    struct Greet {
+        name: String,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+    struct GreetOutput {
+        message: String,
+    }
+
+    impl Tool for Greet {
+        type Output = GreetOutput;
+        async fn call(self, _ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError> {
+            Ok(ToolOutput::plain(GreetOutput { message: format!("hello {}", self.name) }))
+        }
+    }
+
+    /// `ToolBox::definitions` collects tool definitions with derived names.
     #[test]
     fn toolbox_collects_definitions() {
-        let tb = ToolBox::new()
-            .tool::<ReadFile>()
-            .tool::<WriteFile>();
+        let tb = ToolBox::new().tool::<Greet>();
         let defs = tb.definitions();
-        assert_eq!(defs.len(), 2);
-        assert_eq!(defs[0].name, "read_file");
-        assert_eq!(defs[1].name, "write_file");
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "greet");
     }
 
-    /// Verifies that `call` dispatches to the correct tool and returns its output.
+    /// `ToolBox::call` dispatches by name and returns the serialised output.
     #[tokio::test]
-    async fn toolbox_dispatches_read_file() {
-        let mut tmp = NamedTempFile::new().unwrap();
-        write!(tmp, "hello toolbox").unwrap();
-        let path = tmp.path().to_string_lossy().into_owned();
-
-        let tb = ToolBox::new().tool::<ReadFile>();
+    async fn toolbox_dispatches_tool() {
+        let tb = ToolBox::new().tool::<Greet>();
         let tc = ToolCall {
             id: "1".into(),
-            name: "read_file".into(),
-            args: json!({ "path": path }),
+            name: "greet".into(),
+            args: json!({ "name": "world" }),
             thought_signatures: None,
         };
-        let result = tb
-            .call(&tc, ctx(tmp.path().parent().unwrap()))
-            .await
-            .unwrap();
-        assert_eq!(result["content"], "hello toolbox");
+        let result = tb.call(&tc, ctx()).await.unwrap();
+        assert_eq!(result["message"], "hello world");
     }
 
-    /// Verifies that calling an unregistered tool name returns `ToolError::UnknownTool`.
+    /// Calling an unregistered tool name returns `ToolError::UnknownTool`.
     #[tokio::test]
     async fn toolbox_unknown_tool_returns_error() {
-        let tb = ToolBox::new().tool::<ReadFile>();
+        let tb = ToolBox::new().tool::<Greet>();
         let tc = ToolCall {
             id: "x".into(),
             name: "no_such_tool".into(),
             args: json!({}),
             thought_signatures: None,
         };
-        let err = tb
-            .call(&tc, ctx(std::path::Path::new("/tmp")))
-            .await
-            .unwrap_err();
+        let err = tb.call(&tc, ctx()).await.unwrap_err();
         assert!(matches!(err, ToolError::UnknownTool(n) if n == "no_such_tool"));
+    }
+
+    /// `pascal_to_snake` converts common PascalCase patterns correctly.
+    #[test]
+    fn pascal_to_snake_converts_correctly() {
+        assert_eq!(pascal_to_snake("ReadFile"), "read_file");
+        assert_eq!(pascal_to_snake("RunCommand"), "run_command");
+        assert_eq!(pascal_to_snake("HTTPRequest"), "http_request");
+        assert_eq!(pascal_to_snake("MultiPatchFile"), "multi_patch_file");
+        assert_eq!(pascal_to_snake("already_snake"), "already_snake");
+        assert_eq!(pascal_to_snake("Broken2"), "broken2");
     }
 }

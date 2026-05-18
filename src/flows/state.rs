@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::clients::Attachment;
 use crate::flows::interner::NodeId;
 use crate::flows::phase::Phase;
 
@@ -33,6 +34,12 @@ pub(crate) struct Suspension {
 pub(crate) struct Frame {
     /// State owned by this frame.
     pub(crate) states: IndexMap<NodeId, Value>,
+    /// Attachments produced by tool calls, keyed by the tool's exit slot.
+    /// Populated by `handle_tool` when a tool produces non-empty attachments,
+    /// consumed by `handle_agent` when building the tool-result history message.
+    /// Skipped during serialization when empty so existing snapshots remain valid.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub(crate) tool_attachments: IndexMap<NodeId, Vec<Attachment>>,
     /// Phase for the active multi-step node, if any.
     pub(crate) phase: Option<Phase>,
 
@@ -47,6 +54,7 @@ impl Frame {
     fn new(call: Callable) -> Self {
         Self {
             states: IndexMap::new(),
+            tool_attachments: IndexMap::new(),
             phase: None,
             callable: call,
             session_id: Uuid::now_v7().to_string(),
@@ -202,6 +210,25 @@ impl FlowState {
 
     pub fn take_state(&mut self, id: NodeId) -> Option<Value> {
         self.top_mut().and_then(|f| f.states.shift_remove(&id))
+    }
+
+    /// Stores tool attachments for the given exit slot.
+    /// Does nothing if the stack is empty or the vec is empty.
+    pub(crate) fn set_tool_attachments(&mut self, id: NodeId, attachments: Vec<Attachment>) {
+        if attachments.is_empty() {
+            return;
+        }
+        if let Some(frame) = self.top_mut() {
+            frame.tool_attachments.insert(id, attachments);
+        }
+    }
+
+    /// Removes and returns tool attachments for the given exit slot.
+    /// Returns an empty vec when none were stored.
+    pub(crate) fn take_tool_attachments(&mut self, id: NodeId) -> Vec<Attachment> {
+        self.top_mut()
+            .and_then(|f| f.tool_attachments.shift_remove(&id))
+            .unwrap_or_default()
     }
 
     /// Moves a state slot to the end of the top-frame ordering.

@@ -3,7 +3,7 @@
 use pravah::clients::{ClientError, Role};
 use pravah::flows::{Agent, AgentConfig, AgentError, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
 use pravah::testing::{ScriptedFactory, mock_tool_call};
-use pravah::tools::{Tool, ToolBox, ToolError};
+use pravah::tools::{Tool, ToolBox, ToolError, ToolOutput};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,9 @@ async fn run_to_err<I: Flow>(mut rt: FlowRuntime<I>) -> FlowError {
 }
 
 
+/// Echoes the input text.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(rename = "echo")]
 struct EchoInput {
     text: String,
 }
@@ -56,14 +58,14 @@ struct EchoOutput {
 }
 impl Tool for EchoInput {
     type Output = EchoOutput;
-    fn name() -> &'static str { "echo" }
-    fn description() -> &'static str { "Echoes the input text." }
-    async fn call(self, _ctx: Context) -> Result<Self::Output, ToolError> {
-        Ok(EchoOutput { echoed: self.text })
+    async fn call(self, _ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError> {
+        Ok(ToolOutput::plain(EchoOutput { echoed: self.text }))
     }
 }
 
+/// Reverses the input text.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(rename = "reverse")]
 struct ReverseInput {
     text: String,
 }
@@ -73,13 +75,13 @@ struct ReverseOutput {
 }
 impl Tool for ReverseInput {
     type Output = ReverseOutput;
-    fn name() -> &'static str { "reverse" }
-    fn description() -> &'static str { "Reverses the input text." }
-    async fn call(self, _ctx: Context) -> Result<Self::Output, ToolError> {
-        Ok(ReverseOutput { reversed: self.text.chars().rev().collect() })
+    async fn call(self, _ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError> {
+        Ok(ToolOutput::plain(ReverseOutput { reversed: self.text.chars().rev().collect() }))
     }
 }
+/// Always fails with a non-fatal error.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(rename = "broken")]
 struct BrokenInput {
     _x: i64,
 }
@@ -87,13 +89,13 @@ struct BrokenInput {
 struct BrokenOutput;
 impl Tool for BrokenInput {
     type Output = BrokenOutput;
-    fn name() -> &'static str { "broken" }
-    fn description() -> &'static str { "Always fails with a non-fatal error." }
-    async fn call(self, _ctx: Context) -> Result<Self::Output, ToolError> {
+    async fn call(self, _ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError> {
         Err(ToolError::Other("tool deliberately broken".into()))
     }
 }
+/// A second tool that always fails non-fatally.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(rename = "broken2")]
 struct Broken2Input {
     _y: i64,
 }
@@ -101,14 +103,13 @@ struct Broken2Input {
 struct Broken2Output;
 impl Tool for Broken2Input {
     type Output = Broken2Output;
-    fn name() -> &'static str { "broken2" }
-    fn description() -> &'static str { "A second tool that always fails non-fatally." }
-    async fn call(self, _ctx: Context) -> Result<Self::Output, ToolError> {
+    async fn call(self, _ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError> {
         Err(ToolError::Other("broken2 deliberately failed".into()))
     }
 }
-/// This causes the flow engine to abort with `AgentError::ToolFailed`.
+/// Simulates a path-escape security violation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(rename = "fatal_escape")]
 struct FatalEscapeInput {
     _x: i64,
 }
@@ -116,9 +117,7 @@ struct FatalEscapeInput {
 struct FatalEscapeOutput;
 impl Tool for FatalEscapeInput {
     type Output = FatalEscapeOutput;
-    fn name() -> &'static str { "fatal_escape" }
-    fn description() -> &'static str { "Simulates a path-escape security violation." }
-    async fn call(self, _ctx: Context) -> Result<Self::Output, ToolError> {
+    async fn call(self, _ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError> {
         Err(ToolError::PathEscape("../secret".to_owned()))
     }
 }

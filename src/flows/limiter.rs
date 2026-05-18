@@ -5,7 +5,10 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
-use crate::clients::{Client, ClientError, ClientFactory, ClientOptions, ClientResponse, EmbedRequest, EmbedResponse, LlmUrl, Message, Provider};
+use crate::clients::{
+    Client, ClientError, ClientFactory, ClientFactoryLayer, ClientOptions, ClientResponse,
+    EmbedRequest, EmbedResponse, LlmUrl, Message, Provider,
+};
 
 /// Per-provider rate-limit settings.
 /// `rpm` sets the sustained rate and `burst` sets the immediate bucket depth.
@@ -118,6 +121,23 @@ pub struct RateLimitingFactory<F: ClientFactory> {
     buckets: HashMap<String, Arc<TokenBucket>>,
 }
 
+/// Layer that applies per-provider request limits.
+#[derive(Debug, Clone, Default)]
+pub struct RateLimitLayer {
+    limits: Vec<(Provider, RateLimit)>,
+}
+
+impl RateLimitLayer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_limit(mut self, provider: Provider, limit: RateLimit) -> Self {
+        self.limits.push((provider, limit));
+        self
+    }
+}
+
 impl<F: ClientFactory> RateLimitingFactory<F> {
     /// Wraps `inner` with no limits configured.
     pub fn new(inner: F) -> Self {
@@ -152,6 +172,17 @@ impl<F: ClientFactory> ClientFactory for RateLimitingFactory<F> {
             })),
             None => Ok(inner),
         }
+    }
+}
+
+impl<F: ClientFactory> ClientFactoryLayer<F> for RateLimitLayer {
+    type Factory = RateLimitingFactory<F>;
+
+    fn layer(self, inner: F) -> Self::Factory {
+        self.limits.into_iter().fold(
+            RateLimitingFactory::new(inner),
+            |factory, (provider, limit)| factory.with_limit(provider, limit),
+        )
     }
 }
 

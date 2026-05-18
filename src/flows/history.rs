@@ -230,6 +230,7 @@ mod tests {
             Message {
                 role: Role::AssistantToolCalls { calls },
                 content: String::new(),
+                attachments: Vec::new(),
                 usage: None,
             },
         );
@@ -317,6 +318,7 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: "x".into(),
+                attachments: Vec::new(),
                 usage: Some(TokenUsage {
                     input: Some(5),
                     output: None,

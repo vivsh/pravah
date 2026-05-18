@@ -171,6 +171,7 @@ mod tests {
             Message {
                 role: Role::AssistantToolCalls { calls },
                 content: String::new(),
+                attachments: Vec::new(),
                 usage: None,
             },
         );

@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use tokio::time::Duration;
 
 use crate::clients::{
-    Client, ClientError, ClientFactory, ClientOptions, ClientResponse, EmbedRequest, EmbedResponse,
-    Message, Provider,
+    Client, ClientError, ClientFactory, ClientFactoryLayer, ClientOptions, ClientResponse,
+    EmbedRequest, EmbedResponse, Message, Provider,
 };
 
 /// Retry settings for transient client failures.
@@ -109,6 +109,18 @@ pub struct RetryingFactory<F: ClientFactory> {
     config: RetryConfig,
 }
 
+/// Layer that wraps clients with retry behavior.
+#[derive(Debug, Clone, Default)]
+pub struct RetryLayer {
+    config: RetryConfig,
+}
+
+impl RetryLayer {
+    pub fn new(config: RetryConfig) -> Self {
+        Self { config }
+    }
+}
+
 impl<F: ClientFactory> RetryingFactory<F> {
     /// Wraps `inner` with the default retry policy.
     pub fn new(inner: F) -> Self {
@@ -136,6 +148,14 @@ impl<F: ClientFactory> ClientFactory for RetryingFactory<F> {
             inner,
             config: self.config.clone(),
         }))
+    }
+}
+
+impl<F: ClientFactory> ClientFactoryLayer<F> for RetryLayer {
+    type Factory = RetryingFactory<F>;
+
+    fn layer(self, inner: F) -> Self::Factory {
+        RetryingFactory::new(inner).with_config(self.config)
     }
 }
 

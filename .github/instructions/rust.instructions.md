@@ -17,3 +17,5 @@ applyTo: "**/*.rs"
 - For sqlx, avoid the query macros. Use FromRow where possible instead of using try_get to fetch information from a row
 
 - Donot make any assumption that breaks any existing public interface. If there is any confusion then ask but never ever work with assumptions.
+- Avoid verbose comments. Only document the purpose, constraints and failure modes of a function. Avoid describing the implementation details in comments. The code should be self-explanatory enough to not require comments for implementation details.
+- Avoid comments that are only used to separate sections of code. Instead, use whitespace and clear function boundaries to improve readability.

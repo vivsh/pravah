@@ -4,26 +4,26 @@ use serde_json::{Value, json};
 
 use super::super::tools::ToolDefinition;
 use super::{
-    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest, EmbedResponse,
-    LlmUrl, Message, Provider, Role, TokenUsage, ToolCall, ToolChoice, parse_json_output,
-    validate_tools,
+    Attachment, Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest,
+    EmbedResponse, LlmUrl, Message, Provider, Role, TokenUsage, ToolCall, ToolChoice,
+    configured_base_url, decode_output_text, optional_api_key, validate_tools,
 };
+
+const DEFAULT_BASE_URL: &str = "http://localhost:11434";
 
 struct OllamaClient {
     http: HttpClient,
+    api_key: Option<String>,
     base_url: String,
     model: String,
     options: ClientOptions,
 }
 
 pub fn new_client(url: &LlmUrl, options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
-    let base_url = url
-        .base_url
-        .clone()
-        .ok_or_else(|| ClientError::InvalidUrl("ollama URL missing base URL".into()))?;
     Ok(Box::new(OllamaClient {
         http: HttpClient::new(),
-        base_url,
+        api_key: optional_api_key(url, "OLLAMA_API_KEY"),
+        base_url: configured_base_url(url, DEFAULT_BASE_URL),
         model: url.model.clone(),
         options,
     }))
@@ -41,16 +41,11 @@ impl Client for OllamaClient {
 
         let tools_enabled =
             !self.options.tools.is_empty() && self.options.tool_choice != ToolChoice::Disabled;
+        let wants_json_output = !tools_enabled && self.options.wants_json_output();
         let payload = build_payload(&self.model, &self.options, messages, tools_enabled);
-        let endpoint = format!(
-            "{}/v1/chat/completions",
-            self.base_url.trim_end_matches('/')
-        );
+        let endpoint = chat_completions_endpoint(&self.base_url);
 
-        let response: Value = self
-            .http
-            .post(endpoint)
-            .bearer_auth("ollama")
+        let response: Value = with_bearer_auth(self.http.post(endpoint), self.api_key.as_deref())
             .json(&payload)
             .send()
             .await
@@ -61,15 +56,13 @@ impl Client for OllamaClient {
             .await
             .map_err(|e| ClientError::Llm(e.to_string()))?;
 
-        map_response(response, tools_enabled)
+        map_response(response, tools_enabled, wants_json_output)
     }
 
     async fn embed(&self, request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {
-        let endpoint = format!("{}/api/embed", self.base_url.trim_end_matches('/'));
+        let endpoint = embed_endpoint(&self.base_url);
         let payload = json!({ "model": self.model, "input": request.input });
-        let response: Value = self
-            .http
-            .post(endpoint)
+        let response: Value = with_bearer_auth(self.http.post(endpoint), self.api_key.as_deref())
             .json(&payload)
             .send()
             .await
@@ -86,6 +79,24 @@ impl Client for OllamaClient {
             .map(|v| v.as_f64().unwrap_or(0.0) as f32)
             .collect();
         Ok(EmbedResponse { values })
+    }
+}
+
+fn chat_completions_endpoint(base_url: &str) -> String {
+    format!("{}/v1/chat/completions", base_url.trim_end_matches('/'))
+}
+
+fn embed_endpoint(base_url: &str) -> String {
+    format!("{}/api/embed", base_url.trim_end_matches('/'))
+}
+
+fn with_bearer_auth(
+    request: reqwest::RequestBuilder,
+    api_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match api_key {
+        Some(api_key) => request.bearer_auth(api_key),
+        None => request,
     }
 }
 
@@ -112,7 +123,12 @@ fn build_payload(
 ) -> Value {
     let mut payload = json!({
         "model": model,
-        "messages": build_messages(messages, options.preamble.as_deref(), model, options.thinking),
+        "messages": build_messages(
+            messages,
+            options.effective_preamble().as_deref(),
+            model,
+            options.thinking,
+        ),
         "stream": false,
     });
 
@@ -125,16 +141,17 @@ fn build_payload(
         if options.tool_choice == ToolChoice::Required {
             payload["tool_choice"] = Value::String("required".into());
         }
-    } else if let Some(schema) = &options.output_schema {
-        payload["response_format"] = json!({
-            "type": "json_schema",
-            "json_schema": {
-                "name": "agent_output",
-                "schema": schema,
-            }
-        });
-    } else {
-        payload["response_format"] = json!({ "type": "json_object" });
+    } else if options.wants_json_output() {
+        payload["response_format"] = match &options.output_schema {
+            Some(schema) => json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "agent_output",
+                    "schema": schema,
+                }
+            }),
+            None => json!({ "type": "json_object" }),
+        };
     }
 
     payload
@@ -155,16 +172,7 @@ fn build_messages(
     for msg in history {
         match &msg.role {
             Role::System => out.push(json!({ "role": "system", "content": msg.content })),
-            Role::User => {
-                let content = if first_user && !thinking && model.starts_with("qwen3") {
-                    first_user = false;
-                    format!("/no_think\n\n{}", msg.content)
-                } else {
-                    first_user = false;
-                    msg.content.clone()
-                };
-                out.push(json!({ "role": "user", "content": content }));
-            }
+            Role::User => out.push(build_user_message(msg, &mut first_user, model, thinking)),
             Role::Assistant => out.push(json!({ "role": "assistant", "content": msg.content })),
             Role::AssistantToolCalls { calls } => {
                 let tool_calls: Vec<Value> = calls
@@ -186,14 +194,76 @@ fn build_messages(
                     "tool_calls": tool_calls,
                 }));
             }
-            Role::Tool { call_id } => out.push(json!({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": msg.content,
-            })),
+            Role::Tool { call_id } => {
+                out.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": msg.content,
+                }));
+                push_tool_attachment_messages(&mut out, &msg.attachments);
+            }
         }
     }
     out
+}
+
+fn build_user_message(message: &Message, first_user: &mut bool, model: &str, thinking: bool) -> Value {
+    let content = user_content(message, first_user, model, thinking);
+    if message.attachments.is_empty() {
+        return json!({ "role": "user", "content": content });
+    }
+
+    let mut parts = message
+        .attachments
+        .iter()
+        .filter_map(ollama_image_part)
+        .collect::<Vec<_>>();
+    if !content.is_empty() {
+        parts.push(json!({ "type": "text", "text": content }));
+    }
+    json!({ "role": "user", "content": parts })
+}
+
+fn push_tool_attachment_messages(out: &mut Vec<Value>, attachments: &[Attachment]) {
+    for part in attachments.iter().filter_map(ollama_image_part) {
+        out.push(json!({
+            "role": "user",
+            "content": [part]
+        }));
+    }
+}
+
+fn user_content(message: &Message, first_user: &mut bool, model: &str, thinking: bool) -> String {
+    if *first_user && !thinking && model.starts_with("qwen3") {
+        *first_user = false;
+        format!("/no_think\n\n{}", message.content)
+    } else {
+        *first_user = false;
+        message.content.clone()
+    }
+}
+
+fn ollama_image_part(att: &Attachment) -> Option<Value> {
+    let url = match att {
+        Attachment::Inline { mime_type, data } if mime_type.starts_with("image/") => {
+            Some(format!("data:{mime_type};base64,{data}"))
+        }
+        Attachment::Url { mime_type, url } if mime_type.starts_with("image/") => Some(url.clone()),
+        Attachment::Inline { mime_type, .. } | Attachment::Url { mime_type, .. } => {
+            tracing::warn!(mime_type = %mime_type, "Ollama attachment support is image-only for this path; dropping attachment");
+            None
+        }
+        Attachment::File { path, .. } => {
+            tracing::warn!(path = %path, "file attachment was not materialized before Ollama serialization; dropping");
+            None
+        }
+    }?;
+    Some(json!({
+        "type": "image_url",
+        "image_url": {
+            "url": url,
+        }
+    }))
 }
 
 fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
@@ -212,7 +282,11 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
-fn map_response(response: Value, tools_enabled: bool) -> Result<ClientResponse, ClientError> {
+fn map_response(
+    response: Value,
+    tools_enabled: bool,
+    wants_json_output: bool,
+) -> Result<ClientResponse, ClientError> {
     let usage = response.get("usage").map(usage_from_value);
     let provider_model = response
         .get("model")
@@ -260,7 +334,7 @@ fn map_response(response: Value, tools_enabled: bool) -> Result<ClientResponse, 
         .ok_or(ClientError::EmptyResponse)?;
     Ok(ClientResponse::new(
         Provider::Ollama,
-        ClientOutput::Output(parse_json_output(text)?),
+        ClientOutput::Output(decode_output_text(text, wants_json_output)?),
     )
     .with_usage(usage)
     .with_provider_model(provider_model)
@@ -325,6 +399,18 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn custom_base_url_builds_ollama_endpoints() {
+        assert_eq!(
+            chat_completions_endpoint("https://ollama-proxy.example/"),
+            "https://ollama-proxy.example/v1/chat/completions"
+        );
+        assert_eq!(
+            embed_endpoint("https://ollama-proxy.example"),
+            "https://ollama-proxy.example/api/embed"
+        );
+    }
+
+    #[test]
     fn qwen_no_think_is_added_to_first_user_message() {
         let messages = build_messages(&[Message::user("do it")], None, "qwen3:8b", false);
         assert!(
@@ -333,6 +419,51 @@ mod tests {
                 .unwrap()
                 .starts_with("/no_think")
         );
+    }
+
+    /// User attachments are emitted as OpenAI-compatible image_url parts.
+    #[test]
+    fn user_attachments_use_content_parts() {
+        let messages = build_messages(
+            &[Message {
+                role: Role::User,
+                content: "describe this".into(),
+                attachments: vec![Attachment::Inline {
+                    mime_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                }],
+                usage: None,
+            }],
+            None,
+            "qwen3-vl:8b",
+            false,
+        );
+        assert_eq!(messages[0]["content"][0]["type"], "image_url");
+        assert_eq!(messages[0]["content"][1]["type"], "text");
+    }
+
+    /// Tool-result attachments are replayed as synthetic user image turns.
+    #[test]
+    fn tool_attachments_become_synthetic_user_images() {
+        let messages = build_messages(
+            &[Message {
+                role: Role::Tool {
+                    call_id: "call-1".into(),
+                },
+                content: "done".into(),
+                attachments: vec![Attachment::Inline {
+                    mime_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                }],
+                usage: None,
+            }],
+            None,
+            "qwen3-vl:8b",
+            false,
+        );
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"][0]["type"], "image_url");
     }
 
     #[test]
@@ -344,7 +475,7 @@ mod tests {
             false,
         );
         assert_eq!(payload["model"], "custom-local");
-        assert_eq!(payload["response_format"]["type"], "json_object");
+        assert!(payload.get("response_format").is_none());
     }
 
     /// Structured-output mode includes the provided output schema.
@@ -359,7 +490,9 @@ mod tests {
         });
         let payload = build_payload(
             "custom-local",
-            &ClientOptions::default().with_output_schema(schema.clone()),
+            &ClientOptions::default()
+                .with_input_schema(json!({ "type": "object" }))
+                .with_output_schema(schema.clone()),
             &[Message::user("hi")],
             false,
         );
@@ -367,5 +500,92 @@ mod tests {
         assert_eq!(payload["response_format"]["type"], "json_schema");
         assert_eq!(payload["response_format"]["json_schema"]["name"], "agent_output");
         assert_eq!(payload["response_format"]["json_schema"]["schema"], schema);
+    }
+
+    #[test]
+    fn payload_with_input_schema_and_no_output_schema_uses_json_object_mode() {
+        let payload = build_payload(
+            "custom-local",
+            &ClientOptions::default().with_input_schema(json!({ "type": "object" })),
+            &[Message::user("hi")],
+            false,
+        );
+        assert_eq!(payload["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn payload_prepends_input_schema_to_system_message() {
+        let payload = build_payload(
+            "custom-local",
+            &ClientOptions::default()
+                .with_preamble("You are helpful.")
+                .with_input_schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string" }
+                    },
+                    "required": ["kind"]
+                })),
+            &[Message::user("hi")],
+            false,
+        );
+
+        let system = payload["messages"][0]["content"]
+            .as_str()
+            .expect("system message should be a string");
+        assert!(system.contains("You are helpful."));
+        assert!(system.contains("The user message is JSON."));
+        assert!(system.contains("\"required\":[\"kind\"]"));
+    }
+
+    #[test]
+    fn schema_and_tools_ollama_prefers_tools_over_response_format() {
+        let payload = build_payload(
+            "custom-local",
+            &ClientOptions::default()
+                .with_tool_choice(ToolChoice::Required)
+                .with_output_schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string" }
+                    },
+                    "required": ["answer"]
+                }))
+                .with_tools(vec![ToolDefinition {
+                    name: "submit".into(),
+                    description: "Submit the final answer.".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "answer": { "type": "string" }
+                        },
+                        "required": ["answer"]
+                    }),
+                }]),
+            &[Message::user("hi")],
+            true,
+        );
+
+        assert!(payload.get("response_format").is_none());
+        assert_eq!(payload["tool_choice"], "required");
+        assert_eq!(payload["tools"][0]["function"]["name"], "submit");
+    }
+
+    #[test]
+    fn map_response_without_json_mode_returns_string() {
+        let response = json!({
+            "model": "local-model",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "plain text"
+                }
+            }]
+        });
+        let mapped = map_response(response, false, false).unwrap();
+        match mapped.output {
+            ClientOutput::Output(Value::String(text)) => assert_eq!(text, "plain text"),
+            _ => panic!("expected string output"),
+        }
     }
 }

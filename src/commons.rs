@@ -7,9 +7,10 @@ use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
+use crate::clients::{Message, Role};
 use crate::context::Context;
 use crate::flows::flows::{AgentInfo, FlowNode};
-use crate::flows::{Flow, FlowGraph};
+use crate::flows::{Flow, FlowError, FlowGraph};
 use crate::tools::base::{ErasedTool, ToolOutcome};
 use crate::tools::{ToolBox, ToolDefinition, ToolError};
 
@@ -81,8 +82,28 @@ pub trait Agent: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'stat
         Self::schema_name()
     }
 
+    /// Builds the first user message for this agent invocation.
+    fn to_message(self, _ctx: &Context) -> Result<Message, FlowError> {
+        Message::from_json(Role::User, &self).map_err(FlowError::Serialize)
+    }
+
     /// Returns the runtime settings for this agent.
     fn build() -> AgentConfig;
+}
+
+pub(crate) fn make_agent_message<A: Agent>(
+    value: Value,
+    ctx: &Context,
+) -> Result<Message, FlowError> {
+    let input: A = serde_json::from_value(value).map_err(FlowError::Deserialize)?;
+    let message = input.to_message(ctx)?;
+    if !matches!(message.role, Role::User) {
+        return Err(FlowError::Internal {
+            handler: "make_agent_message",
+            detail: format!("agent '{}' to_message must return a user message", A::node_id()),
+        });
+    }
+    Ok(message)
 }
 
 /// Exit tool injected for agents.
@@ -223,6 +244,8 @@ impl ToolBox {
             let entry = graph.interner.intern(&format!("{}::{}", agent_name, name_str));
             let exit  = graph.interner.intern(&output_str);
             let mut schema_gen = schemars::r#gen::SchemaGenerator::default();
+            let input_schema = serde_json::to_value(schema_gen.root_schema_for::<A>())
+                .unwrap_or_else(|_| Value::Object(Default::default()));
             let output_schema = serde_json::to_value(schema_gen.root_schema_for::<A::Output>())
                 .unwrap_or_else(|_| Value::Object(Default::default()));
             let config = A::build();
@@ -237,7 +260,9 @@ impl ToolBox {
             let info = Arc::new(AgentInfo {
                 id: entry,
                 tool_box,
+                make_message: make_agent_message::<A>,
                 preamble: config.preamble,
+                input_schema,
                 model: config.model_url,
                 exit,
                 output_schema,
