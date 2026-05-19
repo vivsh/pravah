@@ -29,6 +29,9 @@ pub enum FlowError {
         detail: String,
     },
 
+    #[error("limit exceeded: {0}")]
+    LimitExceeded(String),
+
     #[error(transparent)]
     Build(#[from] BuildError),
 

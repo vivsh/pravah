@@ -39,6 +39,7 @@ Pravah is a good fit when you need:
 - replayable state transitions
 - typed composition across subflows
 - deterministic orchestration
+- multi-turn agent conversations with persistent history across loop iterations
 
 ## Mental Model
 

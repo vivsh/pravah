@@ -20,16 +20,16 @@ This makes the runtime predictable, replayable, and easy to suspend.
 
 ## Node Types
 
-| Builder method | What it does |
-| -------------- | ------------ |
-| `agent::<A>()` | LLM-backed node with structured output or tool loop |
-| `work(f)` | Effectful async transform: `async fn(I, Context) -> Result<O, FlowError>` |
-| `map(f)` | Pure synchronous transform: `fn(I) -> O` |
-| `either(f)` | Route to one branch: `fn(I) -> Either<A, B>` |
-| `split(f)` | Fan out to multiple branches |
-| `merge(f)` | Collect branch outputs once all are ready |
-| `suspend::<I, O>()` | Pause the flow and resume later with `O` |
-| `flow::<F>()` | Embed another flow as a node |
+| Builder method      | What it does                                                              |
+| ------------------- | ------------------------------------------------------------------------- |
+| `agent::<A>()`      | LLM-backed node with structured output or tool loop                       |
+| `work(f)`           | Effectful async transform: `async fn(I, Context) -> Result<O, FlowError>` |
+| `map(f)`            | Pure synchronous transform: `fn(I) -> O`                                  |
+| `either(f)`         | Route to one branch: `fn(I) -> Either<A, B>`                              |
+| `split(f)`          | Fan out to multiple branches                                              |
+| `merge(f)`          | Collect branch outputs once all are ready                                 |
+| `suspend::<I, O>()` | Pause the flow and resume later with `O`                                  |
+| `flow::<F>()`       | Embed another flow as a node                                              |
 
 `fork` and `join` are binary aliases for `split` and `merge`.
 
@@ -99,9 +99,56 @@ loop {
 See [../examples/human_input.rs](../examples/human_input.rs) for the practical
 shape.
 
-## Nested Flows
+## Multi-Turn Agent Conversations
 
-Flows compose because a flow has the same outer shape as a node: typed input,
+By default, each time an agent node is entered it gets a fresh session id.
+That isolates agents from each other, but means a looping agent (one connected
+back to itself via `either`) sees no history from previous iterations.
+
+Call `.keep_alive()` on `AgentConfig` to opt into continuous history across
+loop iterations:
+
+```rust
+fn build() -> AgentConfig {
+    AgentConfig::new("You are a helpful assistant.", "gemini://gemini-2.5-flash")
+        .keep_alive()
+}
+```
+
+With `keep_alive`, the engine assigns one stable session id to all invocations
+of that agent within one parent frame. The LLM sees the full conversation
+history on every re-entry. Multiple `keep_alive` agents in the same parent flow
+each maintain their own independent session.
+
+### Injecting Messages
+
+Use `FlowRuntime::push_message` to append a user message to the active session
+before the next LLM dispatch. Call it between `next()` calls when
+`FlowInspector::is_agent_dispatch_ready` returns `true`:
+
+```rust
+if inspector.is_agent_dispatch_ready() {
+    runtime.push_message("What else should I know?");
+}
+```
+
+`is_agent_dispatch_ready` returns `true` while the top agent frame is in its
+`Entry` phase — the next `next()` call will push the structured input to history
+and dispatch to the LLM. Any message pushed here appears before that dispatch.
+
+### Inspecting Session History
+
+Use `FlowInspector::messages` to iterate over the live messages in the current
+session, oldest first:
+
+```rust
+for msg in inspector.messages() {
+    println!("{:?}: {}", msg.role, msg.content);
+}
+```
+
+Evicted (compacted) messages are excluded. Only messages belonging to the
+active frame's session id are returned. a flow has the same outer shape as a node: typed input,
 typed output, stepwise execution.
 
 ```rust
@@ -129,6 +176,32 @@ thread-local state, or executor-specific handles.
 That keeps snapshots portable across processes and machines.
 
 See [../examples/snapshot.rs](../examples/snapshot.rs).
+
+## Run Limits
+
+`FlowRuntime::run_until` accepts a `RunLimits` value to cap execution:
+
+```rust
+use pravah::flows::RunLimits;
+
+let result = runtime.run_until(
+    ctx,
+    RunLimits::new().max_turns(10).max_steps(200),
+).await;
+```
+
+All limits produce `Err(FlowError::LimitExceeded(reason))` when triggered, so
+you can handle them alongside other errors rather than inspecting a separate
+outcome enum.
+
+Available limits:
+
+| Limit          | Description                             |
+| -------------- | --------------------------------------- |
+| `max_steps`    | Total engine steps across the whole run |
+| `max_turns`    | LLM dispatches (model round-trips)      |
+| `max_depth`    | Maximum call-stack depth                |
+| `max_duration` | Wall-clock time                         |
 
 ## History Management
 

@@ -112,12 +112,13 @@ impl<I: Flow> FlowRuntime<I> {
 
         let (root_callable_index, callables) = Self::make_callables(graph)?;
 
-        let callable = Callable{
+        let callable = Callable {
             parent_entry: entry_id,
             parent_exit: exit,
             exit,
             entry: entry_id,
             index: root_callable_index,
+            keep_alive: false,
         };
 
         state.call_enter(callable);
@@ -213,6 +214,19 @@ impl<I: Flow> FlowRuntime<I> {
         FlowInspector::new(&self.state, &self.callables, &self.history)
     }
 
+    /// Injects a user message into the current agent session's history.
+    /// Only call this when [`FlowInspector::is_agent_dispatch_ready`] returns `true`.
+    pub fn push_message(&mut self, content: impl Into<String>) {
+        let Some(frame) = self.state.frames_slice().last() else { return };
+        let session_id = frame.session_id.clone();
+        let agent_id = self.callables
+            .get(frame.callable.index)
+            .map(|c| c.0.interner.name_of(frame.callable.entry))
+            .unwrap_or("__runtime__")
+            .to_owned();
+        self.history.push(&session_id, &agent_id, Message::user(content));
+    }
+
     pub async fn next(&mut self, ctx: Context) -> Result<FlowStep<I::Output>, FlowError> {
         let factory = Arc::clone(&self.factory);
         let callable_index = self.state.callable_index()
@@ -260,6 +274,7 @@ impl<I: Flow> FlowRuntime<I> {
     ) -> Result<RunOutcome<I::Output>, FlowError> {
         let deadline = limits.max_duration.map(|d| std::time::Instant::now() + d);
         let mut steps = 0usize;
+        let mut turns = 0usize;
         let log_limit = |limit: &str, steps: usize, depth: usize| {
             tracing::warn!(flow = %I::node_id(), limit, steps, depth, "run limit exceeded");
         };
@@ -271,9 +286,9 @@ impl<I: Flow> FlowRuntime<I> {
                 }
             }
             if let Some(max) = limits.max_turns {
-                if steps >= max {
+                if turns >= max {
                     log_limit("max_turns", steps, self.state.depth());
-                    return Ok(RunOutcome::LimitExceeded(LimitKind::MaxTurns));
+                    return Err(FlowError::LimitExceeded(format!("max_turns ({max}) exceeded")));
                 }
             }
             if let Some(max) = limits.max_depth {
@@ -288,9 +303,12 @@ impl<I: Flow> FlowRuntime<I> {
                     return Ok(RunOutcome::LimitExceeded(LimitKind::MaxDuration));
                 }
             }
+            let was_dispatch = self.inspector().is_agent_dispatch_ready();
             steps += 1;
             match self.next(ctx.clone()).await? {
-                FlowStep::Continue => {}
+                FlowStep::Continue => {
+                    if was_dispatch { turns += 1; }
+                }
                 FlowStep::Done(v) => return Ok(RunOutcome::Done(v)),
                 FlowStep::Suspend(sv) => return Ok(RunOutcome::Suspend(sv)),
             }

@@ -5,6 +5,7 @@ use super::history::FlowHistory;
 use super::phase::Phase;
 use super::runtime::FlowCall;
 use super::state::{FlowState, Frame};
+use crate::clients::Message;
 use crate::flows::NodeId;
 
 #[derive(Debug, Clone)]
@@ -91,6 +92,26 @@ impl<'a> FlowInspector<'a> {
 
     pub fn suspension_type(&self) -> Option<&'a str> {
         self.state.suspension().map(|s| s.output_type.as_str())
+    }
+
+    /// Returns an iterator over the live messages for the current active session, oldest first.
+    pub fn messages(&self) -> impl Iterator<Item = &'a Message> + 'a {
+        let session_id = self.state.top_session_id().to_owned();
+        self.history
+            .entries()
+            .iter()
+            .filter(move |e| !e.evicted && e.session_id == session_id)
+            .map(|e| &e.message)
+    }
+
+    /// Returns `true` when the active agent is at a dispatch boundary — the next
+    /// engine step will call the LLM. It is safe to call [`FlowRuntime::push_message`]
+    /// only when this returns `true`.
+    pub fn is_agent_dispatch_ready(&self) -> bool {
+        matches!(
+            self.top_frame().map(|f| f.phase),
+            Some(PhaseKind::Dispatch)
+        )
     }
 
     fn frame_view(&self, depth: usize, frame: &'a Frame) -> FrameView<'a> {

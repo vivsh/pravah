@@ -19,6 +19,13 @@ pub struct Callable {
     pub entry: NodeId,
     /// Index into the runtime's callable table.
     pub index: usize,
+    /// When true, repeated invocations of this agent reuse a stable session id
+    /// that is stored in the *parent* frame's `keep_alive_sessions` map (keyed
+    /// by this `entry` NodeId). This keeps conversation history continuous across
+    /// loop iterations while ensuring that multiple agents in the same parent flow
+    /// each have their own independent session.
+    #[serde(default)]
+    pub keep_alive: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -48,6 +55,14 @@ pub(crate) struct Frame {
 
     /// Session id used by agent history.
     pub(crate) session_id: String,
+
+    /// Maps a child callable's entry `NodeId` to a stable session id.
+    /// Populated only for children whose `Callable::keep_alive` is true, so
+    /// repeated re-entries (e.g. an agent in a loop) reuse the same session
+    /// and see the full conversation history. Multiple agents in one flow each
+    /// get their own entry here and thus their own independent session.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub(crate) keep_alive_sessions: IndexMap<NodeId, String>,
 }
 
 impl Frame {
@@ -58,6 +73,7 @@ impl Frame {
             phase: None,
             callable: call,
             session_id: Uuid::now_v7().to_string(),
+            keep_alive_sessions: IndexMap::new(),
         }
     }
 
@@ -97,6 +113,24 @@ impl FlowState {
             .and_then(|frame| frame.states.shift_remove(&callable.parent_entry));
 
         let mut child = Frame::new(callable);
+
+        if child.callable.keep_alive {
+            // Look up (or mint) a stable session id for this agent slot.
+            // Keyed by the child's entry NodeId so each agent in a flow has its
+            // own independent session even when multiple agents share one parent.
+            let session_id = self
+                .frames
+                .last_mut()
+                .map(|parent| {
+                    parent
+                        .keep_alive_sessions
+                        .entry(child.callable.entry)
+                        .or_insert_with(|| child.session_id.clone())
+                        .clone()
+                })
+                .unwrap_or_else(|| child.session_id.clone());
+            child.session_id = session_id;
+        }
 
         if let Some(value) = entry_value {
             child.states.insert(child.callable.entry, value);

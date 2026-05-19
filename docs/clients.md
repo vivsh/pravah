@@ -52,6 +52,16 @@ impl Agent for PlannerInput {
 The input type is the user-side contract. The output type is the structured
 result the model must produce.
 
+Common `AgentConfig` options:
+
+| Method                     | Effect                                                                                     |
+| -------------------------- | ------------------------------------------------------------------------------------------ |
+| `.with_tools(tb)`          | Attach a `ToolBox`                                                                         |
+| `.with_temperature(t)`     | Set sampling temperature                                                                   |
+| `.with_thinking()`         | Enable extended thinking (Anthropic)                                                       |
+| `.with_thinking_budget(n)` | Set thinking token budget                                                                  |
+| `.keep_alive()`            | Reuse the same session id across loop re-entries so the LLM sees full conversation history |
+
 For the simplest end-to-end example, see
 [../examples/linear_flow.rs](../examples/linear_flow.rs).
 
@@ -139,6 +149,19 @@ fn build() -> AgentConfig {
 `Tool::call` returns `ToolOutput<T>`, not just `T`. That allows a tool to return
 typed JSON plus attachments in the same result.
 
+### Tool Errors
+
+`ToolError` controls how the engine handles a failed tool call.
+
+| Variant                     | Behaviour                                                                                                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ToolError::Fatal(msg)`     | Aborts the entire flow with `FlowError`                                                                                                                    |
+| `ToolError::NonFatal(msg)`  | Returns the error text to the LLM as a tool result; the model may recover                                                                                  |
+| `ToolError::LoopLimit(msg)` | Non-fatal; signals that a loop budget has been exhausted. Use this when a tool tracks iteration count and wants the model to stop or take a different path |
+
+Return `ToolError::LoopLimit` instead of `NonFatal` when you want callers to
+distinguish a deliberate loop-budget signal from an ordinary tool failure.
+
 See [../examples/image_prompt.rs](../examples/image_prompt.rs) for initial user
 attachments and the tool/attachment sections below for the provider behavior.
 
@@ -173,11 +196,11 @@ Attachments let tools or agents send binary data alongside text or JSON.
 
 Three forms are supported:
 
-| Variant | Use |
-| ------- | --- |
-| `Attachment::Inline { mime_type, data }` | Base64-encoded inline data |
-| `Attachment::File { mime_type, path }` | File under the current `working_dir`, materialized before dispatch |
-| `Attachment::Url { mime_type, url }` | Public URL |
+| Variant                                  | Use                                                                |
+| ---------------------------------------- | ------------------------------------------------------------------ |
+| `Attachment::Inline { mime_type, data }` | Base64-encoded inline data                                         |
+| `Attachment::File { mime_type, path }`   | File under the current `working_dir`, materialized before dispatch |
+| `Attachment::Url { mime_type, url }`     | Public URL                                                         |
 
 `Attachment::File` is resolved through `Context::resolve`, so it stays confined
 to the configured working directory.
@@ -215,12 +238,12 @@ async fn call(self, ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError>
 Attachments are materialized before provider dispatch, then translated into each
 provider's wire format.
 
-| Provider | Inline / File | URL |
-| -------- | ------------- | --- |
-| Anthropic | Image-only blocks on this path | Image-only blocks on this path |
-| OpenAI | Image-only `input_image` items on this path | Image-only `input_image` items on this path |
-| Gemini | `Part::InlineData` with arbitrary mime types | `Part::FileData` with arbitrary mime types |
-| Ollama | Image-only `image_url` parts on this path | Image-only `image_url` parts on this path |
+| Provider  | Inline / File                                | URL                                         |
+| --------- | -------------------------------------------- | ------------------------------------------- |
+| Anthropic | Image-only blocks on this path               | Image-only blocks on this path              |
+| OpenAI    | Image-only `input_image` items on this path  | Image-only `input_image` items on this path |
+| Gemini    | `Part::InlineData` with arbitrary mime types | `Part::FileData` with arbitrary mime types  |
+| Ollama    | Image-only `image_url` parts on this path    | Image-only `image_url` parts on this path   |
 
 ## Example Map
 

@@ -47,6 +47,7 @@ pub(crate) struct AgentInfo {
     pub(crate) temperature: Option<f32>,
     pub(crate) thinking: bool,
     pub(crate) thinking_budget: Option<u32>,
+    pub(crate) keep_alive: bool,
 }
 
 /// Metadata for one tool exposed by an agent.
@@ -504,6 +505,7 @@ impl FlowGraph {
             exit: node.exit,
             entry: node.id,
             index: outer.callable_index,
+            keep_alive: false,
         };
 
         states.call_enter(callable);
@@ -538,6 +540,7 @@ impl FlowGraph {
             exit: inner.exit,
             entry: inner.entry,
             index: inner.callable_index,
+            keep_alive: false,
         };
         states.call_enter(callable);
 
@@ -558,6 +561,7 @@ impl FlowGraph {
             exit: parent_exit,
             entry: parent_entry,
             index: flow.callable_index,
+            keep_alive: node.keep_alive,
         };
 
         states.call_enter(callable);
@@ -733,8 +737,8 @@ impl FlowGraph {
             "LLM dispatch"
         );
 
+        let has_prior_history = !history.session_entries(&session_id).is_empty();
         let options = ClientOptions::default()
-            .with_preamble(node.preamble.clone())
             .with_input_schema(node.input_schema.clone())
             .with_tools(defs)
             .with_tool_choice(tool_choice)
@@ -743,6 +747,7 @@ impl FlowGraph {
             .with_thinking(node.thinking)
             .with_temperature_opt(node.temperature)
             .with_thinking_budget_opt(node.thinking_budget);
+        let options = if has_prior_history { options } else { options.with_preamble(node.preamble.clone()) };
 
         let client = factory
             .create(&node.model, options)
@@ -1013,6 +1018,7 @@ impl FlowGraph {
                         exit: inner.exit,
                         entry: inner.entry,
                         index: inner.callable_index,
+                        keep_alive: false,
                     };
 
                     states.call_enter(callable);
@@ -1148,6 +1154,7 @@ impl FlowBuilder {
             temperature: config.temperature,
             thinking: config.thinking,
             thinking_budget: config.thinking_budget,
+            keep_alive: config.keep_alive,
         };
         self.flow
             .nodes

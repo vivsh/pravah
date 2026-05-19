@@ -29,6 +29,9 @@ pub struct AgentConfig {
     pub thinking: bool,
     /// Reasoning budget. Ignored unless `thinking` is enabled.
     pub thinking_budget: Option<u32>,
+    /// When true, repeated invocations of this agent share the parent session id,
+    /// keeping the full conversation history visible across loop iterations.
+    pub keep_alive: bool,
 }
 
 impl AgentConfig {
@@ -41,6 +44,7 @@ impl AgentConfig {
             temperature: None,
             thinking: false,
             thinking_budget: None,
+            keep_alive: false,
         }
     }
 
@@ -65,6 +69,14 @@ impl AgentConfig {
     /// Sets the reasoning budget.
     pub fn with_thinking_budget(mut self, budget: u32) -> Self {
         self.thinking_budget = Some(budget);
+        self
+    }
+
+    /// Keeps the agent's session alive across repeated invocations in a loop.
+    /// All re-entries share the parent frame's `session_id`, so the LLM sees
+    /// the full conversation history on every turn.
+    pub fn keep_alive(mut self) -> Self {
+        self.keep_alive = true;
         self
     }
 }
@@ -270,8 +282,8 @@ impl ToolBox {
                 temperature: config.temperature,
                 thinking: config.thinking,
                 thinking_budget: config.thinking_budget,
+                keep_alive: false,
             });
-            graph.nodes.insert(entry, FlowNode::AgentTool(info));
         }));
         self
     }
