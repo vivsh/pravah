@@ -2,8 +2,7 @@
 
 use pravah::deps::Deps;
 use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
-use pravah::tools::ToolBox;
-use pravah::{CliMode, Context, FlowConf, HumanInput};
+use pravah::{CliMode, Context, FlowConf, HumanInput, HumanOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -36,7 +35,6 @@ impl Agent for BlogRequest {
                 - choice 2 → outcome: 'Draft discarded.'",
             "gemini://gemini-2.5-flash-lite",
         )
-        .with_tools(ToolBox::new().flow::<HumanInput>())
     }
 }
 
@@ -45,7 +43,11 @@ impl Flow for BlogRequest {
     type Output = FinalResult;
 
     fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().agent::<BlogRequest>().build()
+        FlowGraph::builder()
+            .agent::<BlogRequest>()
+            .tool::<BlogRequest, HumanInput, HumanOutput>()
+            .flow::<HumanInput>()
+            .build()
     }
 }
 

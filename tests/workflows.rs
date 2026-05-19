@@ -1,7 +1,7 @@
 //! Integration tests for work-only flow graphs.
 
 use either::Either;
-use pravah::flows::{Flow, FlowError, FlowGraph, FlowRuntime, FlowStep, HumanInput, PhaseKind};
+use pravah::flows::{Flow, FlowError, FlowGraph, FlowRuntime, FlowStep, HumanInput};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -876,7 +876,7 @@ async fn test_inspector_reports_suspension() {
     assert_eq!(inspector.suspension_type(), Some("HumanOutput"));
 
     let top = inspector.top_frame().expect("root frame should remain suspended");
-    assert_eq!(top.phase, PhaseKind::None);
+    assert!(top.agent_phases.is_empty());
     assert!(top.locals.iter().any(|local| local.name == "PendingHumanInput"));
 }
 #[tokio::test]

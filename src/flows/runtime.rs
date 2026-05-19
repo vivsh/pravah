@@ -165,18 +165,6 @@ impl<I: Flow> FlowRuntime<I> {
                             });
                         }
                     }
-                    FlowNode::FlowTool { inner, .. } => {
-                        if let Some(inner_mut) = Arc::get_mut(inner) {
-                            Self::collect_callables(inner_mut, callables)?;
-                            inner_mut.callable_index = callables.len();
-                            callables.push(FlowCall(inner.clone()));
-                        } else {
-                            return Err(FlowError::Internal {
-                                handler: "collect_callables",
-                                detail: "failed to get exclusive Arc reference to flow tool inner graph".into(),
-                            });
-                        }
-                    }
                     _ => {}
                 }
             }
@@ -218,13 +206,30 @@ impl<I: Flow> FlowRuntime<I> {
     /// Only call this when [`FlowInspector::is_agent_dispatch_ready`] returns `true`.
     pub fn push_message(&mut self, content: impl Into<String>) {
         let Some(frame) = self.state.frames_slice().last() else { return };
-        let session_id = frame.session_id.clone();
-        let agent_id = self.callables
-            .get(frame.callable.index)
-            .map(|c| c.0.interner.name_of(frame.callable.entry))
-            .unwrap_or("__runtime__")
-            .to_owned();
-        self.history.push(&session_id, &agent_id, Message::user(content));
+        // Find the first agent in Dispatch state.
+        let (session_id, agent_name) = frame
+            .agent_states
+            .iter()
+            .find_map(|(&agent_id, agent_state)| {
+                if matches!(agent_state.continuation, crate::flows::state::AgentContinuation::Dispatch) {
+                    let name = self.callables
+                        .get(frame.callable.index)
+                        .map(|c| c.0.interner.name_of(agent_id).to_owned())
+                        .unwrap_or_else(|| "__runtime__".to_owned());
+                    Some((agent_state.session_id.clone(), name))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                let session = frame.session_id.clone();
+                let agent = self.callables
+                    .get(frame.callable.index)
+                    .map(|c| c.0.interner.name_of(frame.callable.entry).to_owned())
+                    .unwrap_or_else(|| "__runtime__".to_owned());
+                (session, agent)
+            });
+        self.history.push(&session_id, &agent_name, Message::user(content));
     }
 
     pub async fn next(&mut self, ctx: Context) -> Result<FlowStep<I::Output>, FlowError> {

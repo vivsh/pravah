@@ -1,7 +1,12 @@
 use thiserror::Error;
 
+use crate::tools::ToolError;
+
 #[derive(Debug, Error)]
 pub enum FlowError {
+    #[error(transparent)]
+    Tool(#[from] ToolError),
+
     #[error("Node not found: {0}")]
     NotFound(String),
 
@@ -77,10 +82,6 @@ pub enum AgentError {
     /// Model repeated a call id within one turn.
     #[error("Agent '{agent}' issued duplicate call_id for tool '{tool}'")]
     DuplicateToolCall { agent: String, tool: String },
-
-    /// A registered tool failed without suspending or exiting.
-    #[error("Tool '{tool}' failed: {reason}")]
-    ToolFailed { tool: String, reason: String },
 
     /// Agent continuation serialization failed.
     #[error("failed to serialize agent state: {0}")]

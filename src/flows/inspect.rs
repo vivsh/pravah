@@ -1,10 +1,8 @@
 use serde_json::Value;
 
-use super::flows::AgentContinuation;
 use super::history::FlowHistory;
-use super::phase::Phase;
 use super::runtime::FlowCall;
-use super::state::{FlowState, Frame};
+use super::state::{AgentContinuation, FlowState, Frame};
 use crate::clients::Message;
 use crate::flows::NodeId;
 
@@ -18,7 +16,6 @@ pub struct LocalVar<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhaseKind {
     None,
-    Entry,
     Dispatch,
     PendingTool {
         active_calls: Vec<String>,
@@ -27,13 +24,20 @@ pub enum PhaseKind {
     Exit,
 }
 
+/// Per-agent phase info stored in a frame view.
+#[derive(Debug, Clone)]
+pub struct AgentPhaseView<'a> {
+    pub agent_name: &'a str,
+    pub phase: PhaseKind,
+}
+
 #[derive(Debug, Clone)]
 pub struct FrameView<'a> {
     pub depth: usize,
     pub session_id: &'a str,
     pub callable_entry: &'a str,
     pub callable_exit: &'a str,
-    pub phase: PhaseKind,
+    pub agent_phases: Vec<AgentPhaseView<'a>>,
     pub locals: Vec<LocalVar<'a>>,
 }
 
@@ -104,14 +108,15 @@ impl<'a> FlowInspector<'a> {
             .map(|e| &e.message)
     }
 
-    /// Returns `true` when the active agent is at a dispatch boundary — the next
-    /// engine step will call the LLM. It is safe to call [`FlowRuntime::push_message`]
-    /// only when this returns `true`.
+    /// Returns `true` when any agent in the active frame is at a dispatch boundary —
+    /// the next engine step will call the LLM. It is safe to call
+    /// [`FlowRuntime::push_message`] only when this returns `true`.
     pub fn is_agent_dispatch_ready(&self) -> bool {
-        matches!(
-            self.top_frame().map(|f| f.phase),
-            Some(PhaseKind::Dispatch)
-        )
+        self.top_frame().map_or(false, |f| {
+            f.agent_phases
+                .iter()
+                .any(|ap| matches!(ap.phase, PhaseKind::Dispatch))
+        })
     }
 
     fn frame_view(&self, depth: usize, frame: &'a Frame) -> FrameView<'a> {
@@ -124,12 +129,39 @@ impl<'a> FlowInspector<'a> {
                 value,
             })
             .collect();
+
+        let agent_phases = frame
+            .agent_states
+            .iter()
+            .map(|(&agent_id, agent_state)| {
+                let agent_name = self.name_in_frame(frame, agent_id);
+                let phase = match &agent_state.continuation {
+                    AgentContinuation::Dispatch => PhaseKind::Dispatch,
+                    AgentContinuation::Exit(_) => PhaseKind::Exit,
+                    AgentContinuation::PendingTool { active, waiting } => {
+                        let mut active_calls = active
+                            .values()
+                            .map(|(_, call_name)| call_name.clone())
+                            .collect::<Vec<_>>();
+                        active_calls.sort();
+                        let waiting_count =
+                            waiting.values().map(|queue| queue.len()).sum();
+                        PhaseKind::PendingTool {
+                            active_calls,
+                            waiting_count,
+                        }
+                    }
+                };
+                AgentPhaseView { agent_name, phase }
+            })
+            .collect();
+
         FrameView {
             depth,
             session_id: frame.session_id.as_str(),
             callable_entry: self.name_in_frame(frame, frame.callable.entry),
             callable_exit: self.name_in_frame(frame, frame.callable.exit),
-            phase: Self::decode_phase(frame.phase.as_ref()),
+            agent_phases,
             locals,
         }
     }
@@ -140,31 +172,5 @@ impl<'a> FlowInspector<'a> {
             .map(|call| call.0.interner.name_of(id))
             .unwrap_or("<unknown>")
     }
-
-    fn decode_phase(phase: Option<&Phase>) -> PhaseKind {
-        match phase {
-            None => PhaseKind::None,
-            Some(Phase::Entry) => PhaseKind::Entry,
-            Some(Phase::Continue(None)) => PhaseKind::Exit,
-            Some(Phase::Continue(Some(value))) => {
-                match serde_json::from_value::<AgentContinuation>(value.clone()) {
-                    Ok(AgentContinuation::Dispatch) => PhaseKind::Dispatch,
-                    Ok(AgentContinuation::PendingTool { active, waiting }) => {
-                        let mut active_calls = active
-                            .into_values()
-                            .map(|(_, call_name)| call_name)
-                            .collect::<Vec<_>>();
-                        active_calls.sort();
-                        let waiting_count = waiting.values().map(|queue| queue.len()).sum();
-                        PhaseKind::PendingTool {
-                            active_calls,
-                            waiting_count,
-                        }
-                    }
-                    Ok(AgentContinuation::Exit(_)) => PhaseKind::Exit,
-                    Err(_) => PhaseKind::None,
-                }
-            }
-        }
-    }
 }
+

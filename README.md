@@ -77,13 +77,13 @@ That gives you deterministic routing, safe replay, and unambiguous resumption.
 
 ```toml
 [dependencies]
-pravah = "0.3.6"
+pravah = "0.3.7"
 ```
 
 To enable only selected providers:
 
 ```toml
-pravah = { version = "0.3.6", default-features = false, features = ["provider-openai"] }
+pravah = { version = "0.3.7", default-features = false, features = ["provider-openai"] }
 ```
 
 Available provider features: `provider-openai`, `provider-anthropic`,

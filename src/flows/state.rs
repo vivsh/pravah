@@ -1,11 +1,46 @@
+use std::collections::{HashMap, VecDeque};
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::clients::Attachment;
 use crate::flows::interner::NodeId;
-use crate::flows::phase::Phase;
+
+/// A tool call that is queued behind a currently-active call to the same tool slot.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WaitingCall {
+    pub call_id: String,
+    pub args: Value,
+    pub call_name: String,
+    pub entry_id: NodeId,
+}
+
+/// Per-agent continuation state tracked inside the parent frame.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum AgentContinuation {
+    /// Agent is ready to call the LLM.
+    Dispatch,
+    /// The LLM issued tool calls; waiting for work nodes to finish.
+    PendingTool {
+        /// One running call per tool exit slot (exit_id → (call_id, tool_name)).
+        active: HashMap<NodeId, (String, String)>,
+        /// Calls queued for each slot that is already occupied (exit_id → queue).
+        waiting: HashMap<NodeId, VecDeque<WaitingCall>>,
+    },
+    /// The LLM returned a structured output; ready to write to the agent exit slot.
+    Exit(Value),
+}
+
+/// State for one agent node tracked inside the parent frame.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct AgentState {
+    /// Session ID used for LLM history.
+    pub session_id: String,
+    /// Call counts per tool name, accumulated across the entire agent execution.
+    pub call_counts: HashMap<String, usize>,
+    pub continuation: AgentContinuation,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Callable {
@@ -41,26 +76,18 @@ pub(crate) struct Suspension {
 pub(crate) struct Frame {
     /// State owned by this frame.
     pub(crate) states: IndexMap<NodeId, Value>,
-    /// Attachments produced by tool calls, keyed by the tool's exit slot.
-    /// Populated by `handle_tool` when a tool produces non-empty attachments,
-    /// consumed by `handle_agent` when building the tool-result history message.
-    /// Skipped during serialization when empty so existing snapshots remain valid.
+    /// Per-agent continuation state for all agents active in this frame.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    pub(crate) tool_attachments: IndexMap<NodeId, Vec<Attachment>>,
-    /// Phase for the active multi-step node, if any.
-    pub(crate) phase: Option<Phase>,
+    pub(crate) agent_states: IndexMap<NodeId, AgentState>,
 
     /// Callable that owns this frame.
     pub(crate) callable: Callable,
 
-    /// Session id used by agent history.
+    /// Session id of this frame (used for sub-flow history when applicable).
     pub(crate) session_id: String,
 
-    /// Maps a child callable's entry `NodeId` to a stable session id.
-    /// Populated only for children whose `Callable::keep_alive` is true, so
-    /// repeated re-entries (e.g. an agent in a loop) reuse the same session
-    /// and see the full conversation history. Multiple agents in one flow each
-    /// get their own entry here and thus their own independent session.
+    /// Maps a child agent's `NodeId` to a stable session id for keep-alive agents.
+    /// Populated on first visit and reused on subsequent iterations.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub(crate) keep_alive_sessions: IndexMap<NodeId, String>,
 }
@@ -69,8 +96,7 @@ impl Frame {
     fn new(call: Callable) -> Self {
         Self {
             states: IndexMap::new(),
-            tool_attachments: IndexMap::new(),
-            phase: None,
+            agent_states: IndexMap::new(),
             callable: call,
             session_id: Uuid::now_v7().to_string(),
             keep_alive_sessions: IndexMap::new(),
@@ -112,31 +138,16 @@ impl FlowState {
             .top_mut()
             .and_then(|frame| frame.states.shift_remove(&callable.parent_entry));
 
-        let mut child = Frame::new(callable);
-
-        if child.callable.keep_alive {
-            // Look up (or mint) a stable session id for this agent slot.
-            // Keyed by the child's entry NodeId so each agent in a flow has its
-            // own independent session even when multiple agents share one parent.
-            let session_id = self
-                .frames
-                .last_mut()
-                .map(|parent| {
-                    parent
-                        .keep_alive_sessions
-                        .entry(child.callable.entry)
-                        .or_insert_with(|| child.session_id.clone())
-                        .clone()
-                })
-                .unwrap_or_else(|| child.session_id.clone());
-            child.session_id = session_id;
-        }
+        let child = Frame::new(callable);
 
         if let Some(value) = entry_value {
-            child.states.insert(child.callable.entry, value);
+            let entry = child.callable.entry;
+            let mut child = child;
+            child.states.insert(entry, value);
+            self.frames.push(child);
+        } else {
+            self.frames.push(child);
         }
-
-        self.frames.push(child);
     }
 
     /// Pops every frame whose exit slot is ready.
@@ -190,21 +201,54 @@ impl FlowState {
         false
     }
 
-    /// Returns the phase of the top frame.
-    pub(crate) fn phase(&self) -> Option<&Phase> {
-        self.top().and_then(|f| f.phase.as_ref())
+    // ── Agent state accessors ─────────────────────────────────────────────────
+
+    /// Returns an immutable reference to the agent state for `node_id`.
+    pub(crate) fn get_agent_state(&self, node_id: NodeId) -> Option<&AgentState> {
+        self.top().and_then(|f| f.agent_states.get(&node_id))
     }
 
-    /// Sets the phase of the top frame.
-    /// Returns `false` when the stack is empty.
-    pub(crate) fn set_phase(&mut self, phase: Phase) -> bool {
+    /// Returns a mutable reference to the agent state for `node_id`.
+    pub(crate) fn get_agent_state_mut(&mut self, node_id: NodeId) -> Option<&mut AgentState> {
+        self.top_mut().and_then(|f| f.agent_states.get_mut(&node_id))
+    }
+
+    /// Inserts a fresh `Dispatch` agent state for `node_id` with the given session.
+    pub(crate) fn init_agent_state(&mut self, node_id: NodeId, session_id: String) -> bool {
         match self.top_mut() {
-            Some(f) => {
-                f.phase = Some(phase);
+            Some(frame) => {
+                frame.agent_states.insert(node_id, AgentState {
+                    session_id,
+                    call_counts: HashMap::new(),
+                    continuation: AgentContinuation::Dispatch,
+                });
                 true
             }
             None => false,
         }
+    }
+
+    /// Removes the agent state for `node_id`.
+    pub(crate) fn remove_agent_state(&mut self, node_id: NodeId) {
+        if let Some(frame) = self.top_mut() {
+            frame.agent_states.shift_remove(&node_id);
+        }
+    }
+
+    /// Returns the stable session id for `agent_id`.
+    /// If `keep_alive` is true, the id is minted once and stored in `keep_alive_sessions`
+    /// so that repeated loop iterations share the same LLM conversation.
+    pub(crate) fn get_or_init_session_id(&mut self, agent_id: NodeId, keep_alive: bool) -> String {
+        if keep_alive {
+            if let Some(frame) = self.top_mut() {
+                return frame
+                    .keep_alive_sessions
+                    .entry(agent_id)
+                    .or_insert_with(|| Uuid::now_v7().to_string())
+                    .clone();
+            }
+        }
+        Uuid::now_v7().to_string()
     }
 
     pub fn contains_state(&self, id: NodeId) -> bool {
@@ -246,25 +290,6 @@ impl FlowState {
         self.top_mut().and_then(|f| f.states.shift_remove(&id))
     }
 
-    /// Stores tool attachments for the given exit slot.
-    /// Does nothing if the stack is empty or the vec is empty.
-    pub(crate) fn set_tool_attachments(&mut self, id: NodeId, attachments: Vec<Attachment>) {
-        if attachments.is_empty() {
-            return;
-        }
-        if let Some(frame) = self.top_mut() {
-            frame.tool_attachments.insert(id, attachments);
-        }
-    }
-
-    /// Removes and returns tool attachments for the given exit slot.
-    /// Returns an empty vec when none were stored.
-    pub(crate) fn take_tool_attachments(&mut self, id: NodeId) -> Vec<Attachment> {
-        self.top_mut()
-            .and_then(|f| f.tool_attachments.shift_remove(&id))
-            .unwrap_or_default()
-    }
-
     /// Moves a state slot to the end of the top-frame ordering.
     pub fn reinsert_state(&mut self, id: NodeId)  {
         if let Some(frame) = self.top_mut() {
@@ -298,14 +323,20 @@ impl FlowState {
         self.top().map(|f| f.callable.entry)
     }
 
-    /// Returns the session id of the top frame.
+    /// Returns the session id of the first active agent in the top frame,
+    /// or an empty string when no agents are active.
     pub(crate) fn top_session_id(&self) -> &str {
-        self.top().map_or("", |f| &f.session_id)
+        self.top()
+            .and_then(|f| f.agent_states.values().next())
+            .map_or("", |s| s.session_id.as_str())
     }
 
-    /// Returns session ids for every frame, from bottom to top.
+    /// Returns session ids for all active agents across all frames.
     pub fn active_session_ids(&self) -> Vec<&str> {
-        self.frames.iter().map(|f| f.session_id.as_str()).collect()
+        self.frames
+            .iter()
+            .flat_map(|f| f.agent_states.values().map(|s| s.session_id.as_str()))
+            .collect()
     }
 
     /// Returns the current call-stack depth.

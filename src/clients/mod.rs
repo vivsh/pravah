@@ -121,6 +121,35 @@ impl Message {
             ..self
         }
     }
+
+    pub fn with_attachment(mut self, attachment: Attachment) -> Self {
+        self.attachments.push(attachment);
+        self
+    }
+
+    pub fn with_inline(mut self, mime_type: impl Into<String>, bytes: impl AsRef<[u8]>) -> Self {
+        self.attachments.push(Attachment::Inline {
+            mime_type: mime_type.into(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        });
+        self
+    }
+
+    pub fn with_file(mut self, mime_type: impl Into<String>, path: impl Into<String>) -> Self {
+        self.attachments.push(Attachment::File {
+            mime_type: mime_type.into(),
+            path: path.into(),
+        });
+        self
+    }
+
+    pub fn with_url(mut self, mime_type: impl Into<String>, url: impl Into<String>) -> Self {
+        self.attachments.push(Attachment::Url {
+            mime_type: mime_type.into(),
+            url: url.into(),
+        });
+        self
+    }
 }
 
 async fn materialize_attachment(

@@ -79,8 +79,27 @@ When a value of type `I` reaches that node, the runtime returns
 
 ### Tool-Level Suspend
 
-Use `ToolBox::suspend::<T, Out>()` when a running agent should surface a typed
-pause from inside its tool loop.
+To suspend from inside an agent's tool loop, implement the tool as a sub-flow
+that contains a `suspend::<I, O>()` node, then register it as both a tool and a
+flow on the builder.
+
+```rust
+impl Flow for BlogRequest {
+    type Output = FinalResult;
+
+    fn build() -> Result<FlowGraph, FlowError> {
+        FlowGraph::builder()
+            .agent::<BlogRequest>()
+            .tool::<BlogRequest, HumanInput, HumanOutput>()
+            .flow::<HumanInput>()   // HumanInput::build() contains a suspend node
+            .build()
+    }
+}
+```
+
+When the agent calls the tool, the engine enters the `HumanInput` sub-flow.
+If it reaches the `suspend` node, the runtime returns `FlowStep::Suspend` to
+the caller, just like a top-level suspend.
 
 Both end up with the same outer control loop:
 
@@ -148,8 +167,12 @@ for msg in inspector.messages() {
 ```
 
 Evicted (compacted) messages are excluded. Only messages belonging to the
-active frame's session id are returned. a flow has the same outer shape as a node: typed input,
-typed output, stepwise execution.
+active frame's session id are returned.
+
+## Nested Flows
+
+A flow has the same outer shape as a node: typed input, typed output, stepwise
+execution.
 
 ```rust
 FlowGraph::builder()
@@ -182,17 +205,18 @@ See [../examples/snapshot.rs](../examples/snapshot.rs).
 `FlowRuntime::run_until` accepts a `RunLimits` value to cap execution:
 
 ```rust
-use pravah::flows::RunLimits;
+use pravah::flows::{RunLimits, RunOutcome};
 
-let result = runtime.run_until(
-    ctx,
-    RunLimits::new().max_turns(10).max_steps(200),
-).await;
+match runtime.run_until(ctx, RunLimits::new().max_turns(10).max_steps(200)).await? {
+    RunOutcome::Done(v) => { /* flow finished */ }
+    RunOutcome::Suspend(sv) => { /* flow suspended */ }
+    RunOutcome::LimitExceeded(kind) => { /* cap reached */ }
+}
 ```
 
-All limits produce `Err(FlowError::LimitExceeded(reason))` when triggered, so
-you can handle them alongside other errors rather than inspecting a separate
-outcome enum.
+`run_until` returns `Result<RunOutcome<T>, FlowError>`. Most limits produce
+`Ok(RunOutcome::LimitExceeded(LimitKind))`. The `max_turns` limit is a hard
+error and returns `Err(FlowError::LimitExceeded(...))` instead.
 
 Available limits:
 

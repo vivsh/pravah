@@ -459,7 +459,7 @@ fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
                     let exit_str = inner.interner.name_of(exit).to_string();
                     (DiagramNodeKind::Flow, vec![(exit_str, "flow")])
                 }
-                FlowNode::Tool(_) | FlowNode::AgentTool(_) | FlowNode::FlowTool { .. } => return None,
+                _ => return None,
             };
             Some(NodeDesc {
                 id: key_str,

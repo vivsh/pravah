@@ -54,13 +54,14 @@ result the model must produce.
 
 Common `AgentConfig` options:
 
-| Method                     | Effect                                                                                     |
-| -------------------------- | ------------------------------------------------------------------------------------------ |
-| `.with_tools(tb)`          | Attach a `ToolBox`                                                                         |
-| `.with_temperature(t)`     | Set sampling temperature                                                                   |
-| `.with_thinking()`         | Enable extended thinking (Anthropic)                                                       |
-| `.with_thinking_budget(n)` | Set thinking token budget                                                                  |
-| `.keep_alive()`            | Reuse the same session id across loop re-entries so the LLM sees full conversation history |
+| Method                        | Effect                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------ |
+| `.with_temperature(t)`        | Set sampling temperature                                                                   |
+| `.with_thinking(true)`        | Enable extended thinking (Anthropic)                                                       |
+| `.with_thinking_budget(n)`    | Set thinking token budget                                                                  |
+| `.keep_alive()`               | Reuse the same session id across loop re-entries so the LLM sees full conversation history |
+| `.with_max_tool_calls(n)`     | Cap the number of calls allowed per tool name per agent execution                          |
+| `.with_loop_break_message(m)` | Message returned to the LLM when a tool's call budget is exhausted                         |
 
 For the simplest end-to-end example, see
 [../examples/linear_flow.rs](../examples/linear_flow.rs).
@@ -134,33 +135,48 @@ Current behavior:
 
 ## Tools
 
-Attach tools with `.with_tools()` on `AgentConfig`.
+Attach tools to an agent using `.tool::<A, I, O>()` on the `FlowGraph` builder.
+`I` is the tool's input type (its `schema_name()` becomes the tool name) and `O`
+is the output type. Register a matching `work` handler for `I` → `O` separately.
 
 ```rust
-fn build() -> AgentConfig {
-    AgentConfig::new(
-        "You are a careful planning agent.",
-        "gemini://gemini-2.5-flash-lite",
-    )
-    .with_tools(ToolBox::new().tool::<ReadNote>())
+impl Flow for PlannerInput {
+    type Output = Plan;
+
+    fn build() -> Result<FlowGraph, FlowError> {
+        FlowGraph::builder()
+            .agent::<PlannerInput>()
+            .tool::<PlannerInput, ReadNoteInput, ReadNoteOutput>()
+            .work(read_note_handler)
+            .build()
+    }
 }
 ```
 
-`Tool::call` returns `ToolOutput<T>`, not just `T`. That allows a tool to return
-typed JSON plus attachments in the same result.
+Work handlers return `Result<O, FlowError>` where `O` implements the `ToolOutput`
+trait. Override `ToolOutput::to_message` on your output type when you need to
+return attachments alongside the JSON payload.
 
 ### Tool Errors
 
-`ToolError` controls how the engine handles a failed tool call.
+Return `Err(ToolError::Other(msg))` from a work handler to report a failure.
+Pravah always propagates work-node errors to the caller as `FlowError::Tool`.
 
-| Variant                     | Behaviour                                                                                                                                                  |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ToolError::Fatal(msg)`     | Aborts the entire flow with `FlowError`                                                                                                                    |
-| `ToolError::NonFatal(msg)`  | Returns the error text to the LLM as a tool result; the model may recover                                                                                  |
-| `ToolError::LoopLimit(msg)` | Non-fatal; signals that a loop budget has been exhausted. Use this when a tool tracks iteration count and wants the model to stop or take a different path |
+Two error variants abort the flow without going back to the model:
 
-Return `ToolError::LoopLimit` instead of `NonFatal` when you want callers to
-distinguish a deliberate loop-budget signal from an ordinary tool failure.
+| Variant                          | Behaviour                                       |
+| -------------------------------- | ----------------------------------------------- |
+| `ToolError::PathEscape(p)`       | Path escaped the working directory — hard abort |
+| `ToolError::ForbiddenCommand(c)` | Command not on the allow-list — hard abort      |
+
+All other variants (including `ToolError::Other`) surface as `FlowError::Tool`
+and terminate the run.
+
+To cap how many times the LLM may call a given tool in one agent execution,
+use `AgentConfig::with_max_tool_calls(n)` together with
+`with_loop_break_message(msg)`. When the limit is reached Pravah returns
+`msg` to the LLM as the tool result instead of calling the handler, letting the
+model conclude or take a different path.
 
 See [../examples/image_prompt.rs](../examples/image_prompt.rs) for initial user
 attachments and the tool/attachment sections below for the provider behavior.
@@ -215,21 +231,19 @@ vision example built around `Attachment::File`.
 
 ### Tool Attachments
 
-Tools can return JSON and attachments together:
+Override `ToolOutput::to_message` on the output type to include attachments
+alongside the JSON payload:
 
 ```rust
-use pravah::clients::Attachment;
-use pravah::tools::{Tool, ToolError, ToolOutput};
+use pravah::clients::Message;
+use pravah::tools::{ToolError, ToolOutput};
 
-async fn call(self, ctx: Context) -> Result<ToolOutput<Self::Output>, ToolError> {
-    let content = tokio::fs::read_to_string(ctx.resolve("note.txt")?).await?;
-    Ok(ToolOutput::with_attachment(
-        ReadNoteOutput { content: content.clone() },
-        Attachment::Inline {
-            mime_type: "text/plain".into(),
-            data: base64::engine::general_purpose::STANDARD.encode(content.as_bytes()),
-        },
-    ))
+impl ToolOutput for ReadNoteOutput {
+    fn to_message(self) -> Result<Message, ToolError> {
+        let content = serde_json::to_string(&self).map_err(ToolError::Serialize)?;
+        Ok(Message::tool_output(String::new(), content)
+            .with_inline("text/plain", self.content.as_bytes()))
+    }
 }
 ```
 
