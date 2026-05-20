@@ -37,8 +37,6 @@ pub enum AgentContinuation {
 pub(crate) struct AgentState {
     /// Session ID used for LLM history.
     pub session_id: String,
-    /// Call counts per tool name, accumulated across the entire agent execution.
-    pub call_counts: HashMap<String, usize>,
     pub continuation: AgentContinuation,
 }
 
@@ -219,7 +217,6 @@ impl FlowState {
             Some(frame) => {
                 frame.agent_states.insert(node_id, AgentState {
                     session_id,
-                    call_counts: HashMap::new(),
                     continuation: AgentContinuation::Dispatch,
                 });
                 true

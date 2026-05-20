@@ -32,6 +32,11 @@ pub enum ToolError {
     Missing(#[from] DepsError),
     #[error("{0}")]
     Other(String),
+    /// The tool failed in a way the model can correct (bad arguments, constraint
+    /// violation, etc.).  The message is sent back to the LLM as a tool-result
+    /// error instead of halting the flow.
+    #[error("{0}")]
+    Recoverable(String),
 }
 
 impl ToolError {

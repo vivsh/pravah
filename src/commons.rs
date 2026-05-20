@@ -15,12 +15,6 @@ pub struct AgentConfig {
     /// When true, repeated invocations of this agent share a stable session id,
     /// keeping the full conversation history visible across loop iterations.
     pub keep_alive: bool,
-    /// Error message returned to the LLM when a tool exceeds its call budget.
-    /// Requires `max_tool_calls` to be set.
-    pub loop_break_message: Option<String>,
-    /// Maximum calls allowed per tool per agent execution.
-    /// When exceeded, `loop_break_message` is returned instead of calling the tool.
-    pub max_tool_calls: Option<usize>,
 }
 
 impl AgentConfig {
@@ -30,8 +24,6 @@ impl AgentConfig {
             preamble: preamble.into(),
             model_url: model_url.into(),
             keep_alive: false,
-            loop_break_message: None,
-            max_tool_calls: None,
         }
     }
 
@@ -41,17 +33,6 @@ impl AgentConfig {
         self
     }
 
-    /// Sets the loop-break message returned to the LLM when a tool call limit is reached.
-    pub fn with_loop_break_message(mut self, message: impl Into<String>) -> Self {
-        self.loop_break_message = Some(message.into());
-        self
-    }
-
-    /// Sets the maximum number of calls allowed per tool name.
-    pub fn with_max_tool_calls(mut self, max: usize) -> Self {
-        self.max_tool_calls = Some(max);
-        self
-    }
 }
 
 /// Implemented by every agent input type.

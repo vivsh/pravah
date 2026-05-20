@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use super::history::FlowHistory;
 use super::nary::{MergeInputs, SplitOutputs};
-use crate::flows::{AgentConfig, NodeId};
+use crate::flows::{NodeId};
 use crate::flows::errors::{AgentError, BuildError, FlowError};
 use crate::flows::interner::Interner;
 use crate::flows::state::{AgentContinuation, AgentState, Callable, FlowState, WaitingCall};
@@ -50,11 +50,6 @@ pub(crate) struct AgentInfo {
     /// Maps tool call names to their state entry and exit slots.
     pub(crate) tool_lookup: HashMap<String, (NodeId, NodeId)>,
     pub(crate) keep_alive: bool,
-    /// When set together with `max_tool_calls`, an error result with this
-    /// message is returned to the LLM if a tool exceeds its call budget.
-    pub(crate) loop_break_message: Option<String>,
-    /// Per-tool call limit used together with `loop_break_message`.
-    pub(crate) max_tool_calls: Option<usize>,
 }
 
 pub(crate) struct EitherInfo {
@@ -446,73 +441,98 @@ impl FlowGraph {
                 ..
             }) => {
                 let session_id = session_id.clone();
-                let agent_name = flow.interner.name_of(node.id);
+                let active = active.clone();
+                let waiting = waiting.clone();
+                Self::handle_pending_tools(
+                    node, flow, factory, ctx, history, states, session_id, active, waiting,
+                )
+                .await
+            }
+        }
+    }
 
-                // Clone so we can release the borrow while mutating states.
-                let mut active = active.clone();
-                let mut waiting = waiting.clone();
+    /// Collects finished tool results, promotes queued calls, and either
+    /// re-dispatches the agent or yields until remaining tools complete.
+    async fn handle_pending_tools(
+        node: &AgentInfo,
+        flow: &FlowGraph,
+        factory: &dyn ClientFactory,
+        ctx: Context,
+        history: &mut FlowHistory,
+        states: &mut FlowState,
+        session_id: String,
+        mut active: HashMap<NodeId, (String, String)>,
+        mut waiting: HashMap<NodeId, VecDeque<WaitingCall>>,
+    ) -> Result<FlowStep, FlowError> {
+        let agent_name = flow.interner.name_of(node.id);
+        let mut completions: Vec<(NodeId, String)> = Vec::new();
+        for (&exit_id, (call_id, _)) in &active {
+            if states.contains_state(exit_id) {
+                completions.push((exit_id, call_id.clone()));
+            }
+        }
 
-                // Collect finished tool exits.
-                let mut completions: Vec<(NodeId, String)> = Vec::new(); // (exit_id, call_id)
-                for (&exit_id, (call_id, _)) in &active {
-                    if states.contains_state(exit_id) {
-                        completions.push((exit_id, call_id.clone()));
-                    }
+        let completed_count = completions.len();
+        for (exit_id, call_id) in completions {
+            let value = states.take_state(exit_id).ok_or_else(|| FlowError::Internal {
+                handler: "handle_pending_tools",
+                detail: format!("tool exit {:?} missing after contains_state check", exit_id),
+            })?;
+            let tool_info = node.tools.iter().find(|t| t.exit_id == exit_id)
+                .ok_or_else(|| FlowError::Internal {
+                    handler: "handle_pending_tools",
+                    detail: format!("no ToolInfo for exit_id {:?}", exit_id),
+                })?;
+            let mut msg = match (tool_info.to_message)(value) {
+                Ok(m) => m,
+                Err(ToolError::Recoverable(err)) => {
+                    tracing::warn!(
+                        agent = %agent_name,
+                        call_id = %call_id,
+                        error = %err,
+                        "tool returned recoverable error"
+                    );
+                    Message::tool_output(String::new(), format!(r#"{{"error":"{err}"}}"#))
                 }
+                Err(e) => return Err(FlowError::Tool(e)),
+            };
+            msg.role = Role::Tool { call_id };
+            history.push(&session_id, agent_name, msg);
 
-                let completed_count = completions.len();
-                for (exit_id, call_id) in completions {
-                    let value = states.take_state(exit_id).unwrap_or_default();
-                    let tool_info = node.tools.iter().find(|t| t.exit_id == exit_id)
-                        .ok_or_else(|| FlowError::Internal {
-                            handler: "handle_agent",
-                            detail: format!("no ToolInfo for exit_id {:?}", exit_id),
-                        })?;
-                    let mut msg = (tool_info.to_message)(value).map_err(FlowError::Tool)?;
-                    msg.role = Role::Tool { call_id };
-                    history.push(&session_id, agent_name, msg);
-
-                    active.remove(&exit_id);
-                    if let Some(queue) = waiting.get_mut(&exit_id) {
-                        if let Some(next) = queue.pop_front() {
-                            if !states.set_state(next.entry_id, next.args, None) {
-                                return Err(FlowError::Internal {
-                                    handler: "handle_agent",
-                                    detail: "PendingTool promote: frame stack empty".into(),
-                                });
-                            }
-                            active.insert(exit_id, (next.call_id, next.call_name));
-                        }
+            active.remove(&exit_id);
+            if let Some(queue) = waiting.get_mut(&exit_id) {
+                if let Some(next) = queue.pop_front() {
+                    if !states.set_state(next.entry_id, next.args, None) {
+                        return Err(FlowError::Internal {
+                            handler: "handle_pending_tools",
+                            detail: "PendingTool promote: frame stack empty".into(),
+                        });
                     }
-                    waiting.retain(|_, q| !q.is_empty());
-                }
-
-                tracing::debug!(
-                    agent = %agent_name,
-                    completed = completed_count,
-                    active = active.len(),
-                    "tool results collected"
-                );
-
-                if active.is_empty() {
-                    // All tools done → re-dispatch.
-                    if let Some(s) = states.get_agent_state_mut(node.id) {
-                        s.continuation = AgentContinuation::Dispatch;
-                    }
-                    states.reinsert_state(node.id);
-                    Self::dispatch_agent(
-                        node, flow, factory, ctx, history, states, &session_id,
-                    )
-                    .await
-                } else {
-                    // Still waiting for some tools.
-                    if let Some(s) = states.get_agent_state_mut(node.id) {
-                        s.continuation = AgentContinuation::PendingTool { active, waiting };
-                    }
-                    states.reinsert_state(node.id);
-                    Ok(FlowStep::Continue)
+                    active.insert(exit_id, (next.call_id, next.call_name));
                 }
             }
+            waiting.retain(|_, q| !q.is_empty());
+        }
+
+        tracing::debug!(
+            agent = %agent_name,
+            completed = completed_count,
+            active = active.len(),
+            "tool results collected"
+        );
+
+        if active.is_empty() {
+            if let Some(s) = states.get_agent_state_mut(node.id) {
+                s.continuation = AgentContinuation::Dispatch;
+            }
+            states.reinsert_state(node.id);
+            Self::dispatch_agent(node, flow, factory, ctx, history, states, &session_id).await
+        } else {
+            if let Some(s) = states.get_agent_state_mut(node.id) {
+                s.continuation = AgentContinuation::PendingTool { active, waiting };
+            }
+            states.reinsert_state(node.id);
+            Ok(FlowStep::Continue)
         }
     }
 
@@ -640,17 +660,10 @@ impl FlowGraph {
                 };
                 history.push(session_id, &agent_name, atc_msg);
 
-                // Retrieve existing call_counts (survives Dispatch transitions).
-                let existing_counts: HashMap<String, usize> = states
-                    .get_agent_state(node.id)
-                    .map(|s| s.call_counts.clone())
-                    .unwrap_or_default();
-
                 let mut seen_call_ids = HashSet::new();
                 let mut active: HashMap<NodeId, (String, String)> =
                     HashMap::with_capacity(calls.len());
                 let mut waiting: HashMap<NodeId, VecDeque<WaitingCall>> = HashMap::new();
-                let mut new_counts = existing_counts;
 
                 for call in calls {
                     if !seen_call_ids.insert(call.id.clone()) {
@@ -678,32 +691,6 @@ impl FlowGraph {
                         );
                         continue;
                     };
-
-                    // Check per-tool loop limit.
-                    let count = new_counts.entry(call.name.clone()).or_insert(0);
-                    *count += 1;
-                    if let (Some(max), Some(msg)) =
-                        (node.max_tool_calls, &node.loop_break_message)
-                    {
-                        if *count > max {
-                            tracing::warn!(
-                                agent = %agent_name,
-                                tool = %call.name,
-                                count = *count,
-                                max,
-                                "tool call loop limit exceeded; returning error"
-                            );
-                            history.push(
-                                session_id,
-                                &agent_name,
-                                Message::tool_output(
-                                    call.id.clone(),
-                                    format!(r#"{{"error":"{msg}"}}"#),
-                                ),
-                            );
-                            continue;
-                        }
-                    }
 
                     if active.contains_key(&exit_id) {
                         // The submit sentinel (exit == node.exit) may only appear once.
@@ -739,10 +726,8 @@ impl FlowGraph {
                     AgentContinuation::Dispatch
                 };
 
-                // Update agent state with new continuation and call counts.
                 if let Some(s) = states.get_agent_state_mut(node.id) {
                     s.continuation = continuation;
-                    s.call_counts = new_counts;
                 }
 
                 if needs_pending {
@@ -932,8 +917,6 @@ impl FlowBuilder {
             output_schema,
             tool_lookup: HashMap::new(),
             keep_alive: config.keep_alive,
-            loop_break_message: config.loop_break_message,
-            max_tool_calls: config.max_tool_calls,
         };
         self.flow
             .nodes

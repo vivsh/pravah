@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use crate::{
     Context,
-    clients::{DefaultClientFactory, Message},
+    clients::{DefaultClientFactory, Message, Role},
     flows::{
+        ClientFactory, Flow, FlowError, FlowGraph, FlowHistory, FlowStep, NodeId,
         compactor::{DynHistoryCompactor, NoopCompactor},
+        flows::FlowNode,
         inspect::FlowInspector,
-        store::{DynHistoryStore, NoopHistoryStore},
-        ClientFactory, Flow, FlowError, FlowGraph, FlowHistory, FlowStep, NodeId, flows::FlowNode,
         state::{Callable, FlowState},
+        store::{DynHistoryStore, NoopHistoryStore},
     },
     tools::SuspendedValue,
 };
@@ -22,9 +23,9 @@ use serde_json::Value;
 fn lift_step<T: DeserializeOwned>(step: FlowStep<Value>) -> Result<FlowStep<T>, FlowError> {
     match step {
         FlowStep::Continue => Ok(FlowStep::Continue),
-        FlowStep::Done(val) => {
-            serde_json::from_value(val).map(FlowStep::Done).map_err(FlowError::Deserialize)
-        }
+        FlowStep::Done(val) => serde_json::from_value(val)
+            .map(FlowStep::Done)
+            .map_err(FlowError::Deserialize),
         FlowStep::Suspend(s) => Ok(FlowStep::Suspend(s)),
     }
 }
@@ -94,7 +95,6 @@ pub struct FlowRuntime<I: Flow> {
 }
 
 impl<I: Flow> FlowRuntime<I> {
-
     fn build_graph() -> Result<FlowGraph, FlowError> {
         FlowGraph::from_flow::<I>()
     }
@@ -108,7 +108,11 @@ impl<I: Flow> FlowRuntime<I> {
 
         let mut state = FlowState::new();
         let mut history = FlowHistory::new();
-        history.push("__root__", "__runtime__", Message::user(format!("Starting flow: {}", I::node_id())));
+        history.push(
+            "__root__",
+            "__runtime__",
+            Message::user(format!("Starting flow: {}", I::node_id())),
+        );
 
         let (root_callable_index, callables) = Self::make_callables(graph)?;
 
@@ -161,7 +165,8 @@ impl<I: Flow> FlowRuntime<I> {
                         } else {
                             return Err(FlowError::Internal {
                                 handler: "collect_callables",
-                                detail: "failed to get exclusive Arc reference to inner flow".into(),
+                                detail: "failed to get exclusive Arc reference to inner flow"
+                                    .into(),
                             });
                         }
                     }
@@ -179,7 +184,10 @@ impl<I: Flow> FlowRuntime<I> {
     }
 
     /// Replaces the history compactor.
-    pub fn with_compactor(mut self, c: impl crate::flows::compactor::HistoryCompactor + 'static) -> Self {
+    pub fn with_compactor(
+        mut self,
+        c: impl crate::flows::compactor::HistoryCompactor + 'static,
+    ) -> Self {
         self.compactor = Box::new(c);
         self
     }
@@ -202,17 +210,39 @@ impl<I: Flow> FlowRuntime<I> {
         FlowInspector::new(&self.state, &self.callables, &self.history)
     }
 
+    /// Total number of LLM calls made across all agents since the flow started.
+    /// Counts each `Assistant` and `AssistantToolCalls` history entry.
+    pub fn agent_call_count(&self) -> usize {
+        self.history
+            .entries()
+            .iter()
+            .filter(|e| {
+                !e.evicted
+                    && matches!(
+                        e.message.role,
+                        Role::Assistant | Role::AssistantToolCalls { .. }
+                    )
+            })
+            .count()
+    }
+
     /// Injects a user message into the current agent session's history.
     /// Only call this when [`FlowInspector::is_agent_dispatch_ready`] returns `true`.
-    pub fn push_message(&mut self, content: impl Into<String>) {
-        let Some(frame) = self.state.frames_slice().last() else { return };
+    pub fn inject_message(&mut self, content: impl Into<String>) {
+        let Some(frame) = self.state.frames_slice().last() else {
+            return;
+        };
         // Find the first agent in Dispatch state.
         let (session_id, agent_name) = frame
             .agent_states
             .iter()
             .find_map(|(&agent_id, agent_state)| {
-                if matches!(agent_state.continuation, crate::flows::state::AgentContinuation::Dispatch) {
-                    let name = self.callables
+                if matches!(
+                    agent_state.continuation,
+                    crate::flows::state::AgentContinuation::Dispatch
+                ) {
+                    let name = self
+                        .callables
                         .get(frame.callable.index)
                         .map(|c| c.0.interner.name_of(agent_id).to_owned())
                         .unwrap_or_else(|| "__runtime__".to_owned());
@@ -223,21 +253,33 @@ impl<I: Flow> FlowRuntime<I> {
             })
             .unwrap_or_else(|| {
                 let session = frame.session_id.clone();
-                let agent = self.callables
+                let agent = self
+                    .callables
                     .get(frame.callable.index)
                     .map(|c| c.0.interner.name_of(frame.callable.entry).to_owned())
                     .unwrap_or_else(|| "__runtime__".to_owned());
                 (session, agent)
             });
-        self.history.push(&session_id, &agent_name, Message::user(content));
+        self.history
+            .push(&session_id, &agent_name, Message::user(content));
     }
 
     pub async fn next(&mut self, ctx: Context) -> Result<FlowStep<I::Output>, FlowError> {
         let factory = Arc::clone(&self.factory);
-        let callable_index = self.state.callable_index()
-            .ok_or_else(|| FlowError::Internal { handler: "next", detail: "called after flow completed".into() })?;
-        let graph = self.callables.get(callable_index)
-            .ok_or_else(|| FlowError::Internal { handler: "next", detail: format!("callable index {callable_index} out of range") })?;
+        let callable_index = self
+            .state
+            .callable_index()
+            .ok_or_else(|| FlowError::Internal {
+                handler: "next",
+                detail: "called after flow completed".into(),
+            })?;
+        let graph = self
+            .callables
+            .get(callable_index)
+            .ok_or_else(|| FlowError::Internal {
+                handler: "next",
+                detail: format!("callable index {callable_index} out of range"),
+            })?;
         tracing::debug!(
             flow = %I::node_id(),
             callable_index,
@@ -246,12 +288,7 @@ impl<I: Flow> FlowRuntime<I> {
         );
         let out = graph
             .0
-            .next(
-                factory.as_ref(),
-                ctx,
-                &mut self.history,
-                &mut self.state,
-            )
+            .next(factory.as_ref(), ctx, &mut self.history, &mut self.state)
             .await?;
         self.run_compaction_and_flush().await;
         let step = lift_step(out)?;
@@ -293,7 +330,9 @@ impl<I: Flow> FlowRuntime<I> {
             if let Some(max) = limits.max_turns {
                 if turns >= max {
                     log_limit("max_turns", steps, self.state.depth());
-                    return Err(FlowError::LimitExceeded(format!("max_turns ({max}) exceeded")));
+                    return Err(FlowError::LimitExceeded(format!(
+                        "max_turns ({max}) exceeded"
+                    )));
                 }
             }
             if let Some(max) = limits.max_depth {
@@ -312,7 +351,9 @@ impl<I: Flow> FlowRuntime<I> {
             steps += 1;
             match self.next(ctx.clone()).await? {
                 FlowStep::Continue => {
-                    if was_dispatch { turns += 1; }
+                    if was_dispatch {
+                        turns += 1;
+                    }
                 }
                 FlowStep::Done(v) => return Ok(RunOutcome::Done(v)),
                 FlowStep::Suspend(sv) => return Ok(RunOutcome::Suspend(sv)),
@@ -325,7 +366,9 @@ impl<I: Flow> FlowRuntime<I> {
         ctx: Context,
         value: R,
     ) -> Result<FlowStep<I::Output>, FlowError> {
-        let suspension = self.state.suspension()
+        let suspension = self
+            .state
+            .suspension()
             .ok_or(FlowError::UnexpectedResumption)?;
         let expected = suspension.output_type.clone();
         let got: String = R::schema_name().into();
@@ -334,10 +377,20 @@ impl<I: Flow> FlowRuntime<I> {
         }
         let resumption = serde_json::to_value(value).map_err(FlowError::Serialize)?;
         let factory = Arc::clone(&self.factory);
-        let callable_index = self.state.callable_index()
-            .ok_or_else(|| FlowError::Internal { handler: "resume", detail: "called after flow completed".into() })?;
-        let graph = self.callables.get(callable_index)
-            .ok_or_else(|| FlowError::Internal { handler: "resume", detail: format!("callable index {callable_index} out of range") })?;
+        let callable_index = self
+            .state
+            .callable_index()
+            .ok_or_else(|| FlowError::Internal {
+                handler: "resume",
+                detail: "called after flow completed".into(),
+            })?;
+        let graph = self
+            .callables
+            .get(callable_index)
+            .ok_or_else(|| FlowError::Internal {
+                handler: "resume",
+                detail: format!("callable index {callable_index} out of range"),
+            })?;
         let out = graph
             .0
             .resume(
