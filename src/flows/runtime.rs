@@ -8,7 +8,7 @@ use crate::{
         compactor::{DynHistoryCompactor, NoopCompactor},
         flows::FlowNode,
         inspect::FlowInspector,
-        state::{Callable, FlowState},
+        state::{AgentContinuation, Callable, FlowState},
         store::{DynHistoryStore, NoopHistoryStore},
     },
     tools::SuspendedValue,
@@ -228,40 +228,31 @@ impl<I: Flow> FlowRuntime<I> {
 
     /// Injects a user message into the current agent session's history.
     /// Only call this when [`FlowInspector::is_agent_dispatch_ready`] returns `true`.
-    pub fn inject_message(&mut self, content: impl Into<String>) {
-        let Some(frame) = self.state.frames_slice().last() else {
-            return;
-        };
-        // Find the first agent in Dispatch state.
+    /// Returns an error if no frame is active or no agent is at a dispatch boundary.
+    pub fn inject_message(&mut self, content: impl Into<String>) -> Result<(), FlowError> {
+        let frame = self.state.frames_slice().last().ok_or_else(|| FlowError::Internal {
+            handler: "inject_message",
+            detail: "no active frame".into(),
+        })?;
+        let callable = self.callables.get(frame.callable.index).ok_or_else(|| FlowError::Internal {
+            handler: "inject_message",
+            detail: format!("callable index {} out of range", frame.callable.index),
+        })?;
         let (session_id, agent_name) = frame
             .agent_states
             .iter()
             .find_map(|(&agent_id, agent_state)| {
-                if matches!(
-                    agent_state.continuation,
-                    crate::flows::state::AgentContinuation::Dispatch
-                ) {
-                    let name = self
-                        .callables
-                        .get(frame.callable.index)
-                        .map(|c| c.0.interner.name_of(agent_id).to_owned())
-                        .unwrap_or_else(|| "__runtime__".to_owned());
-                    Some((agent_state.session_id.clone(), name))
-                } else {
-                    None
-                }
+                matches!(agent_state.continuation, AgentContinuation::Dispatch).then(|| {
+                    let name = callable.0.interner.name_of(agent_id).to_owned();
+                    (agent_state.session_id.clone(), name)
+                })
             })
-            .unwrap_or_else(|| {
-                let session = frame.session_id.clone();
-                let agent = self
-                    .callables
-                    .get(frame.callable.index)
-                    .map(|c| c.0.interner.name_of(frame.callable.entry).to_owned())
-                    .unwrap_or_else(|| "__runtime__".to_owned());
-                (session, agent)
-            });
-        self.history
-            .push(&session_id, &agent_name, Message::user(content));
+            .ok_or_else(|| FlowError::Internal {
+                handler: "inject_message",
+                detail: "no agent is at a dispatch boundary; only call inject_message when is_agent_dispatch_ready() returns true".into(),
+            })?;
+        self.history.push(&session_id, &agent_name, Message::user(content));
+        Ok(())
     }
 
     pub async fn next(&mut self, ctx: Context) -> Result<FlowStep<I::Output>, FlowError> {
