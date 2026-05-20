@@ -39,8 +39,10 @@ mod ollama;
 #[cfg(feature = "provider-openai")]
 mod openai;
 pub(super) mod schema;
+pub mod url;
 
 pub use crate::tools::ToolDefinition;
+pub use url::{LlmUrl, ThinkingLevel};
 
 /// Role of a message in provider-facing history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,182 +337,7 @@ impl Provider {
     }
 }
 
-#[derive(Debug, Default)]
-struct TransportQuery {
-    api_key: Option<String>,
-    base_url: Option<String>,
-}
 
-/// Parsed model URL.
-/// Cloud providers use `scheme://[key@]model`.
-/// Compatible endpoints may add `?base_url=...&api_key_env=...`.
-/// Ollama also accepts the legacy `ollama://host:port/model` form.
-#[derive(Debug, Clone)]
-pub struct LlmUrl {
-    pub provider: Provider,
-    pub model: String,
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
-}
-
-impl LlmUrl {
-    /// Parses a model URL.
-    pub fn parse(s: &str) -> Result<Self, ClientError> {
-        let (scheme, rest) = s.split_once("://").ok_or_else(|| {
-            ClientError::InvalidUrl(format!(
-                "missing scheme in '{s}'; expected e.g. gemini://model-name"
-            ))
-        })?;
-
-        let provider = match scheme {
-            "gemini" => Provider::Gemini,
-            "ollama" => Provider::Ollama,
-            "openai" => Provider::OpenAi,
-            "anthropic" | "claude" => Provider::Anthropic,
-            other => {
-                return Err(ClientError::InvalidUrl(format!(
-                    "unknown provider '{other}'; expected gemini, ollama, openai, anthropic, or claude"
-                )));
-            }
-        };
-
-        let (rest, query) = split_query(rest);
-        let transport = parse_transport_query(query)?;
-
-        match provider {
-            Provider::Ollama => parse_ollama_url(rest, transport),
-            _ => parse_cloud_url(provider, rest, transport, s),
-        }
-    }
-}
-
-fn split_query(rest: &str) -> (&str, Option<&str>) {
-    match rest.split_once('?') {
-        Some((path, query)) => (path, Some(query)),
-        None => (rest, None),
-    }
-}
-
-fn parse_transport_query(query: Option<&str>) -> Result<TransportQuery, ClientError> {
-    let Some(query) = query else {
-        return Ok(TransportQuery::default());
-    };
-
-    let mut transport = TransportQuery::default();
-    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-        let (name, value) = pair.split_once('=').ok_or_else(|| {
-            ClientError::InvalidUrl(format!("query parameter '{pair}' must be key=value"))
-        })?;
-        if value.is_empty() {
-            return Err(ClientError::InvalidUrl(format!(
-                "query parameter '{name}' must not be empty"
-            )));
-        }
-        match name {
-            "api_key_env" => set_query_api_key(&mut transport, value)?,
-            "base_url" => set_query_base_url(&mut transport, value)?,
-            other => {
-                return Err(ClientError::InvalidUrl(format!(
-                    "unknown query parameter '{other}'; supported params are base_url and api_key_env"
-                )));
-            }
-        }
-    }
-    Ok(transport)
-}
-
-fn set_query_api_key(transport: &mut TransportQuery, env_name: &str) -> Result<(), ClientError> {
-    if transport.api_key.is_some() {
-        return Err(ClientError::InvalidUrl(
-            "api_key_env must only be provided once".into(),
-        ));
-    }
-    let api_key = std::env::var(env_name).map_err(|_| {
-        ClientError::InvalidUrl(format!(
-            "environment variable '{env_name}' referenced by api_key_env is not set"
-        ))
-    })?;
-    transport.api_key = Some(api_key);
-    Ok(())
-}
-
-fn set_query_base_url(transport: &mut TransportQuery, base_url: &str) -> Result<(), ClientError> {
-    if transport.base_url.is_some() {
-        return Err(ClientError::InvalidUrl(
-            "base_url must only be provided once".into(),
-        ));
-    }
-    transport.base_url = Some(normalize_base_url(base_url)?);
-    Ok(())
-}
-
-fn normalize_base_url(base_url: &str) -> Result<String, ClientError> {
-    let url = reqwest::Url::parse(base_url).map_err(|e| {
-        ClientError::InvalidUrl(format!("invalid base_url '{base_url}': {e}"))
-    })?;
-    Ok(url.as_str().trim_end_matches('/').to_string())
-}
-
-fn parse_cloud_url(
-    provider: Provider,
-    rest: &str,
-    transport: TransportQuery,
-    original: &str,
-) -> Result<LlmUrl, ClientError> {
-    let (inline_api_key, model) = match rest.split_once('@') {
-        Some((key, model)) => (Some(key.to_owned()), model.to_owned()),
-        None => (None, rest.to_owned()),
-    };
-    if model.is_empty() {
-        return Err(ClientError::InvalidUrl(format!(
-            "missing model name in '{original}'"
-        )));
-    }
-    Ok(LlmUrl {
-        provider,
-        model,
-        api_key: inline_api_key.or(transport.api_key),
-        base_url: transport.base_url,
-    })
-}
-
-fn parse_ollama_url(rest: &str, transport: TransportQuery) -> Result<LlmUrl, ClientError> {
-    if rest.is_empty() {
-        return Err(ClientError::InvalidUrl(
-            "missing model name in ollama URL".into(),
-        ));
-    }
-
-    let (model, base_url) = match rest.split_once('/') {
-        Some((authority, model)) => {
-            if model.is_empty() {
-                return Err(ClientError::InvalidUrl(
-                    "missing model name in ollama URL".into(),
-                ));
-            }
-            let base_url = transport
-                .base_url
-                .unwrap_or_else(|| format!("http://{authority}"));
-            (model.to_owned(), base_url)
-        }
-        None => {
-            let base_url = transport.base_url.ok_or_else(|| {
-                ClientError::InvalidUrl(
-                    "ollama URL must have format ollama://host:port/model-name or provide ?base_url=..."
-                        .into(),
-                )
-            })?;
-            (rest.to_owned(), base_url)
-        }
-    };
-
-    Ok(LlmUrl {
-        provider: Provider::Ollama,
-        model,
-        api_key: transport.api_key,
-        base_url: Some(base_url),
-    })
-}
 
 pub(super) fn required_api_key(url: &LlmUrl, default_env: &str) -> Result<String, ClientError> {
     url.api_key
@@ -552,8 +379,8 @@ pub struct ClientOptions {
     pub preamble: Option<String>,
     /// Tools available to the model.
     pub tools: Vec<ToolDefinition>,
-    /// Enables provider-specific reasoning modes.
-    pub thinking: bool,
+    /// Reasoning depth. `None` means no thinking mode.
+    pub thinking: Option<ThinkingLevel>,
     /// Tool-call policy.
     pub tool_choice: ToolChoice,
     /// JSON Schema for the user payload.
@@ -562,8 +389,6 @@ pub struct ClientOptions {
     pub output_schema: Option<Value>,
     /// Sampling temperature.
     pub temperature: Option<f32>,
-    /// Reasoning budget. Ignored unless `thinking` is enabled.
-    pub thinking_budget: Option<u32>,
 }
 
 impl ClientOptions {
@@ -577,7 +402,7 @@ impl ClientOptions {
         self
     }
 
-    pub fn with_thinking(mut self, thinking: bool) -> Self {
+    pub fn with_thinking(mut self, thinking: Option<ThinkingLevel>) -> Self {
         self.thinking = thinking;
         self
     }
@@ -638,21 +463,15 @@ impl ClientOptions {
         self
     }
 
-    /// Sets the reasoning budget.
-    pub fn with_thinking_budget(mut self, budget: u32) -> Self {
-        self.thinking_budget = Some(budget);
-        self
-    }
-
-    /// Sets the reasoning budget from an `Option`.
-    pub fn with_thinking_budget_opt(mut self, budget: Option<u32>) -> Self {
-        self.thinking_budget = budget;
-        self
-    }
-
     /// Builds a provider client for the given model URL.
-    pub fn create(self, llm_url: &str) -> Result<Box<dyn Client>, ClientError> {
+    pub fn create(mut self, llm_url: &str) -> Result<Box<dyn Client>, ClientError> {
         let url = LlmUrl::parse(llm_url)?;
+        if url.temperature.is_some() {
+            self.temperature = url.temperature;
+        }
+        if url.thinking.is_some() {
+            self.thinking = url.thinking.clone();
+        }
         match url.provider {
             #[cfg(feature = "provider-gemini")]
             Provider::Gemini => gemini::new_client(&url, self),
@@ -901,19 +720,11 @@ mod tests {
     /// `LlmUrl::parse` correctly parses a gemini URL without an API key.
     #[test]
     fn parse_gemini_url_no_key() {
-        let url = LlmUrl::parse("gemini://gemini-2.5-flash-lite").unwrap();
+        let url = LlmUrl::parse("gemini:///gemini-2.5-flash-lite").unwrap();
         assert_eq!(url.provider, Provider::Gemini);
         assert_eq!(url.model, "gemini-2.5-flash-lite");
         assert!(url.api_key.is_none());
         assert!(url.base_url.is_none());
-    }
-
-    /// `LlmUrl::parse` extracts an inline API key.
-    #[test]
-    fn parse_gemini_url_with_key() {
-        let url = LlmUrl::parse("gemini://mykey@gemini-2.5-flash-lite").unwrap();
-        assert_eq!(url.api_key.as_deref(), Some("mykey"));
-        assert_eq!(url.model, "gemini-2.5-flash-lite");
     }
 
     /// `LlmUrl::parse` extracts host and model from an ollama URL.
@@ -926,58 +737,25 @@ mod tests {
         assert!(url.api_key.is_none());
     }
 
-    /// `LlmUrl::parse` accepts query-param base URLs for protocol-compatible OpenAI endpoints.
-    #[test]
-    fn parse_openai_query_base_url() {
-        let url = LlmUrl::parse(
-            "openai://gpt-4o?base_url=https://openrouter.ai/api/v1/",
-        )
-        .unwrap();
-        assert_eq!(url.provider, Provider::OpenAi);
-        assert_eq!(url.model, "gpt-4o");
-        assert_eq!(url.base_url.as_deref(), Some("https://openrouter.ai/api/v1"));
-    }
-
     /// `LlmUrl::parse` resolves `api_key_env` query params before the client is built.
     #[test]
     fn parse_query_api_key_env() {
         let expected = std::env::var("PATH").expect("PATH should be set during tests");
         let url = LlmUrl::parse(
-            "anthropic://claude-haiku-4-5?api_key_env=PATH",
+            "anthropic:///claude-haiku-4-5?api_key_env=PATH",
         )
         .unwrap();
         assert_eq!(url.provider, Provider::Anthropic);
         assert_eq!(url.api_key.as_deref(), Some(expected.as_str()));
     }
 
-    /// Query-param Ollama URLs work without the legacy host/model split.
-    #[test]
-    fn parse_ollama_query_base_url() {
-        let url = LlmUrl::parse(
-            "ollama://qwen3:8b?base_url=http://localhost:11434",
-        )
-        .unwrap();
-        assert_eq!(url.provider, Provider::Ollama);
-        assert_eq!(url.model, "qwen3:8b");
-        assert_eq!(url.base_url.as_deref(), Some("http://localhost:11434"));
-    }
-
     /// `anthropic://` and `claude://` both select the Anthropic provider.
     #[test]
     fn parse_anthropic_aliases() {
-        let anthropic = LlmUrl::parse("anthropic://claude-sonnet-4-5").unwrap();
-        let claude = LlmUrl::parse("claude://claude-sonnet-4-5").unwrap();
+        let anthropic = LlmUrl::parse("anthropic:///claude-sonnet-4-5").unwrap();
+        let claude = LlmUrl::parse("claude:///claude-sonnet-4-5").unwrap();
         assert_eq!(anthropic.provider, Provider::Anthropic);
         assert_eq!(claude.provider, Provider::Anthropic);
-    }
-
-    /// Provider schemes are authoritative even for custom model names.
-    #[test]
-    fn parse_openai_custom_model_stays_openai() {
-        let url = LlmUrl::parse("openai://key@ft-custom-agent-model").unwrap();
-        assert_eq!(url.provider, Provider::OpenAi);
-        assert_eq!(url.api_key.as_deref(), Some("key"));
-        assert_eq!(url.model, "ft-custom-agent-model");
     }
 
     /// Tool schemas must be JSON objects and duplicate names are rejected before provider calls.
@@ -1015,7 +793,7 @@ mod tests {
     #[test]
     fn parse_unknown_scheme_errors() {
         assert!(matches!(
-            LlmUrl::parse("unknown://model"),
+            LlmUrl::parse("unknown:///model"),
             Err(ClientError::InvalidUrl(_))
         ));
     }
@@ -1024,7 +802,7 @@ mod tests {
     #[test]
     fn parse_missing_api_key_env_errors() {
         assert!(matches!(
-            LlmUrl::parse("openai://gpt-4o?api_key_env=__PRAVAH_MISSING_ENV__"),
+            LlmUrl::parse("openai:///gpt-4o?api_key_env=__PRAVAH_MISSING_ENV__"),
             Err(ClientError::InvalidUrl(_))
         ));
     }

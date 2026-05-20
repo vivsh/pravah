@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,7 @@ impl Agent for ProRequest {
             "You are a skilled debater building the strongest possible case FOR a claim. \
              Return the original claim verbatim in the `claim` field and provide \
              3–5 concise supporting arguments in `points`.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -76,7 +76,7 @@ impl Agent for ConRequest {
         AgentConfig::new(
             "You are a skilled debater building the strongest possible case AGAINST a claim. \
              Provide 3–5 concise counter-arguments in `points`.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -90,7 +90,7 @@ impl Agent for DebateDraft {
              for the claim and deliver a balanced verdict. \
              Set `winner` to 'pro', 'con', or 'draw'. \
              Provide clear `reasoning` and note any important `caveats`.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -136,11 +136,10 @@ async fn format_verdict(verdict: DebateVerdict, _ctx: Context) -> Result<DebateR
 impl Flow for DebateDraft {
     type Output = DebateReport;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<DebateDraft>()
             .work(format_verdict)
-            .build()
     }
 }
 
@@ -148,14 +147,13 @@ impl Flow for DebateDraft {
 impl Flow for DebateInput {
     type Output = DebateReport;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .fork(split_claim)
             .agent::<ProRequest>()
             .agent::<ConRequest>()
             .join(merge_arguments)
             .flow::<DebateDraft>()
-            .build()
     }
 }
 

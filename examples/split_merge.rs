@@ -1,6 +1,6 @@
 //! Split/merge example with three agent branches converging into one brief.
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowRuntime, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,7 @@ impl Agent for TechTrack {
         AgentConfig::new(
             "You are a software engineer. Assess the feasibility and implementation \
              effort for the described feature. Be concise.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -76,7 +76,7 @@ impl Agent for MktTrack {
         AgentConfig::new(
             "You are a market analyst. Identify the market opportunity and name \
              three direct competitors.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -88,7 +88,7 @@ impl Agent for RiskTrack {
         AgentConfig::new(
             "You are a risk analyst. List the top three risks and propose one \
              concrete mitigation strategy.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -119,14 +119,13 @@ fn merge_brief((tech, mkt, risk): (TechAnalysis, MktAnalysis, RiskAnalysis)) -> 
 impl Flow for Proposal {
     type Output = Brief;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .split(split_proposal)
             .agent::<TechTrack>()
             .agent::<MktTrack>()
             .agent::<RiskTrack>()
             .merge(merge_brief)
-            .build()
     }
 }
 

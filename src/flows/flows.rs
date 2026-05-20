@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use super::history::FlowHistory;
 use super::nary::{MergeInputs, SplitOutputs};
-use crate::flows::NodeId;
+use crate::flows::{AgentConfig, NodeId};
 use crate::flows::errors::{AgentError, BuildError, FlowError};
 use crate::flows::interner::Interner;
 use crate::flows::state::{AgentContinuation, AgentState, Callable, FlowState, WaitingCall};
@@ -49,9 +49,6 @@ pub(crate) struct AgentInfo {
     pub(crate) output_schema: Value,
     /// Maps tool call names to their state entry and exit slots.
     pub(crate) tool_lookup: HashMap<String, (NodeId, NodeId)>,
-    pub(crate) temperature: Option<f32>,
-    pub(crate) thinking: bool,
-    pub(crate) thinking_budget: Option<u32>,
     pub(crate) keep_alive: bool,
     /// When set together with `max_tool_calls`, an error result with this
     /// message is returned to the LLM if a tool exceeds its call budget.
@@ -150,7 +147,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for FlowStep<T> {
 pub trait Flow: 'static + JsonSchema + Serialize + DeserializeOwned + Send + Sync {
     type Output: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'static;
 
-    fn build() -> Result<FlowGraph, FlowError>;
+    fn build(builder: FlowBuilder) -> FlowBuilder;
 
     fn node_id() -> String {
         Self::schema_name()
@@ -197,7 +194,7 @@ impl FlowGraph {
     pub fn from_flow<F: Flow>() -> Result<Self, FlowError> {
         let entry = F::node_id();
         let exit = F::Output::schema_name();
-        F::build()?.with_entry(entry, exit)
+        F::build(FlowBuilder::new()).build()?.with_entry(entry, exit)
     }
 
     /// Returns true when every parent for this join is present in state.
@@ -549,10 +546,7 @@ impl FlowGraph {
             .with_tools(defs)
             .with_tool_choice(tool_choice)
             .with_output_schema(node.output_schema.clone())
-            .with_name(agent_name.clone())
-            .with_thinking(node.thinking)
-            .with_temperature_opt(node.temperature)
-            .with_thinking_budget_opt(node.thinking_budget);
+            .with_name(agent_name.clone());
         let options = if has_prior_history { options } else { options.with_preamble(node.preamble.clone()) };
 
         let client = factory
@@ -937,9 +931,6 @@ impl FlowBuilder {
             exit: output_id,
             output_schema,
             tool_lookup: HashMap::new(),
-            temperature: config.temperature,
-            thinking: config.thinking,
-            thinking_budget: config.thinking_budget,
             keep_alive: config.keep_alive,
             loop_break_message: config.loop_break_message,
             max_tool_calls: config.max_tool_calls,
@@ -1370,6 +1361,9 @@ impl FlowBuilder {
     }
 }
 
+
+
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -1485,8 +1479,8 @@ mod tests {
     impl Flow for PlainAgentInput {
         type Output = PlainAgentOutput;
 
-        fn build() -> Result<FlowGraph, FlowError> {
-            FlowGraph::builder().agent::<PlainAgentInput>().build()
+        fn build(builder: FlowBuilder) -> FlowBuilder {
+            builder.agent::<PlainAgentInput>()
         }
     }
 
@@ -1520,8 +1514,8 @@ mod tests {
     impl Flow for MessageAgentInput {
         type Output = MessageAgentOutput;
 
-        fn build() -> Result<FlowGraph, FlowError> {
-            FlowGraph::builder().agent::<MessageAgentInput>().build()
+        fn build(builder: FlowBuilder) -> FlowBuilder {
+            builder.agent::<MessageAgentInput>()
         }
     }
 
@@ -1560,14 +1554,13 @@ mod tests {
     impl Flow for ToolAgentInput {
         type Output = ToolAgentOutput;
 
-        fn build() -> Result<FlowGraph, FlowError> {
-            FlowGraph::builder()
+        fn build(builder: FlowBuilder) -> FlowBuilder {
+            builder
                 .agent::<ToolAgentInput>()
                 .tool::<ToolAgentInput, LookupInput, LookupOutput>()
                 .work(|input: LookupInput, _ctx: Context| async move {
                     Ok(LookupOutput { result: input.query })
                 })
-                .build()
         }
     }
 

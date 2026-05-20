@@ -3,7 +3,7 @@
 use std::io::Write;
 
 use either::Either;
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -217,7 +217,7 @@ impl Agent for ChoreographerBrief {
              of a stage direction (e.g. 'Kenji's cigarette slips from his fingers as \
              his eyes find the exit'). \
              Never write dialogue. Be spatial, physical, and precise.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -240,7 +240,7 @@ impl Agent for DialogueBrief {
              `subtext` — one private sentence describing what is emotionally unsaid \
              beneath the dialogue (or beneath the silence). This note is for the \
              director only and will never be printed.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -264,7 +264,7 @@ impl Agent for CinematographerBrief {
              `colour_palette` — 2-3 dominant hues and their symbolic or emotional \
              resonance for this moment in the story. \
              Never describe character actions or write dialogue. Think purely in images.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -290,7 +290,7 @@ impl Agent for DirectorBrief {
              `dialogues` — the final approved script as an array of {character, line} \
              objects. Honour the dialogue writer's intent; trim or go silent if the \
              scene already speaks.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -398,8 +398,8 @@ fn route_input(
 impl Flow for StoryTurn {
     type Output = FinalSummary;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .split(split_crew)
             .agent::<ChoreographerBrief>()
             .agent::<DialogueBrief>()
@@ -410,7 +410,6 @@ impl Flow for StoryTurn {
             .merge(merge_director)
             .work(print_and_read)
             .either(route_input)
-            .build()
     }
 }
 

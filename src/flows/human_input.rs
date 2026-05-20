@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::Context;
 use crate::flows::errors::FlowError;
-use crate::flows::flows::{Flow, FlowGraph};
+use crate::flows::flows::{Flow, FlowBuilder};
 use crate::tools::ToolOutput;
 
 /// One option shown to the human.
@@ -93,12 +93,11 @@ enum HumanInputDecision {
 impl Flow for HumanInput {
     type Output = HumanOutput;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .work(try_cli_input)
             .either(route_decision)
             .suspend::<PendingHumanInput, HumanOutput>()
-            .build()
     }
 }
 

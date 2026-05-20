@@ -1,12 +1,16 @@
+use std::borrow::Cow;
+
 use async_trait::async_trait;
 use reqwest::Client as HttpClient;
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::super::tools::ToolDefinition;
 use super::{
     Attachment, Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest,
-    EmbedResponse, LlmUrl, Message, Provider, Role, TokenUsage, ToolCall, ToolChoice,
-    configured_base_url, decode_output_text, optional_api_key, validate_tools,
+    EmbedResponse, LlmUrl, Message, Provider, Role, ThinkingLevel, TokenUsage, ToolCall, ToolChoice,
+    configured_base_url, decode_output_text, optional_api_key, parse_json_output,
+    validate_tools,
 };
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
@@ -17,6 +21,25 @@ struct OllamaClient {
     base_url: String,
     model: String,
     options: ClientOptions,
+}
+
+impl OllamaClient {
+    async fn post_json<T: Serialize + ?Sized>(
+        &self,
+        endpoint: &str,
+        payload: &T,
+    ) -> Result<Value, ClientError> {
+        with_bearer_auth(self.http.post(endpoint), self.api_key.as_deref())
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| ClientError::Llm(e.to_string()))?
+            .error_for_status()
+            .map_err(|e| ClientError::Llm(e.to_string()))?
+            .json()
+            .await
+            .map_err(|e| ClientError::Llm(e.to_string()))
+    }
 }
 
 pub fn new_client(url: &LlmUrl, options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
@@ -45,16 +68,7 @@ impl Client for OllamaClient {
         let payload = build_payload(&self.model, &self.options, messages, tools_enabled);
         let endpoint = chat_completions_endpoint(&self.base_url);
 
-        let response: Value = with_bearer_auth(self.http.post(endpoint), self.api_key.as_deref())
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| ClientError::Llm(e.to_string()))?
-            .error_for_status()
-            .map_err(|e| ClientError::Llm(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| ClientError::Llm(e.to_string()))?;
+        let response = self.post_json(&endpoint, &payload).await?;
 
         map_response(response, tools_enabled, wants_json_output)
     }
@@ -62,16 +76,7 @@ impl Client for OllamaClient {
     async fn embed(&self, request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {
         let endpoint = embed_endpoint(&self.base_url);
         let payload = json!({ "model": self.model, "input": request.input });
-        let response: Value = with_bearer_auth(self.http.post(endpoint), self.api_key.as_deref())
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| ClientError::Llm(e.to_string()))?
-            .error_for_status()
-            .map_err(|e| ClientError::Llm(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| ClientError::Llm(e.to_string()))?;
+        let response = self.post_json(&endpoint, &payload).await?;
         let values: Vec<f32> = response["embeddings"][0]
             .as_array()
             .ok_or_else(|| ClientError::Llm("embeddings missing in response".into()))?
@@ -121,13 +126,24 @@ fn build_payload(
     messages: &[Message],
     tools_enabled: bool,
 ) -> Value {
+    let thinking_enabled = options
+        .thinking
+        .as_ref()
+        .map_or(false, |t| *t != ThinkingLevel::Off);
+    let schema_hint = if !tools_enabled && options.wants_json_output() {
+        options.output_schema.as_ref()
+    } else {
+        None
+    };
+
     let mut payload = json!({
         "model": model,
         "messages": build_messages(
             messages,
             options.effective_preamble().as_deref(),
             model,
-            options.thinking,
+            thinking_enabled,
+            schema_hint,
         ),
         "stream": false,
     });
@@ -141,17 +157,8 @@ fn build_payload(
         if options.tool_choice == ToolChoice::Required {
             payload["tool_choice"] = Value::String("required".into());
         }
-    } else if options.wants_json_output() {
-        payload["response_format"] = match &options.output_schema {
-            Some(schema) => json!({
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "agent_output",
-                    "schema": schema,
-                }
-            }),
-            None => json!({ "type": "json_object" }),
-        };
+    } else if options.wants_json_output() && !thinking_enabled {
+        payload["response_format"] = json!({ "type": "json_object" });
     }
 
     payload
@@ -162,10 +169,11 @@ fn build_messages(
     preamble: Option<&str>,
     model: &str,
     thinking: bool,
+    schema_hint: Option<&Value>,
 ) -> Vec<Value> {
-    let mut out = Vec::new();
-    if let Some(preamble) = preamble {
-        out.push(json!({ "role": "system", "content": preamble }));
+    let mut out = Vec::with_capacity(history.len() + if preamble.is_some() || schema_hint.is_some() { 1 } else { 0 });
+    if let Some(system) = combined_system_message(preamble, schema_hint) {
+        out.push(json!({ "role": "system", "content": system }));
     }
 
     let mut first_user = true;
@@ -207,17 +215,29 @@ fn build_messages(
     out
 }
 
+fn combined_system_message(preamble: Option<&str>, schema_hint: Option<&Value>) -> Option<String> {
+    match (preamble, schema_hint) {
+        (Some(preamble), Some(schema)) => Some(format!(
+            "{preamble}\n\nRespond with JSON that matches the following schema:\n{schema}"
+        )),
+        (Some(preamble), None) => Some(preamble.to_owned()),
+        (None, Some(schema)) => Some(format!(
+            "Respond with JSON that matches the following schema:\n{schema}"
+        )),
+        (None, None) => None,
+    }
+}
+
 fn build_user_message(message: &Message, first_user: &mut bool, model: &str, thinking: bool) -> Value {
     let content = user_content(message, first_user, model, thinking);
     if message.attachments.is_empty() {
         return json!({ "role": "user", "content": content });
     }
 
-    let mut parts = message
-        .attachments
-        .iter()
-        .filter_map(ollama_image_part)
-        .collect::<Vec<_>>();
+    let mut parts = Vec::with_capacity(
+        message.attachments.len() + if content.is_empty() { 0 } else { 1 },
+    );
+    parts.extend(message.attachments.iter().filter_map(ollama_image_part));
     if !content.is_empty() {
         parts.push(json!({ "type": "text", "text": content }));
     }
@@ -332,23 +352,185 @@ fn map_response(
         .get("content")
         .and_then(Value::as_str)
         .ok_or(ClientError::EmptyResponse)?;
+    let text = strip_thinking(text);
     Ok(ClientResponse::new(
         Provider::Ollama,
-        ClientOutput::Output(decode_output_text(text, wants_json_output)?),
+        ClientOutput::Output(decode_ollama_output(text, wants_json_output)?),
     )
     .with_usage(usage)
     .with_provider_model(provider_model)
     .with_raw_metadata(metadata))
 }
 
+fn decode_ollama_output(text: &str, wants_json_output: bool) -> Result<Value, ClientError> {
+    if !wants_json_output {
+        return decode_output_text(text, false);
+    }
+
+    let sanitized = sanitize_json_markdown(text);
+    parse_json_output(sanitized.as_ref()).map(strip_markdown_json_keys)
+}
+
+fn strip_thinking(text: &str) -> &str {
+    // qwen3 models emit <think>...</think> before the final answer when thinking is enabled.
+    // Strip that block so callers receive only the answer/JSON.
+    if let Some(end) = text.find("</think>") {
+        text[end + "</think>".len()..].trim_start()
+    } else {
+        text
+    }
+}
+
+fn sanitize_json_markdown(text: &str) -> Cow<'_, str> {
+    let unfenced = strip_json_code_fence(text).unwrap_or(text);
+    let repaired = repair_markdown_wrapped_keys(unfenced);
+
+    if unfenced == text {
+        repaired
+    } else {
+        match repaired {
+            Cow::Borrowed(_) => Cow::Owned(unfenced.to_owned()),
+            Cow::Owned(value) => Cow::Owned(value),
+        }
+    }
+}
+
+fn strip_json_code_fence(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with("```") {
+        return None;
+    }
+
+    let body_start = trimmed.find('\n')? + 1;
+    let body = &trimmed[body_start..];
+    let body_end = body.rfind("\n```")?;
+    Some(body[..body_end].trim())
+}
+
+fn repair_markdown_wrapped_keys(text: &str) -> Cow<'_, str> {
+    let mut repaired = String::with_capacity(text.len());
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    while index < text.len() {
+        let rest = &text[index..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+
+        if in_string {
+            repaired.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            repaired.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if let Some((close_end, colon_index, key)) = markdown_wrapped_key(rest) {
+            push_json_key(&mut repaired, key);
+            repaired.push_str(&rest[close_end..colon_index]);
+            index += colon_index;
+            changed = true;
+            continue;
+        }
+
+        repaired.push(ch);
+        index += ch.len_utf8();
+    }
+
+    if changed {
+        Cow::Owned(repaired)
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+fn markdown_wrapped_key(text: &str) -> Option<(usize, usize, &str)> {
+    let marker = if text.starts_with("**") {
+        "**"
+    } else if text.starts_with("__") {
+        "__"
+    } else {
+        return None;
+    };
+
+    let inner = &text[marker.len()..];
+    let close_start = marker.len() + inner.find(marker)?;
+    let key = &text[marker.len()..close_start];
+    if key.is_empty() || key.contains('\n') {
+        return None;
+    }
+
+    let close_end = close_start + marker.len();
+    for (offset, ch) in text[close_end..].char_indices() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        return (ch == ':').then_some((close_end, close_end + offset, key));
+    }
+    None
+}
+
+fn push_json_key(output: &mut String, key: &str) {
+    output.push('"');
+    for ch in key.chars() {
+        match ch {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            _ => output.push(ch),
+        }
+    }
+    output.push('"');
+}
+
+fn strip_markdown_json_keys(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(strip_markdown_json_keys).collect()),
+        Value::Object(entries) => Value::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (strip_markdown_key(&key).to_owned(), strip_markdown_json_keys(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn strip_markdown_key(key: &str) -> &str {
+    if key.len() > 4 {
+        for marker in ["**", "__"] {
+            if key.starts_with(marker) && key.ends_with(marker) {
+                return &key[marker.len()..key.len() - marker.len()];
+            }
+        }
+    }
+    key
+}
+
 fn collect_tool_calls(message: &Value) -> Result<Vec<ToolCall>, ClientError> {
-    let mut calls = Vec::new();
-    for item in message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    let Some(items) = message.get("tool_calls").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+
+    let mut calls = Vec::with_capacity(items.len());
+    for item in items {
         let id = item
             .get("id")
             .and_then(Value::as_str)
@@ -382,15 +564,16 @@ fn collect_tool_calls(message: &Value) -> Result<Vec<ToolCall>, ClientError> {
 
 fn usage_from_value(value: &Value) -> TokenUsage {
     TokenUsage {
-        input: value
-            .get("prompt_tokens")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32),
-        output: value
-            .get("completion_tokens")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32),
+        input: token_count(value, "prompt_tokens"),
+        output: token_count(value, "completion_tokens"),
     }
+}
+
+fn token_count(value: &Value, key: &str) -> Option<u32> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|count| u32::try_from(count).ok())
 }
 
 #[cfg(test)]
@@ -412,7 +595,7 @@ mod tests {
 
     #[test]
     fn qwen_no_think_is_added_to_first_user_message() {
-        let messages = build_messages(&[Message::user("do it")], None, "qwen3:8b", false);
+        let messages = build_messages(&[Message::user("do it")], None, "qwen3:8b", false, None);
         assert!(
             messages[0]["content"]
                 .as_str()
@@ -437,6 +620,7 @@ mod tests {
             None,
             "qwen3-vl:8b",
             false,
+            None,
         );
         assert_eq!(messages[0]["content"][0]["type"], "image_url");
         assert_eq!(messages[0]["content"][1]["type"], "text");
@@ -460,6 +644,7 @@ mod tests {
             None,
             "qwen3-vl:8b",
             false,
+            None,
         );
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1]["role"], "user");
@@ -497,9 +682,14 @@ mod tests {
             false,
         );
 
-        assert_eq!(payload["response_format"]["type"], "json_schema");
-        assert_eq!(payload["response_format"]["json_schema"]["name"], "agent_output");
-        assert_eq!(payload["response_format"]["json_schema"]["schema"], schema);
+        assert_eq!(payload["response_format"]["type"], "json_object");
+        // schema is injected as a system message, not in response_format
+        let system_msgs: Vec<_> = payload["messages"]
+            .as_array().unwrap()
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .collect();
+        assert!(system_msgs.iter().any(|m| m["content"].as_str().unwrap_or("").contains("answer")));
     }
 
     #[test]
@@ -587,5 +777,34 @@ mod tests {
             ClientOutput::Output(Value::String(text)) => assert_eq!(text, "plain text"),
             _ => panic!("expected string output"),
         }
+    }
+
+    /// Markdown wrappers around bare JSON keys are repaired before deserialization.
+    #[test]
+    fn map_response_repairs_markdown_wrapped_keys_in_json_mode() {
+        let response = json!({
+            "model": "local-model",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": r#"{"inferences":[],**progress**:75,"queries":[]}"#
+                }
+            }]
+        });
+
+        let mapped = map_response(response, false, true).unwrap();
+        match mapped.output {
+            ClientOutput::Output(Value::Object(output)) => {
+                assert_eq!(output.get("progress"), Some(&json!(75)));
+            }
+            _ => panic!("expected JSON object output"),
+        }
+    }
+
+    /// Fenced JSON and markdown-decorated keys are normalized before parsing.
+    #[test]
+    fn sanitize_json_markdown_strips_fences_and_bold_keys() {
+        let sanitized = sanitize_json_markdown("```json\n{\"a\":1, **progress**: 75}\n```");
+        assert_eq!(sanitized.as_ref(), "{\"a\":1, \"progress\": 75}");
     }
 }

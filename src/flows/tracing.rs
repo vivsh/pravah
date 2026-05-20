@@ -173,7 +173,7 @@ mod tests {
             .layer(RateLimitLayer::new().with_limit(Provider::OpenAi, RateLimit::new(60_000, 4)));
 
         let client = factory
-            .create("openai://test-model", ClientOptions::default())
+            .create("openai:///test-model", ClientOptions::default())
             .expect("layered factory should build a client");
         let response = client
             .execute(&[Message::user("hi")])

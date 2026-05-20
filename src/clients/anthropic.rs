@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use super::super::tools::ToolDefinition;
 use super::{
     Attachment, Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmUrl, Message,
-    Provider, Role, TokenUsage, ToolCall, ToolChoice, configured_base_url,
+    Provider, Role, ThinkingLevel, TokenUsage, ToolCall, ToolChoice, configured_base_url,
     decode_output_text, required_api_key, validate_tools,
 };
 
@@ -40,7 +40,7 @@ impl Client for AnthropicClient {
         validate_history(messages)?;
         validate_tools(Provider::Anthropic, &self.options.tools)?;
 
-        if self.options.thinking {
+        if matches!(&self.options.thinking, Some(t) if *t != ThinkingLevel::Off) {
             return Err(ClientError::UnsupportedCapability {
                 provider: Provider::Anthropic,
                 capability: "thinking is not exposed by the Anthropic adapter yet".into(),

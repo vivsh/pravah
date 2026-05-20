@@ -1,6 +1,6 @@
 //! Nested flow example where an outer flow delegates research to an inner flow.
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ impl Agent for ResearchQuery {
         AgentConfig::new(
             "You are a research assistant. Answer the user's query with a concise \
              paragraph of factual findings.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -32,10 +32,9 @@ impl Agent for ResearchQuery {
 impl Flow for ResearchQuery {
     type Output = ResearchResult;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<ResearchQuery>()
-            .build()
     }
 }
 
@@ -60,7 +59,7 @@ impl Agent for ResearchResult {
         AgentConfig::new(
             "You are a blog writer. Using the research findings provided, write a \
              short, engaging blog post with a title and two paragraphs.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -76,12 +75,11 @@ async fn derive_query(req: BlogRequest, _ctx: Context) -> Result<ResearchQuery, 
 impl Flow for BlogRequest {
     type Output = FinalArticle;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .work(derive_query)
             .flow::<ResearchQuery>()
             .agent::<ResearchResult>()
-            .build()
     }
 }
 

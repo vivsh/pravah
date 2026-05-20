@@ -1,7 +1,7 @@
 //! Diagram generation example that exercises the main flow node types.
 
 use either::Either;
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
 use pravah::flows::FlowGraphDiagram;
 use pravah::Context;
 use schemars::JsonSchema;
@@ -50,48 +50,48 @@ struct FinalArticle { title: String, body: String }
 
 impl Agent for OutlineRequest {
     type Output = Outline;
-    fn build() -> AgentConfig { AgentConfig::new("Generate a structured outline with sections.", "gemini://gemini-2.5-flash-lite") }
+    fn build() -> AgentConfig { AgentConfig::new("Generate a structured outline with sections.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 impl Flow for OutlineRequest {
     type Output = Outline;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().agent::<OutlineRequest>().build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.agent::<OutlineRequest>()
     }
 }
 
 
 impl Agent for LongDraft {
     type Output = ReviewedDraft;
-    fn build() -> AgentConfig { AgentConfig::new("Review the draft for quality, accuracy, and structure.", "gemini://gemini-2.5-flash-lite") }
+    fn build() -> AgentConfig { AgentConfig::new("Review the draft for quality, accuracy, and structure.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 impl Flow for LongDraft {
     type Output = ReviewedDraft;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().agent::<LongDraft>().build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.agent::<LongDraft>()
     }
 }
 
 
 impl Agent for ResearchTask {
     type Output = ResearchNotes;
-    fn build() -> AgentConfig { AgentConfig::new("Research the topic and gather key facts and sources.", "gemini://gemini-2.5-flash-lite") }
+    fn build() -> AgentConfig { AgentConfig::new("Research the topic and gather key facts and sources.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 impl Agent for AudienceTask {
     type Output = AudienceProfile;
-    fn build() -> AgentConfig { AgentConfig::new("Analyse the target audience and determine tone and reading level.", "gemini://gemini-2.5-flash-lite") }
+    fn build() -> AgentConfig { AgentConfig::new("Analyse the target audience and determine tone and reading level.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 impl Agent for QuickDraft {
     type Output = FinalArticle;
-    fn build() -> AgentConfig { AgentConfig::new("Write a concise, punchy article from the quick draft.", "gemini://gemini-2.5-flash-lite") }
+    fn build() -> AgentConfig { AgentConfig::new("Write a concise, punchy article from the quick draft.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 impl Agent for ReviewedDraft {
     type Output = FinalArticle;
-    fn build() -> AgentConfig { AgentConfig::new("Polish the reviewed draft into a publication-ready article.", "gemini://gemini-2.5-flash-lite") }
+    fn build() -> AgentConfig { AgentConfig::new("Polish the reviewed draft into a publication-ready article.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 
@@ -153,8 +153,8 @@ async fn run_review_flow(draft: LongDraft, ctx: Context) -> Result<ReviewedDraft
 impl Flow for ArticleRequest {
     type Output = FinalArticle;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .fork(split_request)
             .agent::<ResearchTask>()
             .agent::<AudienceTask>()
@@ -165,7 +165,6 @@ impl Flow for ArticleRequest {
             .agent::<QuickDraft>()
             .work(run_review_flow)
             .agent::<ReviewedDraft>()
-            .build()
     }
 }
 

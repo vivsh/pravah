@@ -12,12 +12,6 @@ pub struct AgentConfig {
     pub preamble: String,
     /// Model URL used to create the client.
     pub model_url: String,
-    /// Sampling temperature. `None` uses the provider default.
-    pub temperature: Option<f32>,
-    /// Enables provider-specific reasoning modes when supported.
-    pub thinking: bool,
-    /// Reasoning budget. Ignored unless `thinking` is enabled.
-    pub thinking_budget: Option<u32>,
     /// When true, repeated invocations of this agent share a stable session id,
     /// keeping the full conversation history visible across loop iterations.
     pub keep_alive: bool,
@@ -35,31 +29,10 @@ impl AgentConfig {
         Self {
             preamble: preamble.into(),
             model_url: model_url.into(),
-            temperature: None,
-            thinking: false,
-            thinking_budget: None,
             keep_alive: false,
             loop_break_message: None,
             max_tool_calls: None,
         }
-    }
-
-    /// Sets the sampling temperature.
-    pub fn with_temperature(mut self, temperature: f32) -> Self {
-        self.temperature = Some(temperature);
-        self
-    }
-
-    /// Turns reasoning mode on or off.
-    pub fn with_thinking(mut self, thinking: bool) -> Self {
-        self.thinking = thinking;
-        self
-    }
-
-    /// Sets the reasoning budget.
-    pub fn with_thinking_budget(mut self, budget: u32) -> Self {
-        self.thinking_budget = Some(budget);
-        self
     }
 
     /// Keeps the agent's session alive across repeated invocations in a loop.

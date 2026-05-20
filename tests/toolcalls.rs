@@ -2,7 +2,7 @@
 
 use pravah::clients::{ClientError, Role};
 use pravah::flows::{
-    Agent, AgentConfig, AgentError, BuildError, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep, PhaseKind,
+    Agent, AgentConfig, AgentError, BuildError, Flow, FlowBuilder, FlowError, FlowGraph, FlowRuntime, FlowStep, PhaseKind,
 };
 use pravah::testing::{CapturingHistoryStore, ScriptedFactory, mock_tool_call};
 use pravah::tools::ToolOutput;
@@ -98,8 +98,8 @@ macro_rules! simple_agent {
 simple_agent!(DirectIn, DirectOut, "Answer directly.");
 impl Flow for DirectIn {
     type Output = DirectOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().agent::<DirectIn>().build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.agent::<DirectIn>()
     }
 }
 
@@ -108,12 +108,11 @@ impl Flow for DirectIn {
 simple_agent!(ValidIn, ValidOut, "Use echo then answer.");
 impl Flow for ValidIn {
     type Output = ValidOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<ValidIn>()
             .tool::<ValidIn, EchoInput, EchoOutput>()
             .work(echo_handler)
-            .build()
     }
 }
 
@@ -122,14 +121,13 @@ impl Flow for ValidIn {
 simple_agent!(MultiToolIn, MultiToolOut, "Use echo and reverse.");
 impl Flow for MultiToolIn {
     type Output = MultiToolOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<MultiToolIn>()
             .tool::<MultiToolIn, EchoInput, EchoOutput>()
             .tool::<MultiToolIn, ReverseInput, ReverseOutput>()
             .work(echo_handler)
             .work(reverse_handler)
-            .build()
     }
 }
 
@@ -138,12 +136,11 @@ impl Flow for MultiToolIn {
 simple_agent!(DupIn, DupOut, "Use echo.");
 impl Flow for DupIn {
     type Output = DupOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<DupIn>()
             .tool::<DupIn, EchoInput, EchoOutput>()
             .work(echo_handler)
-            .build()
     }
 }
 
@@ -152,12 +149,11 @@ impl Flow for DupIn {
 simple_agent!(UnknownIn, UnknownOut, "Use echo.");
 impl Flow for UnknownIn {
     type Output = UnknownOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<UnknownIn>()
             .tool::<UnknownIn, EchoInput, EchoOutput>()
             .work(echo_handler)
-            .build()
     }
 }
 
@@ -168,12 +164,11 @@ impl Flow for UnknownIn {
 simple_agent!(HistoryIn, HistoryOut, "Use echo.");
 impl Flow for HistoryIn {
     type Output = HistoryOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<HistoryIn>()
             .tool::<HistoryIn, EchoInput, EchoOutput>()
             .work(echo_handler)
-            .build()
     }
 }
 
@@ -182,12 +177,11 @@ impl Flow for HistoryIn {
 simple_agent!(ChainIn, ChainOut, "Chain echo.");
 impl Flow for ChainIn {
     type Output = ChainOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<ChainIn>()
             .tool::<ChainIn, EchoInput, EchoOutput>()
             .work(echo_handler)
-            .build()
     }
 }
 
@@ -196,12 +190,11 @@ impl Flow for ChainIn {
 simple_agent!(LlmErrIn, LlmErrOut, "Call echo.");
 impl Flow for LlmErrIn {
     type Output = LlmErrOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<LlmErrIn>()
             .tool::<LlmErrIn, EchoInput, EchoOutput>()
             .work(echo_handler)
-            .build()
     }
 }
 
@@ -210,12 +203,11 @@ impl Flow for LlmErrIn {
 simple_agent!(StructModeIn, StructModeOut, "Answer directly.");
 impl Flow for StructModeIn {
     type Output = StructModeOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<StructModeIn>()
             .tool::<StructModeIn, EchoInput, EchoOutput>()
             .work(echo_handler)
-            .build()
     }
 }
 
@@ -224,12 +216,11 @@ impl Flow for StructModeIn {
 simple_agent!(StoreIn, StoreOut, "Echo and answer.");
 impl Flow for StoreIn {
     type Output = StoreOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<StoreIn>()
             .tool::<StoreIn, EchoInput, EchoOutput>()
             .work(echo_handler)
-            .build()
     }
 }
 
@@ -542,12 +533,11 @@ fn test_build_rejects_tool_without_work_node() {
 simple_agent!(OrphanWorkAgent, OrphanWorkResult, "No tools.");
 impl Flow for OrphanWorkAgent {
     type Output = OrphanWorkResult;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<OrphanWorkAgent>()
             // Work node registered but no .tool() — orphan, unreachable from entry.
             .work(echo_handler)
-            .build()
     }
 }
 

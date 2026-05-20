@@ -1,7 +1,7 @@
 //! Integration tests for parallel and queued tool dispatch.
 
 use pravah::clients::ClientError;
-use pravah::flows::{Agent, AgentConfig, AgentError, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, AgentError, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
 use pravah::testing::{ScriptedFactory, mock_tool_call};
 use pravah::tools::ToolOutput;
 use pravah::{Context, FlowConf};
@@ -93,14 +93,13 @@ macro_rules! simple_agent {
 simple_agent!(ParallelIn, ParallelOut, "Use echo and reverse.");
 impl Flow for ParallelIn {
     type Output = ParallelOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<ParallelIn>()
             .tool::<ParallelIn, EchoInput, EchoOutput>()
             .tool::<ParallelIn, ReverseInput, ReverseOutput>()
             .work(echo_handler)
             .work(reverse_handler)
-            .build()
     }
 }
 
@@ -109,12 +108,11 @@ impl Flow for ParallelIn {
 simple_agent!(LlmFailIn, LlmFailOut, "Use echo.");
 impl Flow for LlmFailIn {
     type Output = LlmFailOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<LlmFailIn>()
             .tool::<LlmFailIn, EchoInput, EchoOutput>()
             .work(echo_handler)
-            .build()
     }
 }
 
@@ -123,14 +121,13 @@ impl Flow for LlmFailIn {
 simple_agent!(UnknownParallelIn, UnknownParallelOut, "Use echo and reverse.");
 impl Flow for UnknownParallelIn {
     type Output = UnknownParallelOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<UnknownParallelIn>()
             .tool::<UnknownParallelIn, EchoInput, EchoOutput>()
             .tool::<UnknownParallelIn, ReverseInput, ReverseOutput>()
             .work(echo_handler)
             .work(reverse_handler)
-            .build()
     }
 }
 

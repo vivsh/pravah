@@ -1,7 +1,7 @@
 //! Integration tests for work-only flow graphs.
 
 use either::Either;
-use pravah::flows::{Flow, FlowError, FlowGraph, FlowRuntime, FlowStep, HumanInput};
+use pravah::flows::{Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep, HumanInput};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -34,8 +34,8 @@ async fn add1(n: Num, _c: Context) -> Result<NumPlus1, FlowError> {
 
 impl Flow for Num {
     type Output = NumPlus1;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().work(add1).build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.work(add1)
     }
 }
 #[tokio::test]
@@ -65,12 +65,11 @@ async fn chain3_step3(n: Chain3Mid2, _c: Context) -> Result<Chain3Out, FlowError
 
 impl Flow for Chain3In {
     type Output = Chain3Out;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .work(chain3_step1)
             .work(chain3_step2)
             .work(chain3_step3)
-            .build()
     }
 }
 #[tokio::test]
@@ -107,12 +106,11 @@ fn route_even_odd(i: EitherIn) -> Either<EvenBranch, OddBranch> {
 
 impl Flow for EitherIn {
     type Output = EitherOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .either(route_even_odd)
             .work(even_to_out)
             .work(odd_to_out)
-            .build()
     }
 }
 #[tokio::test]
@@ -163,13 +161,12 @@ async fn neg_label(n: NegBranch, _c: Context) -> Result<PreRouteOut, FlowError> 
 
 impl Flow for PreRouteIn {
     type Output = PreRouteOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .work(normalize)
             .either(route_sign)
             .work(pos_label)
             .work(neg_label)
-            .build()
     }
 }
 #[tokio::test]
@@ -207,8 +204,8 @@ fn merge(l: ForkLeft, r: ForkRight) -> ForkJoinOut {
 
 impl Flow for ForkJoinIn {
     type Output = ForkJoinOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().fork(split).join(merge).build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.fork(split).join(merge)
     }
 }
 #[tokio::test]
@@ -246,13 +243,12 @@ fn fwj_join(l: FWJLeftDone, r: FWJRightDone) -> FWJOut {
 
 impl Flow for FWJIn {
     type Output = FWJOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .fork(fwj_split)
             .work(fwj_left_work)
             .work(fwj_right_work)
             .join(fwj_join)
-            .build()
     }
 }
 #[tokio::test]
@@ -290,13 +286,12 @@ async fn wfjw_final(n: WFJWMid, _c: Context) -> Result<WFJWOut, FlowError> {
 
 impl Flow for WFJWIn {
     type Output = WFJWOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .work(wfjw_norm)
             .fork(wfjw_split)
             .join(wfjw_join)
             .work(wfjw_final)
-            .build()
     }
 }
 #[tokio::test]
@@ -317,8 +312,8 @@ async fn inner_double(n: InnerIn, _c: Context) -> Result<InnerOut, FlowError> {
 
 impl Flow for InnerIn {
     type Output = InnerOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().work(inner_double).build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.work(inner_double)
     }
 }
 
@@ -336,12 +331,11 @@ async fn outer_post(n: InnerOut, _c: Context) -> Result<OuterOut, FlowError> {
 
 impl Flow for OuterIn {
     type Output = OuterOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .work(outer_prep)
             .flow::<InnerIn>()
             .work(outer_post)
-            .build()
     }
 }
 /// x=3 → inner gets 8 → doubled to 16 → outer adds 1 → 17.
@@ -363,8 +357,8 @@ async fn l2_work(n: L2In, _c: Context) -> Result<L2Out, FlowError> {
 
 impl Flow for L2In {
     type Output = L2Out;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().work(l2_work).build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.work(l2_work)
     }
 }
 
@@ -382,12 +376,11 @@ async fn l1_post(n: L2Out, _c: Context) -> Result<L1Out, FlowError> {
 
 impl Flow for L1In {
     type Output = L1Out;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .work(l1_prep)
             .flow::<L2In>()
             .work(l1_post)
-            .build()
     }
 }
 
@@ -405,12 +398,11 @@ async fn root_post(n: L1Out, _c: Context) -> Result<RootOut, FlowError> {
 
 impl Flow for RootIn {
     type Output = RootOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .work(root_prep)
             .flow::<L1In>()
             .work(root_post)
-            .build()
     }
 }
 #[tokio::test]
@@ -448,13 +440,12 @@ fn nfork_join(a: NForkADone, b: NForkBDone) -> NForkOut {
 
 impl Flow for NForkIn {
     type Output = NForkOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .fork(nfork_split)
             .work(nfork_a_work)
             .work(nfork_b_work)
             .join(nfork_join)
-            .build()
     }
 }
 
@@ -472,12 +463,11 @@ async fn nf_post(n: NForkOut, _c: Context) -> Result<NFWrapOut, FlowError> {
 
 impl Flow for NFWrap {
     type Output = NFWrapOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .work(nf_prep)
             .flow::<NForkIn>()
             .work(nf_post)
-            .build()
     }
 }
 #[tokio::test]
@@ -498,8 +488,8 @@ async fn always_err(_n: ErrKindIn, _c: Context) -> Result<ErrKindOut, FlowError>
 
 impl Flow for ErrKindIn {
     type Output = ErrKindOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().work(always_err).build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.work(always_err)
     }
 }
 #[tokio::test]
@@ -531,8 +521,8 @@ async fn snap_step2(n: SnapMid, _c: Context) -> Result<SnapOut, FlowError> {
 
 impl Flow for SnapIn {
     type Output = SnapOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().work(snap_step1).work(snap_step2).build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.work(snap_step1).work(snap_step2)
     }
 }
 /// the snapshot round-trips cleanly through JSON.
@@ -572,8 +562,8 @@ struct ValOut(i64);
 async fn test_empty_flow_build_fails() {
     impl Flow for ValIn {
         type Output = ValOut;
-        fn build() -> Result<FlowGraph, FlowError> {
-            FlowGraph::builder().build()
+        fn build(builder: FlowBuilder) -> FlowBuilder {
+            builder
         }
     }
     assert!(FlowRuntime::new(ValIn(0)).is_err());
@@ -606,12 +596,11 @@ async fn ef_neg_work(n: EFNeg, _c: Context) -> Result<EFOut, FlowError> {
 
 impl Flow for EFIn {
     type Output = EFOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .either(ef_route)
             .work(ef_pos_work)
             .work(ef_neg_work)
-            .build()
     }
 }
 
@@ -629,12 +618,11 @@ async fn efw_post(n: EFOut, _c: Context) -> Result<EFWrapOut, FlowError> {
 
 impl Flow for EFWrap {
     type Output = EFWrapOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .work(efw_prep)
             .flow::<EFIn>()
             .work(efw_post)
-            .build()
     }
 }
 #[tokio::test]
@@ -692,15 +680,14 @@ fn fej_join(l: FEJLeftDone, r: FEJRightDone) -> FEJOut {
 
 impl Flow for FEJIn {
     type Output = FEJOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .fork(fej_split)
             .either(fej_route)
             .work(fej_la_work)
             .work(fej_lb_work)
             .work(fej_right_work)
             .join(fej_join)
-            .build()
     }
 }
 #[tokio::test]
@@ -743,8 +730,8 @@ async fn failing_work(n: ErrIn, _c: Context) -> Result<ErrOut, FlowError> {
 
 impl Flow for ErrIn {
     type Output = ErrOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().work(failing_work).build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.work(failing_work)
     }
 }
 #[tokio::test]
@@ -801,12 +788,11 @@ async fn err_right(n: ErrRight, _c: Context) -> Result<ErrRouteOut, FlowError> {
 
 impl Flow for ErrRouteIn {
     type Output = ErrRouteOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .either(err_route)
             .work(err_left)
             .work(err_right)
-            .build()
     }
 }
 #[tokio::test]
@@ -844,12 +830,11 @@ async fn fjw_post(n: FJWJoined, _c: Context) -> Result<FJWOut, FlowError> {
 
 impl Flow for FJWIn {
     type Output = FJWOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .fork(fjw_split)
             .join(fjw_join)
             .work(fjw_post)
-            .build()
     }
 }
 #[tokio::test]
@@ -921,8 +906,8 @@ fn fork_err_join(l: ForkErrL, r: ForkErrR) -> ForkErrOut {
 
 impl Flow for ForkErrIn {
     type Output = ForkErrOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().fork(fork_err_split).join(fork_err_join).build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.fork(fork_err_split).join(fork_err_join)
     }
 }
 #[tokio::test]
@@ -951,8 +936,8 @@ fn join_err_merge(l: JoinErrL, r: JoinErrR) -> JoinErrOut {
 
 impl Flow for JoinErrIn {
     type Output = JoinErrOut;
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().fork(join_split).join(join_err_merge).build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.fork(join_split).join(join_err_merge)
     }
 }
 #[tokio::test]

@@ -43,7 +43,7 @@ impl Agent for PlannerInput {
     fn build() -> AgentConfig {
         AgentConfig::new(
             "You are a careful planning agent.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -56,53 +56,56 @@ Common `AgentConfig` options:
 
 | Method                        | Effect                                                                                     |
 | ----------------------------- | ------------------------------------------------------------------------------------------ |
-| `.with_temperature(t)`        | Set sampling temperature                                                                   |
-| `.with_thinking(true)`        | Enable extended thinking (Anthropic)                                                       |
-| `.with_thinking_budget(n)`    | Set thinking token budget                                                                  |
 | `.keep_alive()`               | Reuse the same session id across loop re-entries so the LLM sees full conversation history |
 | `.with_max_tool_calls(n)`     | Cap the number of calls allowed per tool name per agent execution                          |
 | `.with_loop_break_message(m)` | Message returned to the LLM when a tool's call budget is exhausted                         |
+
+To set temperature or thinking level, add query parameters to the model URL:
+
+    gemini:///gemini-2.5-pro?temperature=0.7&thinking=medium
+
+Supported thinking levels are `off`, `low`, `medium`, `high`, and `xhigh`.
 
 For the simplest end-to-end example, see
 [../examples/linear_flow.rs](../examples/linear_flow.rs).
 
 ## Model URLs
 
-Model URLs follow `provider://model-id`.
+Model URLs encode the provider, optional transport, host (if needed), base path,
+model name, and optional parameters in a single string:
 
-- `openai://gpt-4o`
-- `anthropic://claude-opus-4-5`
-- `claude://claude-sonnet-4-5`
-- `gemini://gemini-2.5-flash-lite`
+    provider[+transport]://[authority][/prefix/]model[?param=value]
+
+- `openai:///gpt-4o`
+- `anthropic:///claude-opus-4-5`
+- `claude:///claude-sonnet-4-5`
+- `gemini:///gemini-2.5-flash-lite`
 - `ollama://localhost:11434/llama3`
 
 `claude://...` is an alias for `anthropic://...`.
 
-Provider identity comes from the URL scheme, not the upstream hostname. That
-means a layered client factory still treats
-`openai://gpt-4o?base_url=https://openrouter.ai/api/v1&api_key_env=OPENROUTER_API_KEY`
-as `Provider::OpenAi` for rate limiting, retries, and tracing.
+The model name is always the final path segment. Authority and prefix are
+optional; omitting both gives the triple-slash form (`provider:///model`).
+
+Provider identity comes from the scheme, not the upstream hostname. A layered
+client factory still treats
+`openai+https://openrouter.ai/api/v1/gpt-4o` as `Provider::OpenAi` for rate
+limiting, retries, and tracing.
 
 ## Compatible Endpoints
 
-OpenAI-, Anthropic-, and Ollama-compatible hosts can override transport details
-with query params.
+To route through a third-party or private host, embed the base URL in the
+authority and path, and use `+transport` to make the scheme explicit.
 
-- `openai://gpt-4o?base_url=https://openrouter.ai/api/v1&api_key_env=OPENROUTER_API_KEY`
-- `anthropic://claude-sonnet-4-5?base_url=https://anthropic-proxy.example/v1&api_key_env=ANTHROPIC_PROXY_KEY`
-- `ollama://qwen3:8b?base_url=https://ollama.example&api_key_env=OLLAMA_API_KEY`
-
-Inline keys still work as `provider://key@model-id`.
-
-Legacy Ollama URLs are still supported:
-
+- `openai+https://openrouter.ai/api/v1/gpt-4o?api_key_env=OPENROUTER_API_KEY`
+- `anthropic+https://anthropic-proxy.example/v1/claude-sonnet-4-5?api_key_env=ANTHROPIC_PROXY_KEY`
+- `ollama+https://ollama.example/qwen3:8b?api_key_env=OLLAMA_API_KEY`
 - `ollama://localhost:11434/qwen3:8b`
 
 Auth is resolved in this order:
 
-1. inline key in the model URL
-2. `api_key_env` from the query string
-3. the provider default environment variable
+1. `api_key_env` from the query string
+2. the provider default environment variable
 
 Provider defaults are:
 
@@ -115,10 +118,10 @@ missing, client creation fails early instead of silently falling back.
 
 ### Protocol Boundaries
 
-- `openai://...` uses the OpenAI Responses API. `base_url` should point to the `/v1` root, and Pravah will call `{base_url}/responses` and `{base_url}/embeddings`.
-- `anthropic://...` and `claude://...` use the Anthropic Messages API. `base_url` should point to the `/v1` root, and Pravah will call `{base_url}/messages`.
-- `ollama://...` uses `{base_url}/v1/chat/completions` for generation and `{base_url}/api/embed` for embeddings. Auth is optional and is only sent when a key is configured.
-- `gemini://...` uses the native Gemini adapter and does not use the same compatibility URL shape.
+- `openai[+transport]://...` uses the OpenAI Responses API. Pravah calls `/responses` and `/embeddings` relative to the base prefix.
+- `anthropic[+transport]://...` and `claude[+transport]://...` use the Anthropic Messages API. Pravah calls `/messages` relative to the base prefix.
+- `ollama[+transport]://...` uses `{prefix}/v1/chat/completions` for generation and `{prefix}/api/embed` for embeddings. Auth is optional and only sent when a key is present.
+- `gemini://...` uses the native Gemini adapter. Custom base URLs are not supported for Gemini.
 
 ## Structured Output
 
@@ -143,12 +146,11 @@ is the output type. Register a matching `work` handler for `I` → `O` separatel
 impl Flow for PlannerInput {
     type Output = Plan;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<PlannerInput>()
             .tool::<PlannerInput, ReadNoteInput, ReadNoteOutput>()
             .work(read_note_handler)
-            .build()
     }
 }
 ```

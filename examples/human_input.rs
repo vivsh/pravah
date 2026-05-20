@@ -1,7 +1,7 @@
 //! Human-in-the-loop example using `HumanInput` as a tool call.
 
 use pravah::deps::Deps;
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowRuntime, FlowStep};
 use pravah::{CliMode, Context, FlowConf, HumanInput, HumanOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,7 @@ impl Agent for BlogRequest {
                 - choice 0 → outcome: 'Published: <draft>'\n\
                 - choice 1 → outcome: 'Revision requested.'\n\
                 - choice 2 → outcome: 'Draft discarded.'",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -42,12 +42,11 @@ impl Agent for BlogRequest {
 impl Flow for BlogRequest {
     type Output = FinalResult;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<BlogRequest>()
             .tool::<BlogRequest, HumanInput, HumanOutput>()
             .flow::<HumanInput>()
-            .build()
     }
 }
 

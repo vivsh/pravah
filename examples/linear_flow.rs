@@ -1,6 +1,6 @@
 //! Linear flow example with one agent followed by one deterministic work node.
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ impl Agent for SummariseRequest {
         AgentConfig::new(
             "You are a concise summariser. Extract the key points from the text \
              the user sends and return them as a JSON array of short strings.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -44,11 +44,10 @@ async fn format_bullets(bullets: BulletPoints, _ctx: Context) -> Result<Report, 
 impl Flow for SummariseRequest {
     type Output = Report;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<SummariseRequest>()
             .work(format_bullets)
-            .build()
     }
 }
 

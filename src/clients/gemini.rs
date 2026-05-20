@@ -11,7 +11,7 @@ use super::super::tools::ToolDefinition;
 use super::schema;
 use super::{
     Attachment, Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest,
-    EmbedResponse, EmbedTaskType, LlmUrl, Message, Provider, Role,
+    EmbedResponse, EmbedTaskType, LlmUrl, Message, Provider, Role, ThinkingLevel,
     TokenUsage, ToolCall, ToolChoice, decode_output_text, validate_tools,
 };
 
@@ -27,6 +27,12 @@ fn format_error_chain(e: &dyn std::error::Error) -> String {
 }
 
 fn build_client(url: &LlmUrl) -> Result<Gemini, ClientError> {
+    if url.base_url.is_some() {
+        return Err(ClientError::UnsupportedCapability {
+            provider: Provider::Gemini,
+            capability: "custom endpoint".into(),
+        });
+    }
     let api_key = if let Some(key) = &url.api_key {
         key.clone()
     } else {
@@ -308,14 +314,19 @@ impl GeminiClient {
         response_schema: Option<Value>,
     ) -> Result<GenerationResponse, ClientError> {
         let client = &self.client;
-        let thinking_budget = if self.options.thinking {
-            self.options.thinking_budget.map(|b| b as i32).unwrap_or(i32::MAX)
-        } else {
-            0
+        let thinking_budget: i32 = match &self.options.thinking {
+            None | Some(ThinkingLevel::Off) => 0,
+            Some(ThinkingLevel::Low) => 512,
+            Some(ThinkingLevel::Medium) => 4096,
+            Some(ThinkingLevel::High) => 16384,
+            Some(ThinkingLevel::XHigh) => i32::MAX,
         };
         let mut builder = client
             .generate_content()
             .with_thinking_budget(thinking_budget);
+        if let Some(t) = self.options.temperature {
+            builder = builder.with_temperature(t);
+        }
         if let Some(p) = self.options.effective_preamble() {
             builder = builder.with_system_prompt(p);
         }

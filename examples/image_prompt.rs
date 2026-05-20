@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use pravah::clients::{Attachment, Message, Role};
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -88,7 +88,7 @@ impl Agent for VisionPrompt {
 
     fn build() -> AgentConfig {
         let model_url = env::var("PRAVAH_MODEL_URL")
-            .unwrap_or_else(|_| "gemini://gemini-2.5-flash-lite".to_string());
+            .unwrap_or_else(|_| "gemini:///gemini-2.5-flash-lite".to_string());
         AgentConfig::new(
             "You are a vision assistant. Inspect the uploaded image and return JSON with: \
              1. `summary`: one concise description of what the image shows, \
@@ -103,8 +103,8 @@ impl Agent for VisionPrompt {
 impl Flow for VisionPrompt {
     type Output = VisionResult;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder().agent::<VisionPrompt>().build()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.agent::<VisionPrompt>()
     }
 }
 

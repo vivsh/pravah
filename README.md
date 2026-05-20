@@ -77,13 +77,13 @@ That gives you deterministic routing, safe replay, and unambiguous resumption.
 
 ```toml
 [dependencies]
-pravah = "0.3.7"
+pravah = "0.3.8"
 ```
 
 To enable only selected providers:
 
 ```toml
-pravah = { version = "0.3.7", default-features = false, features = ["provider-openai"] }
+pravah = { version = "0.3.8", default-features = false, features = ["provider-openai"] }
 ```
 
 Available provider features: `provider-openai`, `provider-anthropic`,
@@ -100,7 +100,7 @@ See [examples/linear_flow.rs](examples/linear_flow.rs) for a complete runnable
 example.
 
 ```rust
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowGraph};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -125,7 +125,7 @@ impl Agent for SummariseRequest {
     fn build() -> AgentConfig {
         AgentConfig::new(
             "You are a concise summariser.",
-            "gemini://gemini-2.5-flash-lite",
+            "gemini:///gemini-2.5-flash-lite",
         )
     }
 }
@@ -139,11 +139,10 @@ async fn format_bullets(bullets: BulletPoints, _ctx: pravah::Context) -> Result<
 impl Flow for SummariseRequest {
     type Output = Report;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<SummariseRequest>()
             .work(format_bullets)
-            .build()
     }
 }
 ```

@@ -87,12 +87,11 @@ flow on the builder.
 impl Flow for BlogRequest {
     type Output = FinalResult;
 
-    fn build() -> Result<FlowGraph, FlowError> {
-        FlowGraph::builder()
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
             .agent::<BlogRequest>()
             .tool::<BlogRequest, HumanInput, HumanOutput>()
             .flow::<HumanInput>()   // HumanInput::build() contains a suspend node
-            .build()
     }
 }
 ```
@@ -129,7 +128,7 @@ loop iterations:
 
 ```rust
 fn build() -> AgentConfig {
-    AgentConfig::new("You are a helpful assistant.", "gemini://gemini-2.5-flash")
+    AgentConfig::new("You are a helpful assistant.", "gemini:///gemini-2.5-flash")
         .keep_alive()
 }
 ```
@@ -175,11 +174,12 @@ A flow has the same outer shape as a node: typed input, typed output, stepwise
 execution.
 
 ```rust
-FlowGraph::builder()
-    .flow::<PlannerFlow>()
-    .flow::<ResearchFlow>()
-    .flow::<ReviewFlow>()
-    .build()
+fn build(builder: FlowBuilder) -> FlowBuilder {
+    builder
+        .flow::<PlannerFlow>()
+        .flow::<ResearchFlow>()
+        .flow::<ReviewFlow>()
+}
 ```
 
 Nested flows keep the same guarantees as top-level flows: deterministic
