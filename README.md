@@ -6,30 +6,28 @@
 
 _Pravah_ (प्रवाह, _pruh-VAH_) means "flow" or "current".
 
-Pravah is a Rust library for building stepwise, resumable, typed flows.
-It is designed for workflows that need to stay inspectable, deterministic,
-portable across processes, and safe to pause or resume.
-
-Agentic systems are one use case. The underlying model is broader: explicit
-information movement through a typed graph, one bounded step at a time.
+Pravah is a stepwise transactional flow engine for Rust. It builds typed
+graphs that advance one bounded step at a time, keeping execution explicit,
+inspectable, and resumable across agentic and non-agentic workflows.
 
 ## Why Pravah
 
-Most workflow and agent frameworks optimize for convenience through implicit
-orchestration. Pravah optimizes for explicit execution.
+Many workflow and agent frameworks hide orchestration behind implicit loops,
+background tasks, or framework-owned state. Pravah does not.
 
-One call to `next()` performs one unit of work:
+One call to `next()` performs exactly one bounded step:
 
-- one LLM turn
+- one LLM interaction
 - one tool batch
-- one deterministic transform
-- one branch or merge
-- one suspend point
+- one async `work` transform
+- one branch transition
+- one merge transition
+- one suspend boundary
 - one nested flow step
 
-After each step, the runtime can be snapshotted, stored, transferred, retried,
-or resumed elsewhere. Nothing important is hidden inside background tasks or
-thread-local state.
+After each step you can inspect the runtime, snapshot it, store it, retry it,
+or resume it elsewhere. Nothing important is trapped in thread-local state or
+hidden inside a scheduler-owned control loop.
 
 Pravah is a good fit when you need:
 
@@ -39,7 +37,7 @@ Pravah is a good fit when you need:
 - replayable state transitions
 - typed composition across subflows
 - deterministic orchestration
-- multi-turn agent conversations with persistent history across loop iterations
+- multi-turn agent conversations with persistent history
 
 ## Mental Model
 
@@ -67,112 +65,143 @@ Done
 The runtime stores typed values as serializable state and advances by consuming
 one value at a time.
 
-The key rule is simple:
+The core invariant is simple:
 
 > within one flow graph, one Rust type can identify only one node
 
-That gives you deterministic routing, safe replay, and unambiguous resumption.
+That keeps routing deterministic and resumption unambiguous.
 
 ## Installation
 
 ```toml
 [dependencies]
-pravah = "0.3.8"
+pravah = "0.3.11"
 ```
 
-To enable only selected providers:
+To opt into providers explicitly:
 
 ```toml
-pravah = { version = "0.3.8", default-features = false, features = ["provider-openai"] }
+[dependencies]
+pravah = { version = "0.3.11", default-features = false, features = [
+  "provider-openai",
+  "provider-anthropic",
+  "provider-gemini",
+  "provider-ollama",
+] }
 ```
 
-Available provider features: `provider-openai`, `provider-anthropic`,
-`provider-gemini`, `provider-ollama`.
+Remove the providers you do not need.
 
 ## Getting Started
 
-The smallest useful Pravah flow is often:
-
-1. one typed agent node
-2. one deterministic transform
-
-See [examples/linear_flow.rs](examples/linear_flow.rs) for a complete runnable
-example.
+The smallest useful Pravah flow is usually one agent followed by one
+deterministic transform. See [examples/linear_flow.rs](examples/linear_flow.rs)
+for the full runnable file.
 
 ```rust
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
+use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct SummariseRequest {
-    text: String,
+  text: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct BulletPoints {
-    points: Vec<String>,
+  points: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct Report {
-    markdown: String,
+  markdown: String,
 }
 
 impl Agent for SummariseRequest {
-    type Output = BulletPoints;
+  type Output = BulletPoints;
 
-    fn build() -> AgentConfig {
-        AgentConfig::new(
-            "You are a concise summariser.",
-            "gemini:///gemini-2.5-flash-lite",
-        )
-    }
+  fn build() -> AgentConfig {
+    AgentConfig::new(
+      "You are a concise summariser.",
+      "gemini:///gemini-2.5-flash-lite",
+    )
+  }
 }
 
-async fn format_bullets(bullets: BulletPoints, _ctx: pravah::Context) -> Result<Report, FlowError> {
-    Ok(Report {
-        markdown: bullets.points.join("\n"),
-    })
+async fn format_bullets(bullets: BulletPoints, _ctx: Context) -> Result<Report, FlowError> {
+  Ok(Report {
+    markdown: bullets
+      .points
+      .into_iter()
+      .map(|point| format!("- {point}"))
+      .collect::<Vec<_>>()
+      .join("\n"),
+  })
 }
 
 impl Flow for SummariseRequest {
-    type Output = Report;
+  type Output = Report;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<SummariseRequest>()
-            .work(format_bullets)
+  fn build(builder: FlowBuilder) -> FlowBuilder {
+    builder.agent::<SummariseRequest>().work(format_bullets)
+  }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+  let ctx = Context::new(FlowConf::default());
+  let mut runtime = FlowRuntime::new(SummariseRequest {
+    text: "Rust is fast, memory-safe, and concurrency-friendly.".into(),
+  })?;
+
+  loop {
+    match runtime.next(ctx.clone()).await? {
+      FlowStep::Continue => {}
+      FlowStep::Done(report) => {
+        println!("{}", report.markdown);
+        break;
+      }
+      FlowStep::Suspend(_) => unreachable!("this flow never suspends"),
     }
+  }
+
+  Ok(())
 }
 ```
 
 ## Read Next
 
-- [docs/clients.md](docs/clients.md): agents, model URLs, providers, tools, attachments, client layers
-- [docs/flows.md](docs/flows.md): node types, execution model, suspend/resume, snapshots, history
-- [examples/](examples/): runnable examples
+- [docs/clients.md](docs/clients.md): agents, providers, model URLs, tools, attachments
+- [docs/flows.md](docs/flows.md): node types, runtime semantics, suspension, snapshots
+- [examples/](examples/): runnable end-to-end flows
 - [docs.rs](https://docs.rs/pravah): API reference
 
 ## Examples
 
-| Example                                              | What it shows                          |
-| ---------------------------------------------------- | -------------------------------------- |
-| [examples/linear_flow.rs](examples/linear_flow.rs)   | Minimal agent -> work pipeline         |
-| [examples/split_merge.rs](examples/split_merge.rs)   | Fan-out / fan-in flow composition      |
-| [examples/nested_flow.rs](examples/nested_flow.rs)   | Nested flows as reusable nodes         |
-| [examples/human_input.rs](examples/human_input.rs)   | Suspend and resume with external input |
-| [examples/snapshot.rs](examples/snapshot.rs)         | Serialize and restore runtime state    |
-| [examples/image_prompt.rs](examples/image_prompt.rs) | Initial user message with image upload |
-| [examples/debate.rs](examples/debate.rs)             | Multi-agent reasoning across branches  |
-| [examples/story.rs](examples/story.rs)               | Interactive looping flow               |
-| [examples/gen_diagrams.rs](examples/gen_diagrams.rs) | Flow visualization                     |
+| Example                                                | What it shows                             |
+| ------------------------------------------------------ | ----------------------------------------- |
+| [examples/linear_flow.rs](examples/linear_flow.rs)     | Minimal agent -> work pipeline            |
+| [examples/split_merge.rs](examples/split_merge.rs)     | Fan-out and fan-in composition            |
+| [examples/nested_flow.rs](examples/nested_flow.rs)     | Embedded subflows as reusable nodes       |
+| [examples/human_input.rs](examples/human_input.rs)     | Human approval through suspend and resume |
+| [examples/snapshot.rs](examples/snapshot.rs)           | Save and restore runtime state            |
+| [examples/image_prompt.rs](examples/image_prompt.rs)   | Initial user message with an image        |
+| [examples/ollama_client.rs](examples/ollama_client.rs) | Direct provider client usage              |
+| [examples/debate.rs](examples/debate.rs)               | Multi-agent branching workflow            |
+| [examples/story.rs](examples/story.rs)                 | Looping flow with repeated agent turns    |
+| [examples/gen_diagrams.rs](examples/gen_diagrams.rs)   | Tree, Mermaid, and DOT graph output       |
 
 ## When To Use Pravah
 
-Use Pravah when you need explicit execution boundaries, durable state, typed
-transitions, resumable workflows, or agentic systems that must remain
+### Use Pravah When
+
+Use Pravah when you need explicit execution boundaries, typed transitions,
+human approvals, snapshots, or resumable workflows that must remain
 inspectable over time.
+
+### Do Not Use Pravah When
 
 Do not use Pravah as a queue system, distributed scheduler, background task
 runner, or durable storage layer. It can sit inside those systems, but it does
@@ -180,9 +209,4 @@ not replace them.
 
 ## License
 
-Licensed under either:
-
-- MIT license
-- Apache License 2.0
-
-at your option.
+Licensed under either the MIT License or Apache License 2.0, at your option.

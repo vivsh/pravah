@@ -1,8 +1,8 @@
 # Flows
 
-Read this when you are designing the graph itself: node types, execution rules,
-suspension, nested flows, snapshots, and history. For provider configuration,
-tools, and attachments, see [clients.md](clients.md).
+Read this when designing the graph itself: node types, execution rules,
+suspension, nested flows, snapshots, and history. For providers, tools, and
+attachments, see [clients.md](clients.md).
 
 ## Execution Model
 
@@ -16,13 +16,37 @@ Pravah is intentionally:
 The runtime advances one bounded step at a time. Parallelism is expressed in the
 graph through `split` and `merge`, not hidden inside a scheduler.
 
-This makes the runtime predictable, replayable, and easy to suspend.
+Within one flow graph, one Rust type identifies one node. That rule gives you
+deterministic routing, replayable progress, and unambiguous resume points.
+
+## Building A Flow
+
+Implement `Flow` for the input type, declare the output type, and assemble the
+graph with `FlowBuilder`.
+
+```rust
+impl Flow for Proposal {
+    type Output = Brief;
+
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
+            .split(split_proposal)
+            .agent::<TechTrack>()
+            .agent::<MktTrack>()
+            .agent::<RiskTrack>()
+            .merge(merge_brief)
+    }
+}
+```
+
+You describe nodes by input and output type. Pravah validates the graph and
+computes how values move between nodes.
 
 ## Node Types
 
 | Builder method      | What it does                                                              |
 | ------------------- | ------------------------------------------------------------------------- |
-| `agent::<A>()`      | LLM-backed node with structured output or tool loop                       |
+| `agent::<A>()`      | LLM-backed node with structured output or a tool loop                     |
 | `work(f)`           | Effectful async transform: `async fn(I, Context) -> Result<O, FlowError>` |
 | `map(f)`            | Pure synchronous transform: `fn(I) -> O`                                  |
 | `either(f)`         | Route to one branch: `fn(I) -> Either<A, B>`                              |
@@ -33,15 +57,13 @@ This makes the runtime predictable, replayable, and easy to suspend.
 
 `fork` and `join` are binary aliases for `split` and `merge`.
 
-See these runnable examples:
+Runnable examples:
 
 - [../examples/linear_flow.rs](../examples/linear_flow.rs)
 - [../examples/split_merge.rs](../examples/split_merge.rs)
 - [../examples/nested_flow.rs](../examples/nested_flow.rs)
 
-## Pure Vs Effectful Nodes
-
-Pravah keeps pure routing logic separate from effectful work.
+## Pure, Effectful, And Control Nodes
 
 Pure algebra nodes:
 
@@ -59,8 +81,34 @@ Effectful nodes:
 
 These may perform I/O and return `Result<_, FlowError>`.
 
-This separation keeps routing logic simple and makes failures explicit only
-where effects actually happen.
+Control nodes:
+
+- `flow`
+- `suspend`
+
+These shape execution without doing business logic themselves.
+
+## Driving The Runtime
+
+Create a `FlowRuntime`, then call `next()` until the flow finishes or suspends.
+
+```rust
+loop {
+    match runtime.next(ctx.clone()).await? {
+        FlowStep::Continue => {}
+        FlowStep::Done(value) => break value,
+        FlowStep::Suspend(_) => {
+            runtime.resume(ctx.clone(), decision).await?;
+        }
+    }
+}
+```
+
+`FlowStep::Continue` means one bounded step completed and more work remains.
+`FlowStep::Done` returns the typed output. `FlowStep::Suspend` hands control
+back until you resume.
+
+If you want the runtime to manage the outer loop for you, use `run_until()`.
 
 ## Suspend And Resume
 
@@ -79,9 +127,9 @@ When a value of type `I` reaches that node, the runtime returns
 
 ### Tool-Level Suspend
 
-To suspend from inside an agent's tool loop, implement the tool as a sub-flow
+To suspend from inside an agent tool loop, implement the tool as a sub-flow
 that contains a `suspend::<I, O>()` node, then register it as both a tool and a
-flow on the builder.
+flow.
 
 ```rust
 impl Flow for BlogRequest {
@@ -91,176 +139,165 @@ impl Flow for BlogRequest {
         builder
             .agent::<BlogRequest>()
             .tool::<BlogRequest, HumanInput, HumanOutput>()
-            .flow::<HumanInput>()   // HumanInput::build() contains a suspend node
+            .flow::<HumanInput>()
     }
 }
 ```
 
-When the agent calls the tool, the engine enters the `HumanInput` sub-flow.
-If it reaches the `suspend` node, the runtime returns `FlowStep::Suspend` to
-the caller, just like a top-level suspend.
+When the agent calls that tool, the engine enters the `HumanInput` sub-flow.
+If the sub-flow suspends, the outer runtime also returns `FlowStep::Suspend`.
 
-Both end up with the same outer control loop:
-
-```rust
-loop {
-    match runtime.next(ctx.clone()).await? {
-        FlowStep::Continue => {}
-        FlowStep::Done(v) => break,
-        FlowStep::Suspend(sv) => {
-            runtime.resume(ctx.clone(), decision).await?;
-        }
-    }
-}
-```
-
-See [../examples/human_input.rs](../examples/human_input.rs) for the practical
-shape.
+See [../examples/human_input.rs](../examples/human_input.rs).
 
 ## Multi-Turn Agent Conversations
 
-By default, each time an agent node is entered it gets a fresh session id.
-That isolates agents from each other, but means a looping agent (one connected
-back to itself via `either`) sees no history from previous iterations.
+By default, each agent entry gets a fresh session id. That isolates agents,
+but a looping agent then sees no previous turns from earlier iterations.
 
-Call `.keep_alive()` on `AgentConfig` to opt into continuous history across
-loop iterations:
+Call `.keep_alive()` on `AgentConfig` to preserve one session across re-entries:
 
 ```rust
 fn build() -> AgentConfig {
-    AgentConfig::new("You are a helpful assistant.", "gemini:///gemini-2.5-flash")
-        .keep_alive()
+    AgentConfig::new(
+        "You are a helpful assistant.",
+        "gemini:///gemini-2.5-flash",
+    )
+    .keep_alive()
 }
 ```
 
-With `keep_alive`, the engine assigns one stable session id to all invocations
-of that agent within one parent frame. The LLM sees the full conversation
-history on every re-entry. Multiple `keep_alive` agents in the same parent flow
-each maintain their own independent session.
-
-### Injecting Messages
-
-Use `FlowRuntime::push_message` to append a user message to the active session
-before the next LLM dispatch. Call it between `next()` calls when
-`FlowInspector::is_agent_dispatch_ready` returns `true`:
-
-```rust
-if inspector.is_agent_dispatch_ready() {
-    runtime.push_message("What else should I know?");
-}
-```
-
-`is_agent_dispatch_ready` returns `true` while the top agent frame is in its
-`Entry` phase — the next `next()` call will push the structured input to history
-and dispatch to the LLM. Any message pushed here appears before that dispatch.
-
-### Inspecting Session History
-
-Use `FlowInspector::messages` to iterate over the live messages in the current
-session, oldest first:
-
-```rust
-for msg in inspector.messages() {
-    println!("{:?}: {}", msg.role, msg.content);
-}
-```
-
-Evicted (compacted) messages are excluded. Only messages belonging to the
-active frame's session id are returned.
+With `keep_alive`, one agent keeps its own conversation history within the
+current parent frame.
 
 ## Nested Flows
 
-A flow has the same outer shape as a node: typed input, typed output, stepwise
-execution.
+A nested flow has the same outer shape as a node: typed input, typed output,
+and stepwise execution.
 
 ```rust
 fn build(builder: FlowBuilder) -> FlowBuilder {
     builder
-        .flow::<PlannerFlow>()
-        .flow::<ResearchFlow>()
-        .flow::<ReviewFlow>()
+        .work(derive_query)
+        .flow::<ResearchQuery>()
+        .agent::<ResearchResult>()
 }
 ```
 
-Nested flows keep the same guarantees as top-level flows: deterministic
+Nested flows preserve the same guarantees as top-level flows: deterministic
 execution, resumability, typed boundaries, and snapshot safety.
 
 See [../examples/nested_flow.rs](../examples/nested_flow.rs).
 
-## Persistence And Snapshots
+## Snapshots And Persistence
 
-Call `runtime.snapshot()` to capture the entire execution state, then restore it
-later with `FlowRuntime::from_snapshot(snapshot)`.
+Call `runtime.snapshot()` to capture execution state, then restore it later
+with `FlowRuntime::from_snapshot(snapshot)`.
 
 Snapshots contain runtime state, pending branches, suspend points, nested flow
-state, and execution progress. They do not capture closures, async tasks,
-thread-local state, or executor-specific handles.
+frames, and execution progress. They do not capture closures, async tasks,
+thread-local state, or executor handles.
 
-That keeps snapshots portable across processes and machines.
+If you also want prior conversation history after restore, reattach it with
+`with_history()`.
 
 See [../examples/snapshot.rs](../examples/snapshot.rs).
 
 ## Run Limits
 
-`FlowRuntime::run_until` accepts a `RunLimits` value to cap execution:
+`FlowRuntime::run_until` accepts `RunLimits` to cap execution.
 
 ```rust
 use pravah::flows::{RunLimits, RunOutcome};
+use std::time::Duration;
 
-match runtime.run_until(ctx, RunLimits::new().max_turns(10).max_steps(200)).await? {
-    RunOutcome::Done(v) => { /* flow finished */ }
+match runtime
+    .run_until(
+        ctx,
+        RunLimits::new()
+            .max_steps(200)
+            .max_turns(10)
+            .max_depth(8)
+            .max_duration(Duration::from_secs(30)),
+    )
+    .await?
+{
+    RunOutcome::Done(value) => { /* flow finished */ }
     RunOutcome::Suspend(sv) => { /* flow suspended */ }
-    RunOutcome::LimitExceeded(kind) => { /* cap reached */ }
+    RunOutcome::LimitExceeded(kind) => { /* soft limit reached */ }
 }
 ```
 
-`run_until` returns `Result<RunOutcome<T>, FlowError>`. Most limits produce
-`Ok(RunOutcome::LimitExceeded(LimitKind))`. The `max_turns` limit is a hard
-error and returns `Err(FlowError::LimitExceeded(...))` instead.
+`max_turns` is the one hard limit. It returns `Err(FlowError::LimitExceeded)`.
+The other limits return `RunOutcome::LimitExceeded`.
 
 Available limits:
 
 | Limit          | Description                             |
 | -------------- | --------------------------------------- |
 | `max_steps`    | Total engine steps across the whole run |
-| `max_turns`    | LLM dispatches (model round-trips)      |
+| `max_turns`    | LLM dispatches                          |
 | `max_depth`    | Maximum call-stack depth                |
 | `max_duration` | Wall-clock time                         |
 
-## History Management
+## History And Inspection
 
-LLM history is intentionally separate from runtime execution state. That lets
-you vary storage, compaction, summarization, and retention policy without
-changing the graph model itself.
+LLM history is separate from runtime execution state. That lets you vary
+storage, compaction, and retention without changing the graph model.
 
 Pravah includes:
 
-- sliding-window compaction
-- custom compactor hooks
-- pluggable history stores
+- `NoopHistoryStore` and custom `HistoryStore` implementations
+- `NoopCompactor`, `SlidingWindowCompactor`, and custom `HistoryCompactor`
+- `FlowInspector` for live runtime inspection
 
-Use this separation when the runtime state must stay durable, but conversation
-history needs a different lifecycle.
+Use `runtime.inspector()` to inspect the active frames and current session
+messages.
 
-## Tracing And Operations
+```rust
+for msg in runtime.inspector().messages() {
+    println!("{:?}: {}", msg.role, msg.content);
+}
+```
 
-Pravah emits `tracing` events for runtime steps, client dispatches, tool calls,
-retries, rate limiting, suspension, and run limits.
+To inject a user message before the next agent dispatch, wait until the agent is
+at a dispatch boundary:
 
-Use this when you need replayable execution plus operational visibility.
+```rust
+if runtime.inspector().is_agent_dispatch_ready() {
+    runtime.inject_message("What else should I know?")?;
+}
+```
 
-Client-layer retry, rate limiting, and tracing wrappers are documented in
-[clients.md](clients.md#client-layers).
+That message is appended to the active session before the next LLM call.
+
+## Diagrams And Operations
+
+Use `FlowGraphDiagram` when you want a structural view of the graph.
+
+```rust
+let diagram = FlowGraphDiagram::from_flow::<ArticleRequest>()?;
+
+println!("{}", diagram.render_tree());
+println!("{}", diagram.mermaid());
+println!("{}", diagram.dot());
+```
+
+Pravah also emits `tracing` events for runtime steps, tool calls, retries, rate
+limiting, suspension, and run limits.
+
+See [../examples/gen_diagrams.rs](../examples/gen_diagrams.rs) for diagram
+generation and [clients.md](clients.md#client-layers) for retry, tracing, and
+rate-limit layers.
 
 ## Example Map
 
 - [../examples/linear_flow.rs](../examples/linear_flow.rs): one agent, one work node
-- [../examples/split_merge.rs](../examples/split_merge.rs): multi-branch flow
-- [../examples/nested_flow.rs](../examples/nested_flow.rs): composition with subflows
-- [../examples/human_input.rs](../examples/human_input.rs): suspend and resume
+- [../examples/split_merge.rs](../examples/split_merge.rs): multi-branch composition
+- [../examples/nested_flow.rs](../examples/nested_flow.rs): embedded subflows
+- [../examples/human_input.rs](../examples/human_input.rs): suspend and resume through a tool
 - [../examples/snapshot.rs](../examples/snapshot.rs): snapshot and restore
-- [../examples/story.rs](../examples/story.rs): interactive looping flow
+- [../examples/story.rs](../examples/story.rs): looping flow with repeated turns
 - [../examples/debate.rs](../examples/debate.rs): larger multi-agent orchestration
-- [../examples/gen_diagrams.rs](../examples/gen_diagrams.rs): visualize the graph
+- [../examples/gen_diagrams.rs](../examples/gen_diagrams.rs): tree, Mermaid, and DOT output
 
 If you are starting from the top, go back to [../README.md](../README.md).
