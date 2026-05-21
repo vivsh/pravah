@@ -10,11 +10,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::flows::FlowGraph;
-use crate::flows::flows::FlowNode;
+use crate::flows::{Flow, FlowGraph};
 
 use super::errors::FlowError;
-use super::flows::Flow;
+use super::nodes::FlowNode;
 
 /// Node kind used by the diagram renderers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -459,7 +458,6 @@ fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
                     let exit_str = inner.interner.name_of(exit).to_string();
                     (DiagramNodeKind::Flow, vec![(exit_str, "flow")])
                 }
-                _ => return None,
             };
             Some(NodeDesc {
                 id: key_str,

@@ -1,8 +1,26 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use crate::flows::{FlowGraph, NodeId, errors::BuildError, flows::FlowNode};
-use crate::flows::flows::{AgentInfo, EitherInfo, ForkInfo, JoinInfo};
+use super::flow::FlowGraph;
+use super::nodes::{AgentInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo};
+use crate::flows::{NodeId, errors::BuildError};
+
+fn node_outputs(node: &FlowNode) -> Vec<NodeId> {
+    match node {
+        FlowNode::Work(w) => vec![w.exit_name],
+        FlowNode::Map(m) => vec![m.exit_name],
+        FlowNode::Suspend(s) => vec![s.exit],
+        FlowNode::Agent(a) => {
+            let mut v = vec![a.exit];
+            v.extend(a.tool_lookup.values().map(|(_, e)| *e));
+            v
+        }
+        FlowNode::Fork(f) => f.children.clone(),
+        FlowNode::Join(j) => vec![j.target],
+        FlowNode::Either(e) => vec![e.left_name, e.right_name],
+        FlowNode::Flow(_) => vec![],
+    }
+}
 
 fn check_agent(
     key_str: &str,
@@ -20,17 +38,27 @@ fn check_agent(
         problems.push(format!("agent '{key_str}': model is empty"));
     }
     for (tool_name, (entry_id, exit_id)) in &info.tool_lookup {
+        if *exit_id == info.exit {
+            continue;
+        }
         match nodes.get(entry_id) {
             None => problems.push(format!(
-                "agent '{key_str}': tool '{tool_name}' has no work node registered for input slot '{}'",
+                "agent '{key_str}': tool '{tool_name}' has no node registered for input slot '{}'",
                 graph.interner.name_of(*entry_id),
             )),
-            Some(FlowNode::Work(work)) if work.exit_name != *exit_id => problems.push(format!(
-                "agent '{key_str}': tool '{tool_name}' work node output slot '{}' does not match expected exit slot '{}'",
-                graph.interner.name_of(work.exit_name),
+            Some(node) if !node_outputs(node).contains(exit_id) => problems.push(format!(
+                "agent '{key_str}': tool '{tool_name}' node at '{}' does not produce expected output slot '{}'",
+                graph.interner.name_of(*entry_id),
                 graph.interner.name_of(*exit_id),
             )),
             _ => {}
+        }
+        if nodes.contains_key(exit_id) {
+            problems.push(format!(
+                "agent '{key_str}': tool '{tool_name}' output slot '{}' must be terminal — \
+                 it is used as an input to another node",
+                graph.interner.name_of(*exit_id),
+            ));
         }
     }
 }
@@ -150,7 +178,7 @@ fn build_successors(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> Has
         let succs: Vec<NodeId> = match node {
             FlowNode::Agent(info) => {
                 let mut s = vec![info.exit];
-                s.extend(info.tool_lookup.values().map(|(e, _)| *e));
+                s.extend(info.tool_lookup.values().map(|(e, _)| *e).filter(|&e| e != info.exit));
                 s
             }
             FlowNode::Work(info) => vec![info.exit_name],

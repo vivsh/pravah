@@ -2,8 +2,8 @@ use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
+use super::nodes::{StateNode, node};
 use crate::flows::errors::FlowError;
-use crate::flows::flows::{StateNode, node};
 
 /// Tuple helper for [`FlowBuilder::split`].
 /// Arities 2-16 are covered automatically.

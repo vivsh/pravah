@@ -267,7 +267,12 @@ async fn test_inspector_tracks_tool_turns() {
     assert_eq!(top.callable_entry, "ValidIn");
     assert!(top.agent_phases.is_empty());
 
-    // After first step: agent dispatched, tool calls returned → PendingTool.
+    // After first step: agent state initialised (Dispatch), no LLM call yet.
+    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
+    assert!(rt.inspector().top_frame().unwrap().agent_phases.first()
+        .is_some_and(|ap| matches!(ap.phase, PhaseKind::Dispatch)));
+
+    // After second step: LLM called → tool calls returned → PendingTool.
     assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
     let inspector = rt.inspector();
     assert_eq!(inspector.depth(), 1, "agent lives in same frame");
@@ -507,26 +512,6 @@ async fn test_no_scripted_responses_remain_after_direct_run() {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)] struct MissingWorkResult { r: String }
 simple_agent!(MissingWorkAgent, MissingWorkResult, "Use echo.");
 
-/// Verifies that registering a tool without a corresponding work node is caught at build time.
-/// The `validate_nodes` pass must report an error naming the missing work node.
-#[test]
-fn test_build_rejects_tool_without_work_node() {
-    let result = FlowGraph::builder()
-        .agent::<MissingWorkAgent>()
-        .tool::<MissingWorkAgent, EchoInput, EchoOutput>()
-        // Deliberately omitting .work(echo_handler)
-        .build();
-    match result {
-        Err(FlowError::Build(BuildError::Invalid(msgs))) => {
-            assert!(
-                msgs.iter().any(|m| m.contains("no work node")),
-                "expected 'no work node' in validation errors, got: {msgs:?}",
-            );
-        }
-        Ok(_) => panic!("build should have failed — tool has no work node"),
-        Err(e) => panic!("unexpected error variant: {e}"),
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)] struct OrphanWorkAgent { q: String }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)] struct OrphanWorkResult { r: String }

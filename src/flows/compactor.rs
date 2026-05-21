@@ -79,7 +79,7 @@ impl HistoryCompactor for SlidingWindowCompactor {
 }
 
 /// Counts complete assistant turns in one session slice.
-fn count_complete_turns(entries: &[&HistoryEntry]) -> usize {
+pub(crate) fn count_complete_turns(entries: &[&HistoryEntry]) -> usize {
     let mut count = 0;
     let mut i = 0;
     while i < entries.len() {

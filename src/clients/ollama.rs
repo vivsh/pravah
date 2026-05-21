@@ -65,12 +65,31 @@ impl Client for OllamaClient {
         let tools_enabled =
             !self.options.tools.is_empty() && self.options.tool_choice != ToolChoice::Disabled;
         let wants_json_output = !tools_enabled && self.options.wants_json_output();
-        let payload = build_payload(&self.model, &self.options, messages, tools_enabled);
         let endpoint = chat_completions_endpoint(&self.base_url);
 
+        let payload = build_payload(&self.model, &self.options, messages, tools_enabled);
         let response = self.post_json(&endpoint, &payload).await?;
 
-        map_response(response, tools_enabled, wants_json_output)
+        match map_response(response, tools_enabled, wants_json_output) {
+            Err(ClientError::MissingToolCalls(Some(ref text))) if tools_enabled => {
+                tracing::warn!("model answered without tool call; nudging to retry");
+                let tool_names: Vec<&str> =
+                    self.options.tools.iter().map(|t| t.name.as_str()).collect();
+                let nudge = format!(
+                    "Your previous response was plain text, which is not allowed. \
+                     You MUST call one of the following tools: {}. \
+                     Do not write any prose — issue a tool call now.",
+                    tool_names.join(", ")
+                );
+                let mut nudged = messages.to_vec();
+                nudged.push(Message::assistant(text.clone()));
+                nudged.push(Message::user(nudge));
+                let nudged_payload = build_payload(&self.model, &self.options, &nudged, true);
+                let nudged_response = self.post_json(&endpoint, &nudged_payload).await?;
+                map_response(nudged_response, true, false)
+            }
+            other => other,
+        }
     }
 
     async fn embed(&self, request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {
@@ -525,10 +544,16 @@ fn strip_markdown_key(key: &str) -> &str {
 }
 
 fn collect_tool_calls(message: &Value) -> Result<Vec<ToolCall>, ClientError> {
-    let Some(items) = message.get("tool_calls").and_then(Value::as_array) else {
-        return Ok(Vec::new());
-    };
+    if let Some(items) = message.get("tool_calls").and_then(Value::as_array) {
+        return parse_json_tool_calls(items);
+    }
+    if let Some(content) = message.get("content").and_then(Value::as_str) {
+        return parse_content_tool_calls(content);
+    }
+    Ok(Vec::new())
+}
 
+fn parse_json_tool_calls(items: &[Value]) -> Result<Vec<ToolCall>, ClientError> {
     let mut calls = Vec::with_capacity(items.len());
     for item in items {
         let id = item
@@ -560,6 +585,55 @@ fn collect_tool_calls(message: &Value) -> Result<Vec<ToolCall>, ClientError> {
         });
     }
     Ok(calls)
+}
+
+/// Parses tool calls from content text when the model emits them in the
+/// `<function=NAME><parameter=KEY>VALUE</parameter></function>` format
+/// instead of the standard `tool_calls` JSON field.
+fn parse_content_tool_calls(content: &str) -> Result<Vec<ToolCall>, ClientError> {
+    let mut calls = Vec::new();
+    let mut remaining = content;
+    while let Some(tag_start) = remaining.find("<function=") {
+        let after_tag = &remaining[tag_start + "<function=".len()..];
+        let Some(name_end) = after_tag.find('>') else {
+            break;
+        };
+        let name = after_tag[..name_end].trim();
+        let body = &after_tag[name_end + 1..];
+        let body_end = body.find("</function>").unwrap_or(body.len());
+        let args = parse_function_params(&body[..body_end]);
+        calls.push(ToolCall {
+            id: uuid::Uuid::now_v7().to_string(),
+            name: name.to_string(),
+            args,
+            thought_signatures: None,
+        });
+        let consumed = tag_start + "<function=".len() + name_end + 1 + body_end;
+        let skip = consumed + "</function>".len();
+        remaining = if skip < remaining.len() { &remaining[skip..] } else { "" };
+    }
+    Ok(calls)
+}
+
+fn parse_function_params(text: &str) -> Value {
+    let mut map = serde_json::Map::new();
+    let mut remaining = text;
+    while let Some(tag_start) = remaining.find("<parameter=") {
+        let after_tag = &remaining[tag_start + "<parameter=".len()..];
+        let Some(key_end) = after_tag.find('>') else {
+            break;
+        };
+        let key = after_tag[..key_end].trim();
+        let value_text = &after_tag[key_end + 1..];
+        let end = value_text.find("</parameter>").unwrap_or(value_text.len());
+        let raw = value_text[..end].trim();
+        let value = serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()));
+        map.insert(key.to_string(), value);
+        let consumed = tag_start + "<parameter=".len() + key_end + 1 + end;
+        let skip = consumed + "</parameter>".len();
+        remaining = if skip < remaining.len() { &remaining[skip..] } else { "" };
+    }
+    Value::Object(map)
 }
 
 fn usage_from_value(value: &Value) -> TokenUsage {
@@ -806,5 +880,46 @@ mod tests {
     fn sanitize_json_markdown_strips_fences_and_bold_keys() {
         let sanitized = sanitize_json_markdown("```json\n{\"a\":1, **progress**: 75}\n```");
         assert_eq!(sanitized.as_ref(), "{\"a\":1, \"progress\": 75}");
+    }
+
+    /// Models that emit tool calls as XML-style text in the content field are parsed correctly.
+    #[test]
+    fn parse_content_tool_calls_extracts_function_and_params() {
+        let content = "<function=file_search>\n<parameter=query>\nforgot password\n</parameter>\n<parameter=globs>\n[\"**/*auth*.js\"]\n</parameter>\n</function>";
+        let calls = parse_content_tool_calls(content).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_search");
+        assert_eq!(calls[0].args["query"], "forgot password");
+        assert_eq!(calls[0].args["globs"][0], "**/*auth*.js");
+    }
+
+    /// Multiple tool calls in content are all extracted.
+    #[test]
+    fn parse_content_tool_calls_handles_multiple_functions() {
+        let content = "<function=search><parameter=q>hello</parameter></function><function=fetch><parameter=url>http://x</parameter></function>";
+        let calls = parse_content_tool_calls(content).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "search");
+        assert_eq!(calls[1].name, "fetch");
+    }
+
+    /// Content with no function tags yields an empty vec (not an error).
+    #[test]
+    fn parse_content_tool_calls_returns_empty_on_plain_text() {
+        let calls = parse_content_tool_calls("Just a normal response.").unwrap();
+        assert!(calls.is_empty());
+    }
+
+    /// collect_tool_calls falls back to content parsing when tool_calls field is absent.
+    #[test]
+    fn collect_tool_calls_falls_back_to_content_when_no_tool_calls_field() {
+        let message = json!({
+            "role": "assistant",
+            "content": "<function=my_tool><parameter=x>42</parameter></function>"
+        });
+        let calls = collect_tool_calls(&message).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "my_tool");
+        assert_eq!(calls[0].args["x"], 42);
     }
 }

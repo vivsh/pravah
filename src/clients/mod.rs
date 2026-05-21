@@ -38,7 +38,7 @@ mod gemini;
 mod ollama;
 #[cfg(feature = "provider-openai")]
 mod openai;
-pub(super) mod schema;
+pub(crate) mod schema;
 pub mod url;
 
 pub use crate::tools::ToolDefinition;

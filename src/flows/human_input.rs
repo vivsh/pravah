@@ -3,8 +3,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::context::Context;
+use crate::flows::{Flow, FlowBuilder};
 use crate::flows::errors::FlowError;
-use crate::flows::flows::{Flow, FlowBuilder};
 use crate::tools::ToolOutput;
 
 /// One option shown to the human.

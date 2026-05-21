@@ -1,5 +1,9 @@
 pub mod diagram;
-pub mod flows;
+mod builder;
+mod flow;
+#[cfg(test)]
+mod flow_tests;
+mod nodes;
 pub mod compactor;
 pub mod human_input;
 pub mod inspect;
@@ -24,8 +28,9 @@ pub use limiter::{RateLimit, RateLimitLayer, RateLimitingFactory};
 pub use retry::{RetryConfig, RetryingFactory};
 pub use retry::RetryLayer;
 pub use diagram::FlowGraphDiagram;
+pub use builder::FlowBuilder;
 pub use errors::{AgentError, BuildError, FlowError};
-pub use flows::{Flow, FlowBuilder, FlowGraph, FlowStep};
+pub use flow::{Flow, FlowGraph, FlowStep};
 pub use history::{FlowHistory, HistoryEntry};
 pub use interner::NodeId;
 pub use nary::{MergeInputs, SplitOutputs};

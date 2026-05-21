@@ -6,13 +6,13 @@ use crate::{
     flows::{
         ClientFactory, Flow, FlowError, FlowGraph, FlowHistory, FlowStep, NodeId,
         compactor::{DynHistoryCompactor, NoopCompactor},
-        flows::FlowNode,
         inspect::FlowInspector,
         state::{AgentContinuation, Callable, FlowState},
         store::{DynHistoryStore, NoopHistoryStore},
     },
     tools::SuspendedValue,
 };
+use super::nodes::FlowNode;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};

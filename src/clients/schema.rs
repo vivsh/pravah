@@ -1,10 +1,9 @@
-#![allow(dead_code)]
-
 use serde_json::{Map, Value};
 
-/// Reduces a JSON Schema to the stricter subset accepted by Gemini.
-#[allow(dead_code)]
-pub(super) fn sanitize_strict(schema: Value) -> Value {
+/// Reduces a JSON Schema to the stricter subset accepted by providers.
+/// Strips `$schema`, `title`, `$defs`, `definitions`, `additionalProperties`,
+/// inlines `$ref` references, and normalises nullable types.
+pub(crate) fn sanitize_strict(schema: Value) -> Value {
     let defs = collect_defs(&schema);
     let without_refs = inline_refs(schema, &defs);
     clean_fields(without_refs)

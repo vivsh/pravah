@@ -15,6 +15,13 @@ pub struct AgentConfig {
     /// When true, repeated invocations of this agent share a stable session id,
     /// keeping the full conversation history visible across loop iterations.
     pub keep_alive: bool,
+    /// Maximum number of LLM dispatch turns. On the final turn a reminder message
+    /// is appended to the outgoing messages to prompt the agent to submit its answer.
+    /// Has no effect on agents with no tools.
+    pub turn_budget: Option<u32>,
+    /// Overrides the default last-turn reminder injected when `turn_budget` is reached.
+    /// When `None` a provider-appropriate default is used.
+    pub turn_budget_message: Option<String>,
 }
 
 impl AgentConfig {
@@ -24,6 +31,8 @@ impl AgentConfig {
             preamble: preamble.into(),
             model_url: model_url.into(),
             keep_alive: false,
+            turn_budget: None,
+            turn_budget_message: None,
         }
     }
 
@@ -33,6 +42,17 @@ impl AgentConfig {
         self
     }
 
+    /// Sets the maximum number of LLM dispatch turns for this agent.
+    pub fn with_turn_budget(mut self, n: u32) -> Self {
+        self.turn_budget = Some(n);
+        self
+    }
+
+    /// Overrides the last-turn reminder message injected when the budget is reached.
+    pub fn with_turn_budget_message(mut self, msg: impl Into<String>) -> Self {
+        self.turn_budget_message = Some(msg.into());
+        self
+    }
 }
 
 /// Implemented by every agent input type.
