@@ -102,7 +102,7 @@ impl FlowBuilder {
     {
         let to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync> =
             Box::new(|value: Value| -> Result<Message, ToolError> {
-                let o: O = serde_json::from_value(value).map_err(ToolError::Deserialize)?;
+                let o: O = serde_json::from_value(value).map_err(ToolError::TypeError)?;
                 o.to_message()
             });
         self.tool_impl::<A, I, O>(to_message)
@@ -112,7 +112,7 @@ impl FlowBuilder {
     pub fn tool<A: Agent, T: Tool>(self) -> Self {
         let to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync> =
             Box::new(|value: Value| -> Result<Message, ToolError> {
-                let o: T::Output = serde_json::from_value(value).map_err(ToolError::Deserialize)?;
+                let o: T::Output = serde_json::from_value(value).map_err(ToolError::TypeError)?;
                 T::to_message(o)
             });
         self.tool_impl::<A, T::Input, T::Output>(to_message)

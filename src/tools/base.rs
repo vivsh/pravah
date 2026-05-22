@@ -15,35 +15,78 @@ use crate::deps::DepsError;
 /// Error returned by tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
+    /// Tool or resource not found.
+    #[error("not found: {0}")]
+    NotFound(String),
+    /// The model passed a value with the wrong JSON shape.
+    #[error("type error in tool input: {0}")]
+    TypeError(serde_json::Error),
+    /// Argument or constraint violation the model can correct.
+    #[error("{0}")]
+    Validation(String),
+    /// Path escape or forbidden command attempt.
+    #[error("security violation: {0}")]
+    Security(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("failed to serialize output: {0}")]
-    Serialize(serde_json::Error),
-    #[error("failed to deserialize input: {0}")]
-    Deserialize(serde_json::Error),
-    #[error("unknown tool '{0}")]
-    UnknownTool(String),
-    #[error("path '{0}' escapes the working directory")]
-    PathEscape(String),
-    #[error("command '{0}' is not in the allowed list")]
-    ForbiddenCommand(String),
     #[error("http error: {0}")]
     Http(String),
-    #[error("{0}")]
-    Missing(#[from] DepsError),
+    #[error("failed to serialize output: {0}")]
+    Serialize(serde_json::Error),
     #[error("{0}")]
     Other(String),
-    /// The tool failed in a way the model can correct (bad arguments, constraint
-    /// violation, etc.).  The message is sent back to the LLM as a tool-result
-    /// error instead of halting the flow.
+    /// Aborts the flow immediately; the model cannot recover from this.
     #[error("{0}")]
-    Recoverable(String),
+    Fatal(String),
 }
 
 impl ToolError {
-    /// Returns `true` when the error should abort the flow instead of going back to the model.
+    /// Returns `true` only for [`ToolError::Fatal`], which aborts the flow.
+    /// All other variants are serialized as structured JSON and sent back to the model.
     pub fn is_fatal(&self) -> bool {
-        matches!(self, ToolError::PathEscape(_) | ToolError::ForbiddenCommand(_))
+        matches!(self, Self::Fatal(_))
+    }
+
+    /// Short identifier for the variant, used in the `error_kind` field of the JSON response.
+    pub fn error_kind(&self) -> &'static str {
+        match self {
+            Self::NotFound(_) => "NotFound",
+            Self::TypeError(_) => "TypeError",
+            Self::Validation(_) => "Validation",
+            Self::Security(_) => "Security",
+            Self::Io(_) => "Io",
+            Self::Http(_) => "Http",
+            Self::Serialize(_) => "Serialize",
+            Self::Other(_) => "Other",
+            Self::Fatal(_) => "Fatal",
+        }
+    }
+
+    /// Serializes this error as a structured JSON string for use as a tool-result payload.
+    ///
+    /// `tool_name` is the registered name of the tool (e.g. `"ReadFile"`).
+    pub fn to_json(&self, tool_name: &str) -> String {
+        serde_json::json!({
+            "tool": tool_name,
+            "ok": false,
+            "error_kind": self.error_kind(),
+            "message": self.to_string(),
+            "recoverable": true,
+        })
+        .to_string()
+    }
+
+    /// Converts this error into a tool-result [`Message`] that is sent back to the model.
+    ///
+    /// Only call this for non-fatal errors; fatal errors should abort the flow via [`FlowError`].
+    pub fn into_error_message(self, tool_name: &str) -> Message {
+        Message::tool_output(String::new(), self.to_json(tool_name))
+    }
+}
+
+impl From<DepsError> for ToolError {
+    fn from(e: DepsError) -> Self {
+        ToolError::Fatal(e.to_string())
     }
 }
 
@@ -146,7 +189,7 @@ impl Context {
         if self.commands().iter().any(|c| c == cmd) {
             Ok(())
         } else {
-            Err(ToolError::ForbiddenCommand(cmd.to_owned()))
+            Err(ToolError::Security(format!("command '{cmd}' is not in the allowed list")))
         }
     }
 
@@ -160,11 +203,11 @@ impl Context {
             normalize_path(&working_dir.join(path))
         };
         if !requested.starts_with(&working_dir) {
-            return Err(ToolError::PathEscape(raw.to_owned()));
+            return Err(ToolError::Security(format!("path '{raw}' escapes the working directory")));
         }
         let canonical_root = canonical_working_dir(&working_dir)?;
         let Ok(relative) = requested.strip_prefix(&working_dir) else {
-            return Err(ToolError::PathEscape(raw.to_owned()));
+            return Err(ToolError::Security(format!("path '{raw}' escapes the working directory")));
         };
         resolve_within_root(raw, &canonical_root, relative)
     }
@@ -193,7 +236,7 @@ fn resolve_within_root(raw: &str, root: &Path, relative: &Path) -> Result<PathBu
                     Ok(meta) if meta.file_type().is_symlink() => {
                         let canonical = std::fs::canonicalize(&resolved)?;
                         if !canonical.starts_with(root) {
-                            return Err(ToolError::PathEscape(raw.to_owned()));
+                            return Err(ToolError::Security(format!("path '{raw}' escapes the working directory")));
                         }
                         resolved = canonical;
                     }
@@ -206,12 +249,12 @@ fn resolve_within_root(raw: &str, root: &Path, relative: &Path) -> Result<PathBu
                 resolved = root.to_path_buf();
             }
             Component::Prefix(_) => {
-                return Err(ToolError::PathEscape(raw.to_owned()));
+                return Err(ToolError::Security(format!("path '{raw}' escapes the working directory")));
             }
         }
 
         if !resolved.starts_with(root) {
-            return Err(ToolError::PathEscape(raw.to_owned()));
+            return Err(ToolError::Security(format!("path '{raw}' escapes the working directory")));
         }
     }
 

@@ -22,7 +22,7 @@ use crate::{
         ToolChoice, materialize_messages,
     },
     context::Context,
-    tools::{SuspendedValue, ToolDefinition, ToolError},
+    tools::{SuspendedValue, ToolDefinition},
 };
 
 /// Step result returned by the runtime.
@@ -374,14 +374,15 @@ impl FlowGraph {
                 })?;
             let mut msg = match (tool_info.to_message)(value) {
                 Ok(m) => m,
-                Err(ToolError::Recoverable(err)) => {
+                Err(e) if !e.is_fatal() => {
                     tracing::warn!(
                         agent = %agent_name,
                         call_id = %call_id,
-                        error = %err,
-                        "tool returned recoverable error"
+                        error = %e,
+                        kind = %e.error_kind(),
+                        "tool error sent to model"
                     );
-                    Message::tool_output(String::new(), format!(r#"{{"error":"{err}"}}"#))
+                    e.into_error_message(&tool_info.definition.name)
                 }
                 Err(e) => return Err(FlowError::Tool(e)),
             };
