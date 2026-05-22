@@ -38,6 +38,11 @@ impl FlowBuilder {
         }
     }
 
+    /// Applies `f` to this builder, enabling modular flow composition.
+    pub fn pipe(self, f: impl FnOnce(Self) -> Self) -> Self {
+        f(self)
+    }
+
     /// Registers an agent node keyed by `A::node_id()`.
     pub fn agent<A: Agent>(mut self) -> Self {
         let name_str = A::node_id();
