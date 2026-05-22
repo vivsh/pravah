@@ -140,12 +140,34 @@ typed final output or a batch of tool calls.
 
 ## Tools
 
-Attach tools to an agent with `.tool::<A, I, O>()` on the `FlowBuilder`.
-`A` is the calling agent, `I` is the tool input type, and `O` is the tool
-output type.
+There are two ways to attach a tool to an agent.
 
-Register a matching handler for `I -> O` separately, either as `work` or as an
-embedded `flow`.
+**Primary API — implement `Tool`:**
+
+```rust
+use pravah::tools::{Tool, ToolError};
+
+struct ReadFile;
+
+impl Tool for ReadFile {
+    type Input = ReadFileInput;
+    type Output = ReadFileOutput;
+
+    async fn call(input: Self::Input, ctx: Context) -> Result<Self::Output, ToolError> {
+        // …
+    }
+}
+
+// In the flow:
+builder.agent::<MyAgent>().tool::<MyAgent, ReadFile>()
+```
+
+`.tool::<A, T>()` registers the `Tool` impl and wires the work node automatically.
+
+**Explicit API — `tool_with` for flow-backed tools:**
+
+Use `.tool_with::<A, I, O>()` when you want to back a tool with an embedded flow
+or supply the work node manually. `O` must implement `ToolOutput`.
 
 ```rust
 impl Flow for BlogRequest {
@@ -154,7 +176,7 @@ impl Flow for BlogRequest {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<BlogRequest>()
-            .tool::<BlogRequest, HumanInput, HumanOutput>()
+            .tool_with::<BlogRequest, HumanInput, HumanOutput>()
             .flow::<HumanInput>()
     }
 }
@@ -165,10 +187,11 @@ schema as the tool contract.
 
 ### Tool Results
 
-Tool handlers return `Result<O, FlowError>` where `O` implements `ToolOutput`.
-The default `ToolOutput` implementation serializes `O` as JSON.
+For `.tool::<A, T>()`, override `Tool::to_message` on your `Tool` impl when
+you need custom text or attachments instead of plain JSON.
 
-Override `ToolOutput::to_message` when you need custom text or attachments:
+For `.tool_with::<A, I, O>()`, `O` must implement `ToolOutput`. Override
+`ToolOutput::to_message` for the same purpose:
 
 ```rust
 use pravah::clients::Message;
@@ -185,18 +208,29 @@ impl ToolOutput for ReadNoteOutput {
 
 ### Tool Errors
 
-Use `ToolError::Recoverable(msg)` when the model can correct the problem and
-try again. Pravah sends that message back as a tool-result error instead of
-aborting the flow.
+All `ToolError` variants except `Fatal` are serialized as a structured JSON
+message and sent back to the model as a tool result. The model can inspect
+`error_kind` and `message` to decide how to proceed:
 
-These cases abort immediately:
+```json
+{"tool": "ReadFile", "ok": false, "error_kind": "NotFound", "message": "…", "recoverable": true}
+```
 
-| Variant                          | Behavior                                  |
+| Variant | When to use |
 | -------------------------------- | ----------------------------------------- |
-| `ToolError::PathEscape(path)`    | Path escaped the configured `working_dir` |
-| `ToolError::ForbiddenCommand(c)` | Command is not in the allow-list          |
+| `ToolError::NotFound(msg)` | Tool or resource not found |
+| `ToolError::TypeError(e)` | Model passed a value with the wrong JSON shape |
+| `ToolError::Validation(msg)` | Constraint or argument violation the model can correct |
+| `ToolError::Security(msg)` | Path escape or forbidden command attempt |
+| `ToolError::Io(e)` | Filesystem error |
+| `ToolError::Http(msg)` | Network error |
+| `ToolError::Serialize(e)` | Output serialization failure |
+| `ToolError::Other(msg)` | Any other soft error |
+| `ToolError::Fatal(msg)` | Abort the flow immediately — the only variant that terminates the run |
 
-All other tool errors surface as `FlowError::Tool` and terminate the run.
+`Context::check_command` and `Context::resolve` both return `ToolError::Security`
+when the check fails. The model receives the structured error and may retry or
+give up, but the flow is never aborted on their behalf.
 
 ## Attachments
 

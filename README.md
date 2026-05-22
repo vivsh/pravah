@@ -80,14 +80,14 @@ That keeps routing deterministic and resumption unambiguous.
 
 ```toml
 [dependencies]
-pravah = "0.3.11"
+pravah = "0.3.18"
 ```
 
 To opt into providers explicitly:
 
 ```toml
 [dependencies]
-pravah = { version = "0.3.11", default-features = false, features = [
+pravah = { version = "0.3.18", default-features = false, features = [
   "provider-openai",
   "provider-anthropic",
   "provider-gemini",
