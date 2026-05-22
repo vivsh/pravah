@@ -721,7 +721,7 @@ mod tests {
             None,
         );
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["role"], "user");    
         assert_eq!(messages[1]["content"][0]["type"], "image_url");
     }
 
