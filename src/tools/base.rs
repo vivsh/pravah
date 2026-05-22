@@ -141,27 +141,23 @@ impl Context {
         }
     }
 
-    /// Resolves a path and rejects escapes from all configured working dirs.
-    /// Relative paths are tried against each dir in order; returns the first match.
+    /// Resolves a path and rejects escapes from the configured working directory.
     pub fn resolve(&self, raw: &str) -> Result<PathBuf, ToolError> {
         let path = Path::new(raw);
-        for dir in self.working_dirs() {
-            let working_dir = normalize_path(dir);
-            let requested = if path.is_absolute() {
-                normalize_path(path)
-            } else {
-                normalize_path(&working_dir.join(path))
-            };
-            if !requested.starts_with(&working_dir) {
-                continue;
-            }
-            let canonical_root = canonical_working_dir(&working_dir)?;
-            let Ok(relative) = requested.strip_prefix(&working_dir) else {
-                continue;
-            };
-            return resolve_within_root(raw, &canonical_root, relative);
+        let working_dir = normalize_path(self.working_dir());
+        let requested = if path.is_absolute() {
+            normalize_path(path)
+        } else {
+            normalize_path(&working_dir.join(path))
+        };
+        if !requested.starts_with(&working_dir) {
+            return Err(ToolError::PathEscape(raw.to_owned()));
         }
-        Err(ToolError::PathEscape(raw.to_owned()))
+        let canonical_root = canonical_working_dir(&working_dir)?;
+        let Ok(relative) = requested.strip_prefix(&working_dir) else {
+            return Err(ToolError::PathEscape(raw.to_owned()));
+        };
+        resolve_within_root(raw, &canonical_root, relative)
     }
 }
 
