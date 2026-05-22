@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 
 use schemars::JsonSchema;
@@ -61,6 +62,14 @@ pub trait ToolOutput: Serialize + DeserializeOwned + JsonSchema + Send + 'static
         let content = serde_json::to_string(&self).map_err(ToolError::Serialize)?;
         Ok(Message::tool_output(String::new(), content))
     }
+}
+
+/// Stateless tool that can be registered with `FlowBuilder::use_tool`.
+pub trait Tool {
+    type Input: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
+    type Output: ToolOutput;
+
+    fn call(input: Self::Input, ctx: Context) -> impl Future<Output = Result<Self::Output, ToolError>> + Send;
 }
 
 /// Type-erased input captured from a suspend tool call.
@@ -132,24 +141,27 @@ impl Context {
         }
     }
 
-    /// Resolves a path and rejects escapes from `working_dir`.
-    /// Relative paths are normalized without requiring the target to exist.
+    /// Resolves a path and rejects escapes from all configured working dirs.
+    /// Relative paths are tried against each dir in order; returns the first match.
     pub fn resolve(&self, raw: &str) -> Result<PathBuf, ToolError> {
-        let working_dir = normalize_path(self.working_dir());
         let path = Path::new(raw);
-        let requested = if path.is_absolute() {
-            normalize_path(path)
-        } else {
-            normalize_path(&working_dir.join(path))
-        };
-        if !requested.starts_with(&working_dir) {
-            return Err(ToolError::PathEscape(raw.to_owned()));
+        for dir in self.working_dirs() {
+            let working_dir = normalize_path(dir);
+            let requested = if path.is_absolute() {
+                normalize_path(path)
+            } else {
+                normalize_path(&working_dir.join(path))
+            };
+            if !requested.starts_with(&working_dir) {
+                continue;
+            }
+            let canonical_root = canonical_working_dir(&working_dir)?;
+            let Ok(relative) = requested.strip_prefix(&working_dir) else {
+                continue;
+            };
+            return resolve_within_root(raw, &canonical_root, relative);
         }
-        let canonical_root = canonical_working_dir(&working_dir)?;
-        let relative = requested
-            .strip_prefix(&working_dir)
-            .map_err(|_| ToolError::PathEscape(raw.to_owned()))?;
-        resolve_within_root(raw, &canonical_root, relative)
+        Err(ToolError::PathEscape(raw.to_owned()))
     }
 }
 

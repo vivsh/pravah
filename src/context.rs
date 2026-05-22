@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,9 +9,9 @@ use crate::deps::{Deps, DepsError};
 /// Settings used to build a [`Context`].
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct FlowConf {
-    /// Base directory for relative paths.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_dir: Option<PathBuf>,
+    /// Base directories for relative-path resolution and path-escape checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub working_dirs: Vec<PathBuf>,
     /// Commands tools may execute.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<String>,
@@ -22,7 +22,7 @@ pub struct FlowConf {
 
 #[derive(Clone)]
 struct ContextInner {
-    working_dir: PathBuf,
+    working_dirs: Vec<PathBuf>,
     commands: Vec<String>,
     deps: Deps,
     http_client: Option<reqwest::Client>,
@@ -43,12 +43,13 @@ impl Default for Context {
 impl Context {
     /// Builds a context from [`FlowConf`].
     pub fn new(conf: FlowConf) -> Self {
-        let working_dir = conf
-            .working_dir
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(std::env::temp_dir);
+        let working_dirs = if conf.working_dirs.is_empty() {
+            vec![std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir())]
+        } else {
+            conf.working_dirs
+        };
         Self(Arc::new(ContextInner {
-            working_dir,
+            working_dirs,
             commands: conf.commands,
             deps: Deps::default(),
             http_client: None,
@@ -77,9 +78,9 @@ impl Context {
         }))
     }
 
-    /// Base directory for relative paths.
-    pub fn working_dir(&self) -> &Path {
-        &self.0.working_dir
+    /// Base directories for relative-path resolution and path-escape checks.
+    pub fn working_dirs(&self) -> &[PathBuf] {
+        &self.0.working_dirs
     }
 
     /// Command allowlist.

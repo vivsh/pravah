@@ -920,7 +920,7 @@ mod tests {
             .await
             .expect("attachment file should be written");
         let ctx = crate::Context::new(crate::FlowConf {
-            working_dir: Some(dir.path().to_path_buf()),
+            working_dirs: vec![dir.path().to_path_buf()],
             ..Default::default()
         });
 
@@ -953,7 +953,7 @@ mod tests {
             .await
             .expect("attachment file should be written");
         let ctx = crate::Context::new(crate::FlowConf {
-            working_dir: Some(dir.path().to_path_buf()),
+            working_dirs: vec![dir.path().to_path_buf()],
             ..Default::default()
         });
 

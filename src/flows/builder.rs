@@ -22,7 +22,7 @@ use crate::{
     commons::{Agent, make_agent_message},
     context::Context,
     tools::base::pascal_to_snake,
-    tools::{SuspendedValue, ToolError, ToolOutput},
+    tools::{SuspendedValue, Tool, ToolError, ToolOutput},
 };
 
 pub struct FlowBuilder {
@@ -171,6 +171,14 @@ impl FlowBuilder {
         }
 
         self
+    }
+
+    /// Registers a tool for agent `A` backed by a [`Tool`] impl, wiring the work node automatically.
+    pub fn use_tool<A: Agent, T: Tool>(self) -> Self {
+        self.tool::<A, T::Input, T::Output>()
+            .work(|input, ctx| async move {
+                T::call(input, ctx).await.map_err(FlowError::from)
+            })
     }
 
     /// Registers a pure branch node.

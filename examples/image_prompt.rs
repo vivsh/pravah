@@ -219,7 +219,7 @@ fn prepare_runtime(args: CliArgs) -> Result<(VisionPrompt, Context), ExampleErro
         mime_type: args.mime_type,
     };
     let ctx = Context::new(FlowConf {
-        working_dir: Some(working_dir),
+        working_dirs: vec![working_dir],
         ..Default::default()
     });
     Ok((input, ctx))
