@@ -64,10 +64,19 @@ pub trait ToolOutput: Serialize + DeserializeOwned + JsonSchema + Send + 'static
     }
 }
 
-/// Stateless tool that can be registered with `FlowBuilder::use_tool`.
+/// Stateless tool that can be registered with `FlowBuilder::tool`.
 pub trait Tool {
     type Input: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
-    type Output: ToolOutput;
+    type Output: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
+
+    /// Converts a tool output value into a [`Message`] sent back to the model.
+    ///
+    /// The default implementation serializes `output` as JSON. Override to attach
+    /// binary data or produce a custom text payload.
+    fn to_message(output: Self::Output) -> Result<Message, ToolError> {
+        let content = serde_json::to_string(&output).map_err(ToolError::Serialize)?;
+        Ok(Message::tool_output(String::new(), content))
+    }
 
     fn call(input: Self::Input, ctx: Context) -> impl Future<Output = Result<Self::Output, ToolError>> + Send;
 }

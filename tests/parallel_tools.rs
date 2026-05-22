@@ -96,8 +96,8 @@ impl Flow for ParallelIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<ParallelIn>()
-            .tool::<ParallelIn, EchoInput, EchoOutput>()
-            .tool::<ParallelIn, ReverseInput, ReverseOutput>()
+            .tool_with::<ParallelIn, EchoInput, EchoOutput>()
+            .tool_with::<ParallelIn, ReverseInput, ReverseOutput>()
             .work(echo_handler)
             .work(reverse_handler)
     }
@@ -111,7 +111,7 @@ impl Flow for LlmFailIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<LlmFailIn>()
-            .tool::<LlmFailIn, EchoInput, EchoOutput>()
+            .tool_with::<LlmFailIn, EchoInput, EchoOutput>()
             .work(echo_handler)
     }
 }
@@ -124,8 +124,8 @@ impl Flow for UnknownParallelIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<UnknownParallelIn>()
-            .tool::<UnknownParallelIn, EchoInput, EchoOutput>()
-            .tool::<UnknownParallelIn, ReverseInput, ReverseOutput>()
+            .tool_with::<UnknownParallelIn, EchoInput, EchoOutput>()
+            .tool_with::<UnknownParallelIn, ReverseInput, ReverseOutput>()
             .work(echo_handler)
             .work(reverse_handler)
     }

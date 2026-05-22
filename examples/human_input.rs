@@ -45,7 +45,7 @@ impl Flow for BlogRequest {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<BlogRequest>()
-            .tool::<BlogRequest, HumanInput, HumanOutput>()
+            .tool_with::<BlogRequest, HumanInput, HumanOutput>()
             .flow::<HumanInput>()
     }
 }

@@ -111,7 +111,7 @@ impl Flow for ValidIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<ValidIn>()
-            .tool::<ValidIn, EchoInput, EchoOutput>()
+            .tool_with::<ValidIn, EchoInput, EchoOutput>()
             .work(echo_handler)
     }
 }
@@ -124,8 +124,8 @@ impl Flow for MultiToolIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<MultiToolIn>()
-            .tool::<MultiToolIn, EchoInput, EchoOutput>()
-            .tool::<MultiToolIn, ReverseInput, ReverseOutput>()
+            .tool_with::<MultiToolIn, EchoInput, EchoOutput>()
+            .tool_with::<MultiToolIn, ReverseInput, ReverseOutput>()
             .work(echo_handler)
             .work(reverse_handler)
     }
@@ -139,7 +139,7 @@ impl Flow for DupIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<DupIn>()
-            .tool::<DupIn, EchoInput, EchoOutput>()
+            .tool_with::<DupIn, EchoInput, EchoOutput>()
             .work(echo_handler)
     }
 }
@@ -152,7 +152,7 @@ impl Flow for UnknownIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<UnknownIn>()
-            .tool::<UnknownIn, EchoInput, EchoOutput>()
+            .tool_with::<UnknownIn, EchoInput, EchoOutput>()
             .work(echo_handler)
     }
 }
@@ -167,7 +167,7 @@ impl Flow for HistoryIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<HistoryIn>()
-            .tool::<HistoryIn, EchoInput, EchoOutput>()
+            .tool_with::<HistoryIn, EchoInput, EchoOutput>()
             .work(echo_handler)
     }
 }
@@ -180,7 +180,7 @@ impl Flow for ChainIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<ChainIn>()
-            .tool::<ChainIn, EchoInput, EchoOutput>()
+            .tool_with::<ChainIn, EchoInput, EchoOutput>()
             .work(echo_handler)
     }
 }
@@ -193,7 +193,7 @@ impl Flow for LlmErrIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<LlmErrIn>()
-            .tool::<LlmErrIn, EchoInput, EchoOutput>()
+            .tool_with::<LlmErrIn, EchoInput, EchoOutput>()
             .work(echo_handler)
     }
 }
@@ -206,7 +206,7 @@ impl Flow for StructModeIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<StructModeIn>()
-            .tool::<StructModeIn, EchoInput, EchoOutput>()
+            .tool_with::<StructModeIn, EchoInput, EchoOutput>()
             .work(echo_handler)
     }
 }
@@ -219,7 +219,7 @@ impl Flow for StoreIn {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<StoreIn>()
-            .tool::<StoreIn, EchoInput, EchoOutput>()
+            .tool_with::<StoreIn, EchoInput, EchoOutput>()
             .work(echo_handler)
     }
 }

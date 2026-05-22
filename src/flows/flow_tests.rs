@@ -193,7 +193,7 @@ impl Flow for ToolAgentInput {
     fn build(builder: FlowBuilder) -> FlowBuilder {
         builder
             .agent::<ToolAgentInput>()
-            .tool::<ToolAgentInput, LookupInput, LookupOutput>()
+            .tool_with::<ToolAgentInput, LookupInput, LookupOutput>()
             .work(|input: LookupInput, _ctx: Context| async move {
                 Ok(LookupOutput {
                     result: input.query,

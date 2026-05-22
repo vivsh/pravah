@@ -92,12 +92,43 @@ impl FlowBuilder {
         self
     }
 
-    /// Attaches a tool to agent `A`.
-    pub fn tool<A, I, O>(mut self) -> Self
+    /// Attaches a tool to agent `A` with explicit input/output types.
+    /// Must be followed by a `.work()` call to provide the implementation.
+    pub fn tool_with<A, I, O>(self) -> Self
     where
         A: Agent,
         I: 'static + DeserializeOwned + JsonSchema + Send,
         O: ToolOutput,
+    {
+        let to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync> =
+            Box::new(|value: Value| -> Result<Message, ToolError> {
+                let o: O = serde_json::from_value(value).map_err(ToolError::Deserialize)?;
+                o.to_message()
+            });
+        self.tool_impl::<A, I, O>(to_message)
+    }
+
+    /// Registers a tool for agent `A` backed by a [`Tool`] impl, wiring the work node automatically.
+    pub fn tool<A: Agent, T: Tool>(self) -> Self {
+        let to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync> =
+            Box::new(|value: Value| -> Result<Message, ToolError> {
+                let o: T::Output = serde_json::from_value(value).map_err(ToolError::Deserialize)?;
+                T::to_message(o)
+            });
+        self.tool_impl::<A, T::Input, T::Output>(to_message)
+            .work(|input, ctx| async move {
+                T::call(input, ctx).await.map_err(FlowError::from)
+            })
+    }
+
+    fn tool_impl<A, I, O>(
+        mut self,
+        to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync>,
+    ) -> Self
+    where
+        A: Agent,
+        I: 'static + DeserializeOwned + JsonSchema + Send,
+        O: 'static + JsonSchema,
     {
         let agent_str = A::node_id();
         let agent_id = self.flow.interner.intern(&agent_str);
@@ -113,11 +144,6 @@ impl FlowBuilder {
 
         let entry_id = self.flow.interner.intern(&I::schema_name());
         let exit_id = self.flow.interner.intern(&O::schema_name());
-        let to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync> =
-            Box::new(|value: Value| -> Result<Message, ToolError> {
-                let o: O = serde_json::from_value(value).map_err(ToolError::Deserialize)?;
-                o.to_message()
-            });
 
         match self.flow.nodes.get_mut(&agent_id) {
             Some(FlowNode::Agent(arc)) => match Arc::get_mut(arc) {
@@ -157,28 +183,20 @@ impl FlowBuilder {
                 }
                 None => {
                     self.errors.push(format!(
-                        "tool: agent '{}' Arc is shared; cannot mutate",
+                        "tool_with: agent '{}' Arc is shared; cannot mutate",
                         agent_str
                     ));
                 }
             },
             _ => {
                 self.errors.push(format!(
-                    "tool: agent '{}' not found (register it with .agent::<A>() first)",
+                    "tool_with: agent '{}' not found (register it with .agent::<A>() first)",
                     agent_str
                 ));
             }
         }
 
         self
-    }
-
-    /// Registers a tool for agent `A` backed by a [`Tool`] impl, wiring the work node automatically.
-    pub fn use_tool<A: Agent, T: Tool>(self) -> Self {
-        self.tool::<A, T::Input, T::Output>()
-            .work(|input, ctx| async move {
-                T::call(input, ctx).await.map_err(FlowError::from)
-            })
     }
 
     /// Registers a pure branch node.
