@@ -370,6 +370,16 @@ pub enum ToolChoice {
     Disabled,
 }
 
+/// Controls how providers should format assistant output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResponseFormat {
+    /// Return plain text.
+    #[default]
+    Text,
+    /// Return JSON content.
+    Json,
+}
+
 /// Per-call client settings.
 #[derive(Debug, Clone, Default)]
 pub struct ClientOptions {
@@ -387,6 +397,8 @@ pub struct ClientOptions {
     pub input_schema: Option<Value>,
     /// JSON Schema for structured output.
     pub output_schema: Option<Value>,
+    /// Preferred assistant output format.
+    pub response_format: ResponseFormat,
     /// Sampling temperature.
     pub temperature: Option<f32>,
 }
@@ -442,12 +454,19 @@ impl ClientOptions {
     }
 
     pub(crate) fn wants_json_output(&self) -> bool {
-        self.input_schema.is_some()
+        self.response_format == ResponseFormat::Json
     }
 
-    /// Sets the structured-output schema.
+    /// Sets the structured-output schema and enables JSON output mode.
     pub fn with_output_schema(mut self, schema: Value) -> Self {
         self.output_schema = Some(schema);
+        self.response_format = ResponseFormat::Json;
+        self
+    }
+
+    /// Sets the preferred assistant output format.
+    pub fn with_response_format(mut self, response_format: ResponseFormat) -> Self {
+        self.response_format = response_format;
         self
     }
 
@@ -836,11 +855,28 @@ mod tests {
         assert!(preamble.contains("\"required\":[\"kind\"]"));
     }
 
+    /// Explicit response mode enables JSON decoding.
     #[test]
-    fn wants_json_output_requires_input_schema() {
+    fn wants_json_output_uses_explicit_response_format() {
         assert!(!ClientOptions::default().wants_json_output());
         assert!(ClientOptions::default()
+            .with_response_format(ResponseFormat::Json)
+            .wants_json_output());
+    }
+
+    /// Input schema alone does not force JSON response mode.
+    #[test]
+    fn input_schema_does_not_force_json_output() {
+        assert!(!ClientOptions::default()
             .with_input_schema(serde_json::json!({ "type": "object" }))
+            .wants_json_output());
+    }
+
+    /// Output schema opts the client into JSON response mode.
+    #[test]
+    fn output_schema_enables_json_output() {
+        assert!(ClientOptions::default()
+            .with_output_schema(serde_json::json!({ "type": "object" }))
             .wants_json_output());
     }
 

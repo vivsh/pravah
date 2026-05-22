@@ -455,10 +455,7 @@ pub(crate) fn maybe_inject_turn_budget_message(
         budget = budget,
         "turn budget reached; injecting last-turn reminder"
     );
-    match session_msgs.last_mut() {
-        Some(last) => last.content.push_str(&format!("\n\n{text}")),
-        None => session_msgs.push(Message::user(text)),
-    }
+    session_msgs.push(Message::user(text));
 }
 
 pub(crate) fn wrap_for_provider(model_url: &str, text: &str) -> String {

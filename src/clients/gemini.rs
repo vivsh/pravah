@@ -545,14 +545,62 @@ mod tests {
         assert_eq!(msgs.len(), 3);
     }
 
+    /// Tool responses remain structured when a reminder user turn follows them.
     #[test]
-    fn response_mode_requires_input_schema() {
+    fn build_messages_keeps_tool_response_and_reminder_separate() {
+        let history = vec![
+            Message {
+                role: Role::AssistantToolCalls {
+                    calls: vec![make_call("c1", "project_outline")],
+                },
+                content: String::new(),
+                attachments: Vec::new(),
+                usage: None,
+            },
+            Message {
+                role: Role::Tool {
+                    call_id: "c1".into(),
+                },
+                content: r#"{"result":"ok"}"#.into(),
+                attachments: Vec::new(),
+                usage: None,
+            },
+            Message::user(
+                "<system-reminder><critical>call final_answer</critical></system-reminder>",
+            ),
+        ];
+
+        let msgs = build_gemini_messages(&history);
+
+        assert_eq!(msgs.len(), 3);
+        assert!(matches!(msgs[1].role, GeminiRole::User));
+        assert!(matches!(msgs[2].role, GeminiRole::User));
+
+        let tool_parts = msgs[1]
+            .content
+            .parts
+            .as_ref()
+            .expect("tool response parts should be present");
+        assert!(matches!(tool_parts.first(), Some(Part::FunctionResponse { .. })));
+
+        let tool_debug = format!("{:?}", tool_parts[0]);
+        assert!(tool_debug.contains("result"));
+        assert!(!tool_debug.contains("system-reminder"));
+
+        let reminder_debug = format!("{:?}", msgs[2]);
+        assert!(reminder_debug.contains("system-reminder"));
+        assert!(!reminder_debug.contains("result\":\"ok"));
+    }
+
+    /// Explicit JSON response mode enables Gemini JSON output and response schema handling.
+    #[test]
+    fn response_mode_uses_explicit_json_setting() {
         let no_schema = ClientOptions::default();
         assert!(!wants_json_output(&no_schema, false));
         assert!(response_schema(&no_schema, false).is_none());
 
         let with_schema = ClientOptions::default()
-            .with_input_schema(json!({ "type": "object" }))
+            .with_response_format(crate::clients::ResponseFormat::Json)
             .with_output_schema(json!({
                 "type": "object",
                 "properties": {
@@ -564,11 +612,12 @@ mod tests {
         assert!(response_schema(&with_schema, false).is_some());
     }
 
+    /// Input schema hints do not change Gemini response mode on their own.
     #[test]
-    fn response_mode_without_output_schema_still_uses_json_when_input_schema_is_present() {
+    fn input_schema_alone_does_not_enable_json_output() {
         let with_input_schema = ClientOptions::default()
             .with_input_schema(json!({ "type": "object" }));
-        assert!(wants_json_output(&with_input_schema, false));
+        assert!(!wants_json_output(&with_input_schema, false));
         assert!(response_schema(&with_input_schema, false).is_none());
     }
 }

@@ -440,11 +440,13 @@ mod tests {
         assert!(payload.get("text").is_none());
     }
 
+    /// Explicit JSON response mode uses the OpenAI json_object format when no schema is supplied.
     #[test]
-    fn payload_with_input_schema_and_no_output_schema_uses_json_object_mode() {
+    fn payload_with_json_response_and_no_output_schema_uses_json_object_mode() {
         let payload = build_payload(
             "custom-model",
-            &ClientOptions::default().with_input_schema(json!({ "type": "object" })),
+            &ClientOptions::default()
+                .with_response_format(crate::clients::ResponseFormat::Json),
             &[Message::user("hi")],
             false,
         );
@@ -495,6 +497,34 @@ mod tests {
         assert_eq!(payload["input"][0]["role"], "user");
         assert_eq!(payload["input"][0]["content"][0]["type"], "input_image");
         assert_eq!(payload["input"][0]["content"][1]["type"], "input_text");
+    }
+
+    /// Tool outputs remain unchanged when a reminder is appended as a later user turn.
+    #[test]
+    fn build_input_keeps_tool_output_and_reminder_separate() {
+        let input = build_input(&[
+            Message {
+                role: Role::AssistantToolCalls {
+                    calls: vec![ToolCall {
+                        id: "call_1".into(),
+                        name: "lookup".into(),
+                        args: json!({"q":"x"}),
+                        thought_signatures: None,
+                    }],
+                },
+                content: String::new(),
+                attachments: Vec::new(),
+                usage: None,
+            },
+            Message::tool_output("call_1".into(), r#"{"ok":true}"#),
+            Message::user("FINAL TURN: call final_answer"),
+        ]);
+
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["output"], r#"{"ok":true}"#);
+        assert_eq!(input[2]["role"], "user");
+        assert_eq!(input[2]["content"], "FINAL TURN: call final_answer");
     }
 
     #[test]

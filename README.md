@@ -37,7 +37,12 @@ Pravah is a good fit when you need:
 - replayable state transitions
 - typed composition across subflows
 - deterministic orchestration
+- bounded tool-using agent loops
 - multi-turn agent conversations with persistent history
+
+Runtime control hints stay separate from persisted conversation state. For
+example, a final-turn reminder from an agent turn budget is injected only into
+the current model request, not written back into history.
 
 ## Mental Model
 
@@ -171,6 +176,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+For a simple persistent conversation without graph construction, use
+[`ChatSession`](docs/clients.md) instead. See
+[examples/chat.rs](examples/chat.rs) for a minimal example.
+
 ## Read Next
 
 - [docs/clients.md](docs/clients.md): agents, providers, model URLs, tools, attachments
@@ -182,6 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Example                                                | What it shows                             |
 | ------------------------------------------------------ | ----------------------------------------- |
+| [examples/chat.rs](examples/chat.rs)                   | Single-session chat with history          |
 | [examples/linear_flow.rs](examples/linear_flow.rs)     | Minimal agent -> work pipeline            |
 | [examples/split_merge.rs](examples/split_merge.rs)     | Fan-out and fan-in composition            |
 | [examples/nested_flow.rs](examples/nested_flow.rs)     | Embedded subflows as reusable nodes       |

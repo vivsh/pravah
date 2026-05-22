@@ -430,6 +430,38 @@ mod tests {
         assert_eq!(msgs[2]["content"][0]["tool_use_id"], "toolu_1");
     }
 
+    /// Tool results remain unchanged when a reminder is appended as a later user turn.
+    #[test]
+    fn messages_keep_tool_result_and_reminder_separate() {
+        let msgs = build_messages(&[
+            Message {
+                role: Role::AssistantToolCalls {
+                    calls: vec![ToolCall {
+                        id: "toolu_1".into(),
+                        name: "lookup".into(),
+                        args: json!({"q":"x"}),
+                        thought_signatures: None,
+                    }],
+                },
+                content: String::new(),
+                attachments: Vec::new(),
+                usage: None,
+            },
+            Message::tool_output("toolu_1".into(), r#"{"ok":true}"#),
+            Message::user(
+                "<system-reminder><critical>call final_answer</critical></system-reminder>",
+            ),
+        ]);
+
+        assert_eq!(msgs[1]["content"][0]["type"], "tool_result");
+        assert_eq!(msgs[1]["content"][0]["content"][0]["text"], r#"{"ok":true}"#);
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(
+            msgs[2]["content"],
+            "<system-reminder><critical>call final_answer</critical></system-reminder>"
+        );
+    }
+
     #[test]
     fn maps_tool_call_and_usage() {
         let response = json!({
@@ -479,13 +511,14 @@ mod tests {
         assert_eq!(payload["system"], "You are helpful.");
     }
 
+    /// Explicit JSON response mode appends a textual JSON-only instruction.
     #[test]
-    fn payload_with_input_schema_and_no_output_schema_requests_json_textually() {
+    fn payload_with_json_response_and_no_output_schema_requests_json_textually() {
         let payload = build_payload(
             "claude",
             &ClientOptions::default()
                 .with_preamble("You are helpful.")
-                .with_input_schema(json!({ "type": "object" })),
+                .with_response_format(crate::clients::ResponseFormat::Json),
             &[Message::user("hi")],
             false,
         );

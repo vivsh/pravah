@@ -725,6 +725,39 @@ mod tests {
         assert_eq!(messages[1]["content"][0]["type"], "image_url");
     }
 
+    /// Tool results remain unchanged when a reminder is appended as a later user turn.
+    #[test]
+    fn build_messages_keep_tool_result_and_reminder_separate() {
+        let messages = build_messages(
+            &[
+                Message {
+                    role: Role::AssistantToolCalls {
+                        calls: vec![ToolCall {
+                            id: "call-1".into(),
+                            name: "lookup".into(),
+                            args: json!({"q":"x"}),
+                            thought_signatures: None,
+                        }],
+                    },
+                    content: String::new(),
+                    attachments: Vec::new(),
+                    usage: None,
+                },
+                Message::tool_output("call-1".into(), r#"{"ok":true}"#),
+                Message::user("FINAL TURN: call final_answer"),
+            ],
+            None,
+            "llama3.1",
+            false,
+            None,
+        );
+
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["content"], r#"{"ok":true}"#);
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"], "FINAL TURN: call final_answer");
+    }
+
     #[test]
     fn payload_uses_supplied_model() {
         let payload = build_payload(
@@ -766,11 +799,13 @@ mod tests {
         assert!(system_msgs.iter().any(|m| m["content"].as_str().unwrap_or("").contains("answer")));
     }
 
+    /// Explicit JSON response mode uses Ollama's json_object response format.
     #[test]
-    fn payload_with_input_schema_and_no_output_schema_uses_json_object_mode() {
+    fn payload_with_json_response_and_no_output_schema_uses_json_object_mode() {
         let payload = build_payload(
             "custom-local",
-            &ClientOptions::default().with_input_schema(json!({ "type": "object" })),
+            &ClientOptions::default()
+                .with_response_format(crate::clients::ResponseFormat::Json),
             &[Message::user("hi")],
             false,
         );

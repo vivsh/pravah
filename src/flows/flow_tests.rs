@@ -349,9 +349,8 @@ fn wrap_for_provider_wraps_xml_providers_only() {
     );
 }
 
-/// `maybe_inject_turn_budget_message` appends the budget reminder as the last
-/// message when completed turns + 1 equals the budget, and leaves msgs unchanged
-/// otherwise.
+/// `maybe_inject_turn_budget_message` appends a separate reminder message on the
+/// final allowed turn and leaves earlier messages unchanged.
 #[test]
 fn maybe_inject_injects_on_final_turn_only() {
     use crate::flows::history::FlowHistory;
@@ -397,13 +396,11 @@ fn maybe_inject_injects_on_final_turn_only() {
 
     let mut msgs_first: Vec<Message> = vec![Message::user("start")];
     maybe_inject_turn_budget_message(&node, "test_agent", session_id, &history, &mut msgs_first);
-    assert_eq!(msgs_first.len(), 1, "reminder is embedded, not a new message");
+    assert_eq!(msgs_first.len(), 2, "reminder should be a new message");
+    assert_eq!(msgs_first[0].content, "start", "original content must be preserved");
+    assert!(matches!(msgs_first[1].role, Role::User), "reminder should be a user message");
     assert!(
-        msgs_first[0].content.starts_with("start"),
-        "original content must be preserved"
-    );
-    assert!(
-        msgs_first[0].content.contains("final_answer"),
+        msgs_first[1].content.contains("final_answer"),
         "reminder should name the exit tool"
     );
 
@@ -421,5 +418,84 @@ fn maybe_inject_injects_on_final_turn_only() {
         msgs_early[0].content,
         "start",
         "content must be unmodified when no injection"
+    );
+}
+
+/// `maybe_inject_turn_budget_message` never rewrites tool payloads when the
+/// prior outbound message is a tool result.
+#[test]
+fn maybe_inject_preserves_tool_payloads() {
+    use crate::flows::history::FlowHistory;
+    use crate::flows::interner::Interner;
+    use std::collections::HashMap;
+
+    let session_id = "s1";
+
+    let mut interner = Interner::new();
+    let agent_id = interner.intern("test_agent");
+    let exit_id = interner.intern("FinalAnswer");
+    let entry_id = interner.intern("test_agent::final_answer");
+
+    let tool_def = crate::tools::ToolDefinition {
+        name: "final_answer".into(),
+        description: "submit".into(),
+        parameters: serde_json::json!({"type": "object"}),
+    };
+    let mut tool_lookup = HashMap::new();
+    tool_lookup.insert("final_answer".to_string(), (entry_id, exit_id));
+
+    let node = AgentInfo {
+        id: agent_id,
+        tools: vec![ToolInfo {
+            definition: tool_def,
+            exit_id,
+            to_message: Box::new(|v| Ok(Message::tool_output("x".into(), v.to_string()))),
+        }],
+        make_message: |_, _| Ok(Message::user("hi")),
+        preamble: "".into(),
+        input_schema: serde_json::json!({}),
+        model: "gemini://gemini-2.5-pro".into(),
+        exit: exit_id,
+        output_schema: serde_json::json!({}),
+        tool_lookup,
+        keep_alive: false,
+        turn_budget: Some(2),
+        turn_budget_message: None,
+    };
+
+    let mut history = FlowHistory::new();
+    history.push(
+        session_id,
+        "test_agent",
+        Message {
+            role: Role::AssistantToolCalls {
+                calls: vec![ToolCall {
+                    id: "call-1".into(),
+                    name: "lookup".into(),
+                    args: serde_json::json!({"query": "rust"}),
+                    thought_signatures: None,
+                }],
+            },
+            content: String::new(),
+            attachments: Vec::new(),
+            usage: None,
+        },
+    );
+    history.push(
+        session_id,
+        "test_agent",
+        Message::tool_output("call-1".into(), r#"{"result":"ok"}"#),
+    );
+
+    let mut session_msgs = history.for_session(session_id);
+    maybe_inject_turn_budget_message(&node, "test_agent", session_id, &history, &mut session_msgs);
+
+    assert_eq!(session_msgs.len(), 3, "reminder should be appended after the tool result");
+    assert!(matches!(session_msgs[1].role, Role::Tool { .. }), "tool message must stay a tool result");
+    assert_eq!(session_msgs[1].content, r#"{"result":"ok"}"#, "tool payload must be unchanged");
+    assert!(matches!(session_msgs[2].role, Role::User), "reminder should be appended as a user message");
+    assert!(
+        session_msgs[2].content.contains("<system-reminder>"),
+        "gemini reminders should keep XML wrapping"
     );
 }
