@@ -20,7 +20,7 @@ struct ResearchResult {
 impl Agent for ResearchQuery {
     type Output = ResearchResult;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are a research assistant. Answer the user's query with a concise \
              paragraph of factual findings.",
@@ -55,7 +55,7 @@ struct FinalArticle {
 impl Agent for ResearchResult {
     type Output = FinalArticle;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are a blog writer. Using the research findings provided, write a \
              short, engaging blog post with a title and two paragraphs.",

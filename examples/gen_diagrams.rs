@@ -50,7 +50,7 @@ struct FinalArticle { title: String, body: String }
 
 impl Agent for OutlineRequest {
     type Output = Outline;
-    fn build() -> AgentConfig { AgentConfig::new("Generate a structured outline with sections.", "gemini:///gemini-2.5-flash-lite") }
+    fn configure() -> AgentConfig { AgentConfig::new("Generate a structured outline with sections.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 impl Flow for OutlineRequest {
@@ -63,7 +63,7 @@ impl Flow for OutlineRequest {
 
 impl Agent for LongDraft {
     type Output = ReviewedDraft;
-    fn build() -> AgentConfig { AgentConfig::new("Review the draft for quality, accuracy, and structure.", "gemini:///gemini-2.5-flash-lite") }
+    fn configure() -> AgentConfig { AgentConfig::new("Review the draft for quality, accuracy, and structure.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 impl Flow for LongDraft {
@@ -76,22 +76,22 @@ impl Flow for LongDraft {
 
 impl Agent for ResearchTask {
     type Output = ResearchNotes;
-    fn build() -> AgentConfig { AgentConfig::new("Research the topic and gather key facts and sources.", "gemini:///gemini-2.5-flash-lite") }
+    fn configure() -> AgentConfig { AgentConfig::new("Research the topic and gather key facts and sources.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 impl Agent for AudienceTask {
     type Output = AudienceProfile;
-    fn build() -> AgentConfig { AgentConfig::new("Analyse the target audience and determine tone and reading level.", "gemini:///gemini-2.5-flash-lite") }
+    fn configure() -> AgentConfig { AgentConfig::new("Analyse the target audience and determine tone and reading level.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 impl Agent for QuickDraft {
     type Output = FinalArticle;
-    fn build() -> AgentConfig { AgentConfig::new("Write a concise, punchy article from the quick draft.", "gemini:///gemini-2.5-flash-lite") }
+    fn configure() -> AgentConfig { AgentConfig::new("Write a concise, punchy article from the quick draft.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 impl Agent for ReviewedDraft {
     type Output = FinalArticle;
-    fn build() -> AgentConfig { AgentConfig::new("Polish the reviewed draft into a publication-ready article.", "gemini:///gemini-2.5-flash-lite") }
+    fn configure() -> AgentConfig { AgentConfig::new("Polish the reviewed draft into a publication-ready article.", "gemini:///gemini-2.5-flash-lite") }
 }
 
 

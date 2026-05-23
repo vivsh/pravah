@@ -59,7 +59,7 @@ struct DebateReport {
 impl Agent for ProRequest {
     type Output = ProArguments;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are a skilled debater building the strongest possible case FOR a claim. \
              Return the original claim verbatim in the `claim` field and provide \
@@ -72,7 +72,7 @@ impl Agent for ProRequest {
 impl Agent for ConRequest {
     type Output = ConArguments;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are a skilled debater building the strongest possible case AGAINST a claim. \
              Provide 3–5 concise counter-arguments in `points`.",
@@ -84,7 +84,7 @@ impl Agent for ConRequest {
 impl Agent for DebateDraft {
     type Output = DebateVerdict;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are an impartial debate judge. Weigh the pro and con arguments provided \
              for the claim and deliver a balanced verdict. \

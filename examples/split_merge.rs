@@ -60,7 +60,7 @@ struct Brief {
 impl Agent for TechTrack {
     type Output = TechAnalysis;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are a software engineer. Assess the feasibility and implementation \
              effort for the described feature. Be concise.",
@@ -72,7 +72,7 @@ impl Agent for TechTrack {
 impl Agent for MktTrack {
     type Output = MktAnalysis;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are a market analyst. Identify the market opportunity and name \
              three direct competitors.",
@@ -84,7 +84,7 @@ impl Agent for MktTrack {
 impl Agent for RiskTrack {
     type Output = RiskAnalysis;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are a risk analyst. List the top three risks and propose one \
              concrete mitigation strategy.",

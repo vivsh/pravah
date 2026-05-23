@@ -86,7 +86,7 @@ impl Agent for VisionPrompt {
         })
     }
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         let model_url = env::var("PRAVAH_MODEL_URL")
             .unwrap_or_else(|_| "gemini:///gemini-2.5-flash-lite".to_string());
         AgentConfig::new(

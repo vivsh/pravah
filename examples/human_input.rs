@@ -22,7 +22,7 @@ struct FinalResult {
 impl Agent for BlogRequest {
     type Output = FinalResult;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are a blog writer. When the user gives you a topic:\n\
              1. Draft a short (3–4 sentence) blog post on that topic.\n\

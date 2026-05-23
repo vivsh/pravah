@@ -25,7 +25,7 @@ struct Report {
 impl Agent for SummariseRequest {
     type Output = BulletPoints;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are a concise summariser. Extract the key points from the text \
              the user sends and return them as a JSON array of short strings.",

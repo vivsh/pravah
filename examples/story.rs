@@ -201,7 +201,7 @@ fn merge_director(
 impl Agent for ChoreographerBrief {
     type Output = ChoreoNotes;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are the choreographer for a graphic novel production. You work \
              independently; the director will incorporate your notes later. \
@@ -225,7 +225,7 @@ impl Agent for ChoreographerBrief {
 impl Agent for DialogueBrief {
     type Output = DialogueNotes;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are the dialogue writer for a graphic novel production. You work \
              independently; the director will incorporate your lines later. \
@@ -248,7 +248,7 @@ impl Agent for DialogueBrief {
 impl Agent for CinematographerBrief {
     type Output = CinemaNote;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are the cinematographer for a graphic novel production. You work \
              independently; the director will incorporate your framing later. \
@@ -272,7 +272,7 @@ impl Agent for CinematographerBrief {
 impl Agent for DirectorBrief {
     type Output = ComicPanel;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are the director of a graphic novel. Your crew has delivered independent \
              notes for the next panel: a choreographer (character positions, movement, \

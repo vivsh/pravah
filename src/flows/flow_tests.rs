@@ -107,7 +107,7 @@ struct PlainAgentOutput {
 impl Agent for PlainAgentInput {
     type Output = PlainAgentOutput;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new("Answer briefly.", "openai://test-model")
     }
 }
@@ -142,7 +142,7 @@ impl Agent for MessageAgentInput {
         Ok(message)
     }
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new("Answer briefly.", "openai://test-model")
     }
 }
@@ -182,7 +182,7 @@ struct ToolAgentOutput {
 impl Agent for ToolAgentInput {
     type Output = ToolAgentOutput;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new("Use tools before answering.", "openai://test-model")
     }
 }

@@ -73,7 +73,7 @@ impl FlowBuilder {
                 return self;
             }
         };
-        let config = A::build();
+        let config = A::configure();
         let output_str = A::Output::schema_name();
         let output_id = self.flow.interner.intern(&output_str);
         let agent_info = AgentInfo {
@@ -81,7 +81,7 @@ impl FlowBuilder {
             tools: Vec::new(),
             make_message: make_agent_message::<A>,
             preamble: config.preamble,
-            make_environment: A::get_environment,
+            make_environment: A::environment,
             input_schema,
             model: config.model_url,
             exit: output_id,
