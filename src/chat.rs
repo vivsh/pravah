@@ -30,7 +30,7 @@ pub enum ChatError {
     /// Text sessions only accept string model output.
     #[error("model returned non-text output for a text chat session")]
     UnexpectedOutput,
-    /// Model returned tool calls. Tools are not supported in [`ChatSession`].
+    /// Model returned tool calls. Tools are not supported in [`Chat`].
     #[error("model returned tool calls; tools are not supported in Chat")]
     ToolCallsNotSupported,
     /// The input type could not be represented as a plain string.
@@ -59,7 +59,7 @@ pub enum ChatError {
     },
     /// The history store flush reported an error.
     ///
-    /// The store interface erases the concrete error type via [`DynHistoryStore`].
+    /// The store interface erases the concrete error type.
     /// When a flush fails the in-memory history is already updated; the store
     /// may be behind. There are no rollback semantics.
     #[error("history store flush failed: {0}")]
@@ -169,16 +169,19 @@ pub struct ChatTurn<Output = String> {
 }
 
 impl<Output> ChatTurn<Output> {
+    /// Consumes the turn and returns the output value.
     pub fn into_output(self) -> Output {
         self.output
     }
 }
 
 impl ChatTurn<String> {
+    /// Borrows the assistant reply text.
     pub fn text(&self) -> &str {
         &self.output
     }
 
+    /// Consumes the turn and returns the reply text.
     pub fn into_text(self) -> String {
         self.output
     }
@@ -237,6 +240,7 @@ impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
         self
     }
 
+    /// Sets the sampling temperature. Higher values increase output randomness.
     pub fn temperature(mut self, temperature: f32) -> Self {
         self.options.temperature = Some(temperature);
         self
@@ -248,11 +252,13 @@ impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
         self
     }
 
+    /// Attaches a history compactor to the session.
     pub fn with_compactor(mut self, compactor: impl HistoryCompactor + 'static) -> Self {
         self.compactor = Box::new(compactor);
         self
     }
 
+    /// Attaches a history store to the session.
     pub fn with_store(mut self, store: impl HistoryStore + 'static) -> Self {
         self.store = Box::new(store);
         self
@@ -352,10 +358,12 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
         self
     }
 
+    /// Returns the session id used to tag history entries.
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
+    /// Borrows the full conversation history for this session.
     pub fn history(&self) -> &FlowHistory {
         &self.history
     }

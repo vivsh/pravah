@@ -128,10 +128,12 @@ pub struct RateLimitLayer {
 }
 
 impl RateLimitLayer {
+    /// Creates a layer with no limits configured.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Adds a per-provider rate limit. Call once per provider that needs limiting.
     pub fn with_limit(mut self, provider: Provider, limit: RateLimit) -> Self {
         self.limits.push((provider, limit));
         self

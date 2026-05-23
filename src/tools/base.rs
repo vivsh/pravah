@@ -78,7 +78,7 @@ impl ToolError {
 
     /// Converts this error into a tool-result [`Message`] that is sent back to the model.
     ///
-    /// Only call this for non-fatal errors; fatal errors should abort the flow via [`FlowError`].
+    /// Only call this for non-fatal errors; fatal errors should abort the flow via `FlowError`.
     pub fn into_error_message(self, tool_name: &str) -> Message {
         Message::tool_output(String::new(), self.to_json(tool_name))
     }

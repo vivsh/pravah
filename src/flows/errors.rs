@@ -2,44 +2,57 @@ use thiserror::Error;
 
 use crate::tools::ToolError;
 
+/// Errors that can occur during flow execution or construction.
 #[derive(Debug, Error)]
 pub enum FlowError {
+    /// A tool invoked during agent execution failed.
     #[error(transparent)]
     Tool(#[from] ToolError),
 
+    /// A node referenced by id does not exist in the graph.
     #[error("Node not found: {0}")]
     NotFound(String),
 
+    /// State serialization failed.
     #[error("failed to serialize: {0}")]
     Serialize(#[source] serde_json::Error),
 
+    /// State deserialization failed.
     #[error("failed to deserialize: {0}")]
     Deserialize(#[source] serde_json::Error),
 
+    /// `FlowRuntime::next` was called on a suspended flow — use `FlowRuntime::resume` instead.
     #[error("Flow is suspended — call resume() with a resumption payload, not next()")]
     ResumeRequired,
 
+    /// `FlowRuntime::resume` was called on a flow that is not suspended.
     #[error("Flow is not suspended — unexpected resumption payload supplied")]
     UnexpectedResumption,
 
+    /// The resumption type does not match the type the flow is waiting for.
     #[error("resume type mismatch: expected '{expected}', got '{got}'")]
     ResumptionTypeMismatch { expected: String, got: String },
 
+    /// Multiple branches are waiting for a join that can never fire.
     #[error("Flow deadlock: states [{0}] are waiting but no join is ready")]
     Deadlock(String),
 
+    /// An unexpected internal condition. Always indicates a bug.
     #[error("Internal error in {handler}: {detail}")]
     Internal {
         handler: &'static str,
         detail: String,
     },
 
+    /// A configured [`RunLimits`](crate::flows::RunLimits) was exceeded.
     #[error("limit exceeded: {0}")]
     LimitExceeded(String),
 
+    /// Flow graph construction failed.
     #[error(transparent)]
     Build(#[from] BuildError),
 
+    /// An agent or tool produced an unrecoverable error.
     #[error(transparent)]
     Agent(#[from] AgentError),
 }

@@ -31,6 +31,8 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
+    /// Creates a config with the given retry count and initial delay.
+    /// `backoff_factor` and `max_delay` are set to their defaults.
     pub fn new(max_retries: u32, initial_delay: Duration) -> Self {
         Self {
             max_retries,
@@ -39,11 +41,13 @@ impl RetryConfig {
         }
     }
 
+    /// Sets the exponential backoff multiplier applied after each failed attempt.
     pub fn with_backoff_factor(mut self, factor: f64) -> Self {
         self.backoff_factor = factor;
         self
     }
 
+    /// Caps the delay between retries regardless of backoff growth.
     pub fn with_max_delay(mut self, delay: Duration) -> Self {
         self.max_delay = delay;
         self
@@ -116,6 +120,7 @@ pub struct RetryLayer {
 }
 
 impl RetryLayer {
+    /// Creates a layer with the given retry configuration.
     pub fn new(config: RetryConfig) -> Self {
         Self { config }
     }

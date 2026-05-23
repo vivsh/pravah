@@ -44,21 +44,26 @@ pub struct RunLimits {
 }
 
 impl RunLimits {
+    /// Creates an unconstrained limit set. Add constraints with the builder methods.
     pub fn new() -> Self {
         Self::default()
     }
+    /// Stops the run after `n` engine steps regardless of how many LLM calls are made.
     pub fn max_steps(mut self, n: usize) -> Self {
         self.max_steps = Some(n);
         self
     }
+    /// Stops the run after `n` model turns (assistant messages).
     pub fn max_turns(mut self, n: usize) -> Self {
         self.max_turns = Some(n);
         self
     }
+    /// Stops the run when the nested-flow call stack reaches depth `n`.
     pub fn max_depth(mut self, n: usize) -> Self {
         self.max_depth = Some(n);
         self
     }
+    /// Stops the run after the given wall-clock duration has elapsed.
     pub fn max_duration(mut self, d: std::time::Duration) -> Self {
         self.max_duration = Some(d);
         self
@@ -68,22 +73,34 @@ impl RunLimits {
 /// Reason a `run_until` loop stopped before completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LimitKind {
+    /// [`RunLimits::max_steps`] was reached.
     MaxSteps,
+    /// [`RunLimits::max_turns`] was reached.
     MaxTurns,
+    /// [`RunLimits::max_depth`] was reached.
     MaxDepth,
+    /// [`RunLimits::max_duration`] elapsed.
     MaxDuration,
 }
 
 /// Outcome of [`FlowRuntime::run_until`].
 #[derive(Debug)]
 pub enum RunOutcome<T> {
+    /// The flow finished normally and produced a value.
     Done(T),
+    /// The flow hit a suspend point. Resume with [`FlowRuntime::resume`].
     Suspend(SuspendedValue),
+    /// A [`RunLimits`] constraint was hit before the flow finished.
     LimitExceeded(LimitKind),
 }
 
 pub(crate) struct FlowCall(pub(crate) Arc<FlowGraph>);
 
+/// Drives a [`Flow`] step by step, owning all execution state.
+///
+/// Create with [`FlowRuntime::new`] and advance with [`FlowRuntime::next`] or
+/// [`FlowRuntime::run_until`]. Use [`FlowRuntime::inspector`] to observe state
+/// between steps.
 pub struct FlowRuntime<I: Flow> {
     state: FlowState,
     callables: Vec<FlowCall>,
@@ -99,6 +116,8 @@ impl<I: Flow> FlowRuntime<I> {
         FlowGraph::from_flow::<I>()
     }
 
+    /// Builds the graph and initialises execution state for the given input.
+    /// Fails if the flow graph is invalid.
     pub fn new(flow: I) -> Result<Self, FlowError> {
         let graph: FlowGraph = Self::build_graph()?;
         let exit = graph.exit;
@@ -255,6 +274,9 @@ impl<I: Flow> FlowRuntime<I> {
         Ok(())
     }
 
+    /// Advances the flow by one engine step.
+    /// Returns [`FlowStep::Continue`] until the flow finishes or suspends.
+    /// Fails with [`FlowError::ResumeRequired`] if the flow is already suspended.
     pub async fn next(&mut self, ctx: Context) -> Result<FlowStep<I::Output>, FlowError> {
         let factory = Arc::clone(&self.factory);
         let callable_index = self
@@ -352,6 +374,9 @@ impl<I: Flow> FlowRuntime<I> {
         }
     }
 
+    /// Provides the resumption value to a suspended flow and advances it one step.
+    /// Fails with [`FlowError::UnexpectedResumption`] if the flow is not suspended,
+    /// or [`FlowError::ResumptionTypeMismatch`] if `R` does not match the expected type.
     pub async fn resume<R: Serialize + JsonSchema>(
         &mut self,
         ctx: Context,

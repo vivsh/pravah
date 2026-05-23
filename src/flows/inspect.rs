@@ -10,38 +10,55 @@ use crate::context::Context;
 use crate::flows::NodeId;
 use crate::tools::ToolDefinition;
 
+/// A named local state variable visible in a frame.
 #[derive(Debug, Clone)]
 pub struct LocalVar<'a> {
+    /// The interned node name for this variable.
     pub name: &'a str,
+    /// The raw node id corresponding to `name`.
     pub node_id: NodeId,
+    /// The current serialized value.
     pub value: &'a Value,
 }
 
+/// Phase an agent is currently in within its frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhaseKind {
+    /// Agent has not started or has already exited.
     None,
+    /// Agent is at a dispatch boundary — next step will call the LLM.
     Dispatch,
     PendingTool {
         active_calls: Vec<String>,
         waiting_count: usize,
     },
+    /// Agent has produced its final output and is leaving the frame.
     Exit,
 }
 
 /// Per-agent phase info stored in a frame view.
 #[derive(Debug, Clone)]
 pub struct AgentPhaseView<'a> {
+    /// The registered node name of the agent.
     pub agent_name: &'a str,
+    /// Current execution phase.
     pub phase: PhaseKind,
 }
 
+/// Snapshot of one call frame on the execution stack.
 #[derive(Debug, Clone)]
 pub struct FrameView<'a> {
+    /// Depth of this frame; 0 is the root frame.
     pub depth: usize,
+    /// Session id active in this frame.
     pub session_id: &'a str,
+    /// Node name of the callable's entry point.
     pub callable_entry: &'a str,
+    /// Node name of the callable's exit point.
     pub callable_exit: &'a str,
+    /// Agent phase snapshots for all agents that have been entered in this frame.
     pub agent_phases: Vec<AgentPhaseView<'a>>,
+    /// Live local variables held by this frame.
     pub locals: Vec<LocalVar<'a>>,
 }
 
@@ -53,6 +70,8 @@ pub struct AgentView {
     pub tools: Vec<ToolDefinition>,
 }
 
+/// Read-only view into a running [`FlowRuntime`](crate::flows::FlowRuntime).
+/// Obtained via [`FlowRuntime::inspector`](crate::flows::FlowRuntime::inspector).
 pub struct FlowInspector<'a> {
     state: &'a FlowState,
     callables: &'a [FlowCall],
@@ -72,10 +91,12 @@ impl<'a> FlowInspector<'a> {
         }
     }
 
+    /// Number of frames on the call stack; 0 means the flow has not started.
     pub fn depth(&self) -> usize {
         self.state.depth()
     }
 
+    /// Snapshots all frames on the current call stack, innermost last.
     pub fn frames(&self) -> Vec<FrameView<'a>> {
         self.state
             .frames_slice()
@@ -85,6 +106,7 @@ impl<'a> FlowInspector<'a> {
             .collect()
     }
 
+    /// Returns the innermost active frame, or `None` if the flow is not running.
     pub fn top_frame(&self) -> Option<FrameView<'a>> {
         let depth = self.state.depth().checked_sub(1)?;
         self.state
@@ -93,11 +115,14 @@ impl<'a> FlowInspector<'a> {
             .map(|frame| self.frame_view(depth, frame))
     }
 
+    /// Resolves a [`NodeId`] to its registered string name in the active frame.
+    /// Returns `None` if no frame is active.
     pub fn name_of(&self, id: NodeId) -> Option<&'a str> {
         let frame = self.state.frames_slice().last()?;
         Some(self.name_in_frame(frame, id))
     }
 
+    /// Returns the full history, including entries from all sessions.
     pub fn history(&self) -> &'a FlowHistory {
         self.history
     }
@@ -122,7 +147,7 @@ impl<'a> FlowInspector<'a> {
 
     /// Returns `true` when any agent in the active frame is at a dispatch boundary —
     /// the next engine step will call the LLM. It is safe to call
-    /// [`FlowRuntime::push_message`] only when this returns `true`.
+    /// [`FlowRuntime::inject_message`](crate::flows::FlowRuntime::inject_message) only when this returns `true`.
     pub fn is_agent_dispatch_ready(&self) -> bool {
         self.top_frame().map_or(false, |f| {
             f.agent_phases
