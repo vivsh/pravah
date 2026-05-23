@@ -101,6 +101,7 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for ToolError {
 /// The default implementation serializes `self` as JSON. Override `to_message`
 /// to attach binary data or produce a custom text payload.
 pub trait ToolOutput: Serialize + DeserializeOwned + JsonSchema + Send + 'static {
+    /// Converts this value into the tool-result [`Message`] sent back to the model.
     fn to_message(self) -> Result<Message, ToolError> {
         let content = serde_json::to_string(&self).map_err(ToolError::Serialize)?;
         Ok(Message::tool_output(String::new(), content))
@@ -121,6 +122,7 @@ pub trait Tool {
         Ok(Message::tool_output(String::new(), content))
     }
 
+    /// Executes the tool with `input` in the given execution context.
     fn call(input: Self::Input, ctx: Context) -> impl Future<Output = Result<Self::Output, ToolError>> + Send;
 }
 
@@ -154,7 +156,9 @@ impl std::fmt::Debug for SuspendedValue {
 /// Tool metadata exposed to the model.
 #[derive(Debug, Clone)]
 pub struct ToolDefinition {
+    /// Registered tool name as seen by the model.
     pub name: String,
+    /// Human-readable description of what the tool does.
     pub description: String,
     /// JSON Schema describing the tool input.
     pub parameters: Value,

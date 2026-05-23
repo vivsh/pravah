@@ -8,11 +8,13 @@ use crate::flows::history::{FlowHistory, HistoryEntry};
 pub trait HistoryStore: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
 
+    /// Persists any new or modified entries and evicts tombstoned ones.
     fn flush(
         &self,
         history: &mut FlowHistory,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
 
+    /// Loads all stored entries for the given session ids.
     fn load(
         &self,
         session_ids: &[&str],
@@ -49,7 +51,7 @@ impl<T: HistoryStore> DynHistoryStore for T {
     }
 }
 
-/// No-op store that prunes evicted entries in memory.
+/// No-op store that prunes evicted entries in memory without persisting.
 pub struct NoopHistoryStore;
 
 impl HistoryStore for NoopHistoryStore {

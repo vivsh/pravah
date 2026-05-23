@@ -71,6 +71,7 @@ pub struct TracingFactory<F: ClientFactory> {
 }
 
 impl<F: ClientFactory> TracingFactory<F> {
+    /// Wraps `inner` with request/response logging.
     pub fn new(inner: F) -> Self {
         Self { inner }
     }

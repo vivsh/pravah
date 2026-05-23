@@ -52,15 +52,20 @@ impl DiagramNodeKind {
 /// One diagram node.
 #[derive(Debug, Clone)]
 pub struct DiagramNode {
+    /// Unique node identifier (matches the flow node id).
     pub id: String,
+    /// Semantic kind used to choose the rendering shape.
     pub kind: DiagramNodeKind,
 }
 
 /// One directed edge in the diagram.
 #[derive(Debug, Clone)]
 pub struct DiagramEdge {
+    /// Source node id.
     pub from: String,
+    /// Target node id.
     pub to: String,
+    /// Edge label (e.g. `"ok"`, `"err"`, `"default"`).
     pub label: &'static str,
 }
 

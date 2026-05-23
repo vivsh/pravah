@@ -27,7 +27,9 @@ use crate::{
 
 /// Step result returned by the runtime.
 pub enum FlowStep<T = serde_json::Value> {
+    /// The flow advanced but has not yet produced a final output.
     Continue,
+    /// The flow completed and produced output `T`.
     Done(T),
     /// Flow paused and is waiting for an external value.
     Suspend(SuspendedValue),
@@ -43,11 +45,18 @@ impl<T: std::fmt::Debug> std::fmt::Debug for FlowStep<T> {
     }
 }
 
+/// A typed, declarative agent flow.
+///
+/// Implement this trait to declare a flow graph. Pravah resolves the graph
+/// at runtime using `build` and drives it via [`crate::flows::FlowRuntime`].
 pub trait Flow: 'static + JsonSchema + Serialize + DeserializeOwned + Send + Sync {
+    /// Final output produced when all nodes complete.
     type Output: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'static;
 
+    /// Constructs the flow graph by registering nodes onto `builder`.
     fn build(builder: FlowBuilder) -> FlowBuilder;
 
+    /// Unique identifier for this flow's entry node; defaults to the JSON Schema name.
     fn node_id() -> String {
         Self::schema_name()
     }

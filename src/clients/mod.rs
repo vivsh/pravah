@@ -30,13 +30,9 @@ pub enum Attachment {
     },
 }
 
-#[cfg(feature = "provider-anthropic")]
 mod anthropic;
-#[cfg(feature = "provider-gemini")]
 mod gemini;
-#[cfg(feature = "provider-ollama")]
 mod ollama;
-#[cfg(feature = "provider-openai")]
 mod openai;
 pub(crate) mod schema;
 pub mod url;
@@ -48,8 +44,11 @@ pub use url::{LlmUrl, ThinkingLevel};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Role {
+    /// System-level instructions prepended before user history.
     System,
+    /// Human turn.
     User,
+    /// Model turn.
     Assistant,
     /// Assistant turn that carries tool calls.
     /// The enclosing [`Message`] keeps any accompanying text in `content`.
@@ -68,7 +67,9 @@ pub enum Role {
 /// File attachments are materialized before the message reaches a provider adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    /// Role that produced this message.
     pub role: Role,
+    /// Text body of the message.
     pub content: String,
     /// Attachments (images, files) to send alongside the message content.
     /// Serialization is skipped when empty so existing stored history is unaffected.
@@ -80,6 +81,7 @@ pub struct Message {
 }
 
 impl Message {
+    /// Creates a user-role message with the given text.
     pub fn user(content: impl Into<String>) -> Self {
         Message {
             role: Role::User,
@@ -89,6 +91,7 @@ impl Message {
         }
     }
 
+    /// Creates an assistant-role message with the given text.
     pub fn assistant(content: impl Into<String>) -> Self {
         Message {
             role: Role::Assistant,
@@ -98,6 +101,7 @@ impl Message {
         }
     }
 
+    /// Creates a tool-result message. `call_id` must match the originating [`ToolCall::id`].
     pub fn tool_output(call_id: String, content: impl Into<String>) -> Self {
         Message {
             role: Role::Tool { call_id },
@@ -117,6 +121,7 @@ impl Message {
         })
     }
 
+    /// Attaches token usage reported by the provider.
     pub fn with_usage(self, usage: TokenUsage) -> Self {
         Message {
             usage: Some(usage),
@@ -124,11 +129,13 @@ impl Message {
         }
     }
 
+    /// Appends a pre-built attachment.
     pub fn with_attachment(mut self, attachment: Attachment) -> Self {
         self.attachments.push(attachment);
         self
     }
 
+    /// Appends an inline binary attachment; `bytes` are base64-encoded internally.
     pub fn with_inline(mut self, mime_type: impl Into<String>, bytes: impl AsRef<[u8]>) -> Self {
         self.attachments.push(Attachment::Inline {
             mime_type: mime_type.into(),
@@ -137,6 +144,7 @@ impl Message {
         self
     }
 
+    /// Appends a file attachment resolved via [`crate::context::Context`] before dispatch.
     pub fn with_file(mut self, mime_type: impl Into<String>, path: impl Into<String>) -> Self {
         self.attachments.push(Attachment::File {
             mime_type: mime_type.into(),
@@ -145,6 +153,7 @@ impl Message {
         self
     }
 
+    /// Appends a URL attachment.
     pub fn with_url(mut self, mime_type: impl Into<String>, url: impl Into<String>) -> Self {
         self.attachments.push(Attachment::Url {
             mime_type: mime_type.into(),
@@ -211,7 +220,9 @@ pub(crate) async fn materialize_messages(
 pub struct ToolCall {
     /// Correlation id that must be echoed back in [`Role::Tool`].
     pub id: String,
+    /// Name of the tool to invoke.
     pub name: String,
+    /// JSON arguments for the tool call.
     pub args: Value,
     /// Provider-specific continuation data from Gemini thinking models.
     /// Echo this back unchanged on the next turn when present.
@@ -235,14 +246,20 @@ pub enum ClientOutput {
 /// Provider-normalized result from one model call.
 #[derive(Debug)]
 pub struct ClientResponse {
+    /// Parsed model output.
     pub output: ClientOutput,
+    /// Token counts for this call, if reported.
     pub usage: Option<TokenUsage>,
+    /// Provider that produced this response.
     pub provider: Provider,
+    /// Model identifier echoed by the provider, if available.
     pub provider_model: Option<String>,
+    /// Raw provider-specific metadata (e.g. finish reason, safety ratings).
     pub raw_metadata: Option<Value>,
 }
 
 impl ClientResponse {
+    /// Constructs a minimal response with no usage or metadata.
     pub fn new(provider: Provider, output: ClientOutput) -> Self {
         Self {
             output,
@@ -253,16 +270,19 @@ impl ClientResponse {
         }
     }
 
+    /// Attaches token usage to the response.
     pub fn with_usage(mut self, usage: Option<TokenUsage>) -> Self {
         self.usage = usage;
         self
     }
 
+    /// Sets the provider-echoed model identifier.
     pub fn with_provider_model(mut self, provider_model: Option<String>) -> Self {
         self.provider_model = provider_model;
         self
     }
 
+    /// Attaches raw provider metadata.
     pub fn with_raw_metadata(mut self, raw_metadata: Option<Value>) -> Self {
         self.raw_metadata = raw_metadata;
         self
@@ -279,6 +299,7 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
+    /// Returns `input + output` if both are present, `None` otherwise.
     pub fn total(&self) -> Option<u32> {
         match (self.input, self.output) {
             (Some(i), Some(o)) => Some(i + o),
@@ -290,43 +311,57 @@ impl TokenUsage {
 /// Errors returned by a client call.
 #[derive(Debug, Error)]
 pub enum ClientError {
+    /// Request payload could not be serialized.
     #[error("failed to serialize input: {0}")]
     Serialize(#[source] serde_json::Error),
+    /// Provider response could not be deserialized; `raw` contains the original text.
     #[error("failed to deserialize output: {source}\nraw response: {raw}")]
     Deserialize {
         #[source]
         source: serde_json::Error,
         raw: String,
     },
+    /// The provider returned an HTTP or API error.
     #[error("LLM call failed: {0}")]
     Llm(String),
+    /// The provider returned an empty response body.
     #[error("LLM returned an empty response")]
     EmptyResponse,
+    /// Input failed pre-dispatch validation (e.g. bad tool schema, empty name).
     #[error("validation failed: {0}")]
     Validation(String),
+    /// A tool-call response was expected but the model returned none.
     #[error("No tool calls found: {0:?}")]
     MissingToolCalls(Option<String>),
+    /// The requested capability (e.g. embeddings, thinking) is not available for this provider.
     #[error("provider '{provider:?}' does not support capability '{capability}'")]
     UnsupportedCapability {
         provider: Provider,
         capability: String,
     },
+    /// The model URL could not be parsed into a known provider + model.
     #[error("invalid LLM URL: {0}")]
     InvalidUrl(String),
+    /// Catch-all for errors from third-party provider libraries.
     #[error("{0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
-/// Supported provider backends.
+/// Supported LLM provider backends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Provider {
+    /// Google Gemini.
     Gemini,
+    /// Ollama local runtime.
     Ollama,
+    /// OpenAI-compatible endpoint.
     OpenAi,
+    /// Anthropic Claude.
     Anthropic,
 }
 
 impl Provider {
+    /// Returns a lowercase string identifier for the provider.
     pub fn as_str(&self) -> &'static str {
         match self {
             Provider::Gemini => "gemini",
@@ -404,26 +439,31 @@ pub struct ClientOptions {
 }
 
 impl ClientOptions {
+    /// Sets the system preamble sent before user history.
     pub fn with_preamble(mut self, preamble: impl Into<String>) -> Self {
         self.preamble = Some(preamble.into());
         self
     }
 
+    /// Registers the tools available to the model for this call.
     pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
         self.tools = tools;
         self
     }
 
+    /// Enables extended thinking. `None` disables it.
     pub fn with_thinking(mut self, thinking: Option<ThinkingLevel>) -> Self {
         self.thinking = thinking;
         self
     }
 
+    /// Sets the tool-call policy for this request.
     pub fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
         self.tool_choice = choice;
         self
     }
 
+    /// Sets a label used in tracing spans.
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
@@ -492,35 +532,12 @@ impl ClientOptions {
             self.thinking = url.thinking.clone();
         }
         match url.provider {
-            #[cfg(feature = "provider-gemini")]
             Provider::Gemini => gemini::new_client(&url, self),
-            #[cfg(not(feature = "provider-gemini"))]
-            Provider::Gemini => provider_feature_disabled(url.provider),
-
-            #[cfg(feature = "provider-openai")]
             Provider::OpenAi => openai::new_client(&url, self),
-            #[cfg(not(feature = "provider-openai"))]
-            Provider::OpenAi => provider_feature_disabled(url.provider),
-
-            #[cfg(feature = "provider-anthropic")]
             Provider::Anthropic => anthropic::new_client(&url, self),
-            #[cfg(not(feature = "provider-anthropic"))]
-            Provider::Anthropic => provider_feature_disabled(url.provider),
-
-            #[cfg(feature = "provider-ollama")]
             Provider::Ollama => ollama::new_client(&url, self),
-            #[cfg(not(feature = "provider-ollama"))]
-            Provider::Ollama => provider_feature_disabled(url.provider),
         }
     }
-}
-
-#[allow(dead_code)]
-fn provider_feature_disabled(provider: Provider) -> Result<Box<dyn Client>, ClientError> {
-    Err(ClientError::UnsupportedCapability {
-        provider,
-        capability: "provider feature is disabled".to_string(),
-    })
 }
 
 #[allow(dead_code)]
@@ -589,7 +606,9 @@ pub enum EmbedTaskType {
 /// Request to generate a text embedding vector.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EmbedRequest {
+    /// Text to embed.
     pub input: String,
+    /// Optional task hint for embedding quality optimization.
     pub task_type: Option<EmbedTaskType>,
     /// Document title hint (improves retrieval quality on some models).
     pub title: Option<String>,
@@ -602,6 +621,7 @@ pub struct EmbedRequest {
 /// Embedding vector returned by [`Client::embed`].
 #[derive(Debug, Clone)]
 pub struct EmbedResponse {
+    /// Embedding coefficients in the order returned by the provider.
     pub values: Vec<f32>,
 }
 

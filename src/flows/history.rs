@@ -11,7 +11,9 @@ pub struct HistoryEntry {
     pub id: Uuid,
     /// Monotonic position assigned by [`FlowHistory::push`].
     pub position: u64,
+    /// Session this entry belongs to.
     pub session_id: String,
+    /// Agent node that produced this entry.
     pub agent_id: String,
     /// Marks entries scheduled for pruning after a successful flush.
     pub evicted: bool,
@@ -44,6 +46,7 @@ pub struct FlowHistory {
 }
 
 impl FlowHistory {
+    /// Creates an empty history with zeroed counters.
     pub fn new() -> Self {
         Self::default()
     }

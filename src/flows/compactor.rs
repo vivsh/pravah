@@ -6,13 +6,16 @@ use crate::flows::history::HistoryEntry;
 /// Compaction decision for one session slice.
 /// `evict_indices` are relative to the slice passed into `compact`.
 pub struct CompactionResult {
+    /// Positions (relative to the input slice) of entries to evict.
     pub evict_indices: Vec<usize>,
+    /// Optional replacement summary message injected after eviction.
     pub summary: Option<Message>,
 }
 
 /// Chooses which history entries to evict for one session.
 /// The runtime always passes entries from a single session.
 pub trait HistoryCompactor: Send + Sync {
+    /// Decides which entries to evict. `entries` are always from one session.
     fn compact(
         &self,
         session_id: &str,
@@ -32,7 +35,7 @@ impl<T: HistoryCompactor> DynHistoryCompactor for T {
     }
 }
 
-/// Compactor that never evicts.
+/// Compactor that never evicts — suitable for short sessions or testing.
 pub struct NoopCompactor;
 
 impl HistoryCompactor for NoopCompactor {
@@ -47,6 +50,7 @@ impl HistoryCompactor for NoopCompactor {
 /// Drops the oldest complete turns until the session fits the configured window.
 /// Incomplete tool turns are never evicted.
 pub struct SlidingWindowCompactor {
+    /// Maximum number of complete assistant turns to retain per session.
     pub max_turns_per_session: usize,
 }
 
