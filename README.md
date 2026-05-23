@@ -127,7 +127,7 @@ struct Report {
 impl Agent for SummariseRequest {
   type Output = BulletPoints;
 
-  fn build() -> AgentConfig {
+  fn configure() -> AgentConfig {
     AgentConfig::new(
       "You are a concise summariser.",
       "gemini:///gemini-2.5-flash-lite",

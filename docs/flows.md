@@ -157,7 +157,7 @@ but a looping agent then sees no previous turns from earlier iterations.
 Call `.keep_alive()` on `AgentConfig` to preserve one session across re-entries:
 
 ```rust
-fn build() -> AgentConfig {
+fn configure() -> AgentConfig {
     AgentConfig::new(
         "You are a helpful assistant.",
         "gemini:///gemini-2.5-flash",
@@ -165,6 +165,7 @@ fn build() -> AgentConfig {
     .keep_alive()
 }
 ```
+
 
 With `keep_alive`, one agent keeps its own conversation history within the
 current parent frame.

@@ -38,7 +38,7 @@ struct Plan {
 impl Agent for PlannerInput {
     type Output = Plan;
 
-    fn build() -> AgentConfig {
+    fn configure() -> AgentConfig {
         AgentConfig::new(
             "You are a careful planning agent.",
             "gemini:///gemini-2.5-flash-lite",

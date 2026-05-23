@@ -86,7 +86,7 @@ macro_rules! simple_agent {
     ($in:ident, $out:ident, $preamble:expr) => {
         impl Agent for $in {
             type Output = $out;
-            fn build() -> AgentConfig {
+            fn configure() -> AgentConfig {
                 AgentConfig::new($preamble, "test://model")
             }
         }
