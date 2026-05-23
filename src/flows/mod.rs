@@ -23,7 +23,7 @@ pub use crate::clients::{ClientFactory, ClientFactoryLayer};
 pub use crate::commons::{Agent, AgentConfig};
 pub use crate::context::Context;
 pub use compactor::{CompactionResult, HistoryCompactor, NoopCompactor, SlidingWindowCompactor};
-pub use inspect::{AgentPhaseView, FlowInspector, FrameView, LocalVar, PhaseKind};
+pub use inspect::{AgentPhaseView, AgentView, FlowInspector, FrameView, LocalVar, PhaseKind};
 pub use limiter::{RateLimit, RateLimitLayer, RateLimitingFactory};
 pub use retry::{RetryConfig, RetryingFactory};
 pub use retry::RetryLayer;

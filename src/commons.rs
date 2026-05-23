@@ -70,6 +70,16 @@ pub trait Agent: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'stat
         Message::from_json(Role::User, &self).map_err(FlowError::Serialize)
     }
 
+    /// Returns runtime context appended to the system prompt on the first turn.
+    ///
+    /// Override to inject dynamic facts (current date, user identity, retrieved
+    /// memories, etc.) into the system prompt at dispatch time. The returned
+    /// string is inserted between the static preamble and the input-schema hint.
+    /// Returns `None` by default (no additional context).
+    fn get_environment(_ctx: &Context) -> Option<String> {
+        None
+    }
+
     /// Returns the runtime settings for this agent.
     fn build() -> AgentConfig;
 }

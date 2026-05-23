@@ -10,7 +10,7 @@ pub mod utils;
 pub mod testing;
 
 pub use chat::{
-	ChatError, ChatSession, ChatSnapshot, ChatTurn, ChatType, ChatWireKind,
+	Chat, ChatBuilder, ChatError, ChatSnapshot, ChatTurn, ChatType, ChatWireKind,
 };
 pub use context::{Context, FlowConf};
 pub use flows::{Choice, CliMode, HumanInput, HumanOutput};

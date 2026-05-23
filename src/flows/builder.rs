@@ -77,6 +77,7 @@ impl FlowBuilder {
             tools: Vec::new(),
             make_message: make_agent_message::<A>,
             preamble: config.preamble,
+            make_environment: A::get_environment,
             input_schema,
             model: config.model_url,
             exit: output_id,

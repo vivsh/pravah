@@ -568,7 +568,7 @@ impl FlowGraph {
         let options = if has_prior_history {
             options
         } else {
-            options.with_preamble(node.preamble.clone())
+            options.with_preamble(node.effective_preamble(&ctx))
         };
 
         let client = factory.create(&node.model, options).map_err(|e| {

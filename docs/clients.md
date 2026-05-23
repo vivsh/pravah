@@ -213,20 +213,26 @@ message and sent back to the model as a tool result. The model can inspect
 `error_kind` and `message` to decide how to proceed:
 
 ```json
-{"tool": "ReadFile", "ok": false, "error_kind": "NotFound", "message": "…", "recoverable": true}
+{
+  "tool": "ReadFile",
+  "ok": false,
+  "error_kind": "NotFound",
+  "message": "…",
+  "recoverable": true
+}
 ```
 
-| Variant | When to use |
-| -------------------------------- | ----------------------------------------- |
-| `ToolError::NotFound(msg)` | Tool or resource not found |
-| `ToolError::TypeError(e)` | Model passed a value with the wrong JSON shape |
-| `ToolError::Validation(msg)` | Constraint or argument violation the model can correct |
-| `ToolError::Security(msg)` | Path escape or forbidden command attempt |
-| `ToolError::Io(e)` | Filesystem error |
-| `ToolError::Http(msg)` | Network error |
-| `ToolError::Serialize(e)` | Output serialization failure |
-| `ToolError::Other(msg)` | Any other soft error |
-| `ToolError::Fatal(msg)` | Abort the flow immediately — the only variant that terminates the run |
+| Variant                      | When to use                                                           |
+| ---------------------------- | --------------------------------------------------------------------- |
+| `ToolError::NotFound(msg)`   | Tool or resource not found                                            |
+| `ToolError::TypeError(e)`    | Model passed a value with the wrong JSON shape                        |
+| `ToolError::Validation(msg)` | Constraint or argument violation the model can correct                |
+| `ToolError::Security(msg)`   | Path escape or forbidden command attempt                              |
+| `ToolError::Io(e)`           | Filesystem error                                                      |
+| `ToolError::Http(msg)`       | Network error                                                         |
+| `ToolError::Serialize(e)`    | Output serialization failure                                          |
+| `ToolError::Other(msg)`      | Any other soft error                                                  |
+| `ToolError::Fatal(msg)`      | Abort the flow immediately — the only variant that terminates the run |
 
 `Context::check_command` and `Context::resolve` both return `ToolError::Security`
 when the check fails. The model receives the structured error and may retry or

@@ -80,14 +80,14 @@ That keeps routing deterministic and resumption unambiguous.
 
 ```toml
 [dependencies]
-pravah = "0.3.18"
+pravah = "0.3.19"
 ```
 
 To opt into providers explicitly:
 
 ```toml
 [dependencies]
-pravah = { version = "0.3.18", default-features = false, features = [
+pravah = { version = "0.3.19", default-features = false, features = [
   "provider-openai",
   "provider-anthropic",
   "provider-gemini",
@@ -177,11 +177,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 For a simple persistent conversation without graph construction, use
-[`ChatSession`](docs/clients.md) instead. See
+[`Chat`](docs/chat.md) instead. See
 [examples/chat.rs](examples/chat.rs) for a minimal example.
 
 ## Read Next
 
+- [docs/chat.md](docs/chat.md): simple multi-turn chat without a flow graph
 - [docs/clients.md](docs/clients.md): agents, providers, model URLs, tools, attachments
 - [docs/flows.md](docs/flows.md): node types, runtime semantics, suspension, snapshots
 - [examples/](examples/): runnable end-to-end flows

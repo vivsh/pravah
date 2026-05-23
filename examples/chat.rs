@@ -1,17 +1,17 @@
-//! Simple multi-turn chat using [`ChatSession`].
+//! Simple multi-turn chat using [`Chat`].
 //!
 //! Demonstrates: builder, two turns, snapshot/restore, third turn confirming history continuity.
 //!
 //! Requires a provider API key: set `GEMINI_API_KEY` or change the URL to another provider.
 
-use pravah::{ChatSession, Context, FlowConf};
+use pravah::{Chat, Context, FlowConf};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 
-    let mut session: ChatSession = ChatSession::builder("gemini:///gemini-2.5-flash-lite")
+    let mut session: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
         .preamble("You are a concise Rust tutor. Keep answers to two sentences.")
         .build()?;
 
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Take a snapshot and restore to a fresh session.
     let snap = session.snapshot();
     println!("\n--- restored from snapshot ---");
-    let mut restored = ChatSession::from_snapshot(snap)?;
+    let mut restored = Chat::from_snapshot(snap)?;
 
     let t3 = restored.send(ctx.clone(), "Summarise everything we discussed in one sentence.").await?;
     println!("{}", t3.text());

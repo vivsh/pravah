@@ -19,7 +19,7 @@ use crate::flows::{FlowHistory, HistoryEntry};
 /// Agent-id label used when pushing messages into [`FlowHistory`].
 const CHAT_AGENT_ID: &str = "chat";
 
-/// Error returned by [`ChatSession`] operations.
+/// Error returned by [`Chat`] operations.
 #[derive(Debug, Error)]
 pub enum ChatError {
     #[error(transparent)]
@@ -31,7 +31,7 @@ pub enum ChatError {
     #[error("model returned non-text output for a text chat session")]
     UnexpectedOutput,
     /// Model returned tool calls. Tools are not supported in [`ChatSession`].
-    #[error("model returned tool calls; tools are not supported in ChatSession")]
+    #[error("model returned tool calls; tools are not supported in Chat")]
     ToolCallsNotSupported,
     /// The input type could not be represented as a plain string.
     #[error("text chat input type {ty} did not serialize to a string")]
@@ -84,7 +84,7 @@ impl ChatWireKind {
     }
 }
 
-/// Chat payload contract used by [`ChatSession`].
+/// Chat payload contract used by [`Chat`].
 ///
 /// All `Serialize + DeserializeOwned + JsonSchema + Send + Sync + 'static`
 /// types implement this automatically. `String` stays in plain-text mode; all
@@ -190,9 +190,9 @@ impl ChatTurn<String> {
 /// schemas, and response mode survive snapshot/restore cycles.
 ///
 /// **Not included:** compactor and store. Re-attach them after
-/// [`ChatSession::from_snapshot`] with [`ChatSession::with_compactor`] and
-/// [`ChatSession::with_store`]. For durable persistence, attach a
-/// [`HistoryStore`] to the session before calling [`ChatSession::snapshot`].
+/// [`Chat::from_snapshot`] with [`Chat::with_compactor`] and
+/// [`Chat::with_store`]. For durable persistence, attach a
+/// [`HistoryStore`] to the session before calling [`Chat::snapshot`].
 #[derive(Clone)]
 pub struct ChatSnapshot<Input = String, Output = String>
 where
@@ -206,24 +206,34 @@ where
     _types: PhantomData<(Input, Output)>,
 }
 
-/// Builder for [`ChatSession`].
-pub struct ChatSessionBuilder<Input = String, Output = String>
+/// Builder for [`Chat`].
+pub struct ChatBuilder<Input = String, Output = String>
 where
     Input: ChatType,
     Output: ChatType,
 {
     url: String,
     options: ClientOptions,
+    environment: Option<String>,
     session_id: Option<String>,
     compactor: Box<dyn DynHistoryCompactor>,
     store: Box<dyn DynHistoryStore>,
     _types: PhantomData<(Input, Output)>,
 }
 
-impl<Input: ChatType, Output: ChatType> ChatSessionBuilder<Input, Output> {
-    /// Sets the system preamble sent before conversation history.
+impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
+    /// Sets the static system preamble sent before conversation history.
     pub fn preamble(mut self, preamble: impl Into<String>) -> Self {
         self.options.preamble = Some(preamble.into());
+        self
+    }
+
+    /// Appends runtime environment text to the system prompt.
+    ///
+    /// The environment is appended after the preamble (if any) and before the
+    /// input-schema hint. It is baked in at build time.
+    pub fn environment(mut self, env: impl Into<String>) -> Self {
+        self.environment = Some(env.into());
         self
     }
 
@@ -249,10 +259,16 @@ impl<Input: ChatType, Output: ChatType> ChatSessionBuilder<Input, Output> {
     }
 
     /// Builds the session, connecting to the provider specified by `url`.
-    pub fn build(self) -> Result<ChatSession<Input, Output>, ChatError> {
+    pub fn build(mut self) -> Result<Chat<Input, Output>, ChatError> {
+        if let Some(env) = self.environment {
+            self.options.preamble = Some(match self.options.preamble.take() {
+                Some(p) => format!("{p}\n\n{env}"),
+                None => env,
+            });
+        }
         let options = build_typed_options::<Input, Output>(self.options)?;
         let client = options.clone().create(&self.url)?;
-        Ok(ChatSession {
+        Ok(Chat {
             session_id: self.session_id.unwrap_or_else(|| Uuid::now_v7().to_string()),
             url: self.url,
             options,
@@ -267,16 +283,16 @@ impl<Input: ChatType, Output: ChatType> ChatSessionBuilder<Input, Output> {
 
 /// Stateful single-conversation chat session backed by [`FlowHistory`].
 ///
-/// `ChatSession<String, String>` is plain text chat. Any non-`String` input or
-/// output type switches the session into JSON mode for that side.
+/// `Chat<String, String>` is plain text chat. Any non-`String` input or output
+/// type switches the session into JSON mode for that side.
 ///
 /// One instance owns exactly one conversation. For multi-user or multi-agent
 /// scenarios use [`FlowRuntime`](crate::flows::FlowRuntime).
 ///
 /// **Supported:** text and typed JSON sessions, plus multimodal input via
-/// [`send_message`](ChatSession::send_message) on `ChatSession<String, Output>`.
+/// [`send_message`](Chat::send_message) on `Chat<String, Output>`.
 /// **Not supported:** tool calls. Use [`Flow`](crate::flows::Flow) for that.
-pub struct ChatSession<Input = String, Output = String>
+pub struct Chat<Input = String, Output = String>
 where
     Input: ChatType,
     Output: ChatType,
@@ -291,12 +307,13 @@ where
     _types: PhantomData<(Input, Output)>,
 }
 
-impl<Input: ChatType, Output: ChatType> ChatSession<Input, Output> {
+impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
     /// Creates a builder for a session targeting the given model URL.
-    pub fn builder(url: impl Into<String>) -> ChatSessionBuilder<Input, Output> {
-        ChatSessionBuilder {
+    pub fn builder(url: impl Into<String>) -> ChatBuilder<Input, Output> {
+        ChatBuilder {
             url: url.into(),
             options: ClientOptions::default(),
+            environment: None,
             session_id: None,
             compactor: Box::new(NoopCompactor),
             store: Box::new(NoopHistoryStore),
@@ -413,7 +430,7 @@ impl<Input: ChatType, Output: ChatType> ChatSession<Input, Output> {
     }
 }
 
-impl<Output: ChatType> ChatSession<String, Output> {
+impl<Output: ChatType> Chat<String, Output> {
     /// Sends an explicit user [`Message`] and returns the assistant reply.
     ///
     /// Fails with [`ChatError::NonUserMessage`] if `msg.role` is not [`Role::User`].

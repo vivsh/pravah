@@ -1,10 +1,14 @@
 use serde_json::Value;
 
 use super::history::FlowHistory;
+use super::nodes::FlowNode;
 use super::runtime::FlowCall;
 use super::state::{AgentContinuation, FlowState, Frame};
 use crate::clients::Message;
+use crate::commons::Agent;
+use crate::context::Context;
 use crate::flows::NodeId;
+use crate::tools::ToolDefinition;
 
 #[derive(Debug, Clone)]
 pub struct LocalVar<'a> {
@@ -39,6 +43,14 @@ pub struct FrameView<'a> {
     pub callable_exit: &'a str,
     pub agent_phases: Vec<AgentPhaseView<'a>>,
     pub locals: Vec<LocalVar<'a>>,
+}
+
+/// Agent configuration as visible to the LLM, intended for testing.
+pub struct AgentView {
+    /// Full effective system prompt sent to the LLM on the first turn.
+    pub preamble: String,
+    /// Tool definitions visible to this agent.
+    pub tools: Vec<ToolDefinition>,
 }
 
 pub struct FlowInspector<'a> {
@@ -117,6 +129,27 @@ impl<'a> FlowInspector<'a> {
                 .iter()
                 .any(|ap| matches!(ap.phase, PhaseKind::Dispatch))
         })
+    }
+
+    /// Returns the effective preamble and tool definitions for agent `T`.
+    ///
+    /// The preamble reflects the fully assembled system prompt — static base,
+    /// runtime environment from `ctx`, and input-schema hint — exactly as it
+    /// would be sent to the LLM. Returns `None` when `T` is not registered.
+    pub fn agent_view<T: Agent>(&self, ctx: &Context) -> Option<AgentView> {
+        let key = T::node_id();
+        for callable in self.callables {
+            let graph = &callable.0;
+            if let Some(node_id) = graph.interner.intern_get(&key) {
+                if let Some(FlowNode::Agent(info)) = graph.nodes.get(&node_id) {
+                    return Some(AgentView {
+                        preamble: info.effective_preamble(ctx),
+                        tools: info.tools.iter().map(|t| t.definition.clone()).collect(),
+                    });
+                }
+            }
+        }
+        None
     }
 
     fn frame_view(&self, depth: usize, frame: &'a Frame) -> FrameView<'a> {
