@@ -8,6 +8,7 @@ use crate::flows::{NodeId, errors::BuildError};
 fn node_outputs(node: &FlowNode) -> Vec<NodeId> {
     match node {
         FlowNode::Work(w) => vec![w.exit_name],
+        FlowNode::ToolWork(w) => vec![w.exit_name],
         FlowNode::Map(m) => vec![m.exit_name],
         FlowNode::Suspend(s) => vec![s.exit],
         FlowNode::Agent(a) => {
@@ -157,6 +158,9 @@ pub fn validate_nodes(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> R
             FlowNode::Work(info) if info.exit_name == info.name => {
                 problems.push(format!("work '{key_str}': exit_name equals input name — node would overwrite its own input"));
             }
+            FlowNode::ToolWork(info) if info.exit_name == info.name => {
+                problems.push(format!("tool_work '{key_str}': exit_name equals input name — node would overwrite its own input"));
+            }
             FlowNode::Map(info) if info.exit_name == info.name => {
                 problems.push(format!("map '{key_str}': exit_name equals input name — node would overwrite its own input"));
             }
@@ -182,6 +186,7 @@ fn build_successors(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> Has
                 s
             }
             FlowNode::Work(info) => vec![info.exit_name],
+            FlowNode::ToolWork(info) => vec![info.exit_name],
             FlowNode::Map(info) => vec![info.exit_name],
             FlowNode::Suspend(info) => vec![info.exit],
             FlowNode::Fork(info) => info.children.clone(),

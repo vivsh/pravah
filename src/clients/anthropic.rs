@@ -49,7 +49,7 @@ impl Client for AnthropicClient {
 
         let tools_enabled =
             !self.options.tools.is_empty() && self.options.tool_choice != ToolChoice::Disabled;
-        let wants_json_output = !tools_enabled && self.options.wants_json_output();
+        let wants_json_output = self.options.wants_json_output();
         let payload = build_payload(&self.model, &self.options, messages, tools_enabled);
         let response = send_messages_request(
             &self.http,
@@ -59,7 +59,7 @@ impl Client for AnthropicClient {
         )
         .await?;
 
-        map_response(response, tools_enabled, wants_json_output)
+        map_response(response, wants_json_output)
     }
 }
 
@@ -172,7 +172,8 @@ fn build_payload(
         if options.tool_choice == ToolChoice::Required {
             payload["tool_choice"] = json!({ "type": "any" });
         }
-    } else if options.wants_json_output() {
+    }
+    if options.wants_json_output() {
         let schema_hint = options
             .output_schema
             .as_ref()
@@ -290,7 +291,6 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 
 fn map_response(
     response: Value,
-    tools_enabled: bool,
     wants_json_output: bool,
 ) -> Result<ClientResponse, ClientError> {
     let usage = response.get("usage").map(usage_from_value);
@@ -315,9 +315,6 @@ fn map_response(
         .with_usage(usage)
         .with_provider_model(provider_model)
         .with_raw_metadata(metadata));
-    }
-    if tools_enabled {
-        return Err(ClientError::MissingToolCalls(text));
     }
     let text = text.ok_or(ClientError::EmptyResponse)?;
     Ok(ClientResponse::new(
@@ -470,7 +467,7 @@ mod tests {
             "usage": {"input_tokens": 7, "output_tokens": 3},
             "content": [{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"q":"x"}}]
         });
-        let mapped = map_response(response, true, false).unwrap();
+        let mapped = map_response(response, false).unwrap();
         assert_eq!(mapped.usage.unwrap().total(), Some(10));
         match mapped.output {
             ClientOutput::ToolCalls { calls, .. } => assert_eq!(calls[0].id, "toolu_1"),
@@ -544,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_and_tools_anthropic_prefers_tools_over_output_hint() {
+    fn schema_and_tools_anthropic_sends_both_tools_and_output_hint() {
         let options = ClientOptions::default()
             .with_preamble("You are helpful.")
             .with_tool_choice(ToolChoice::Required)
@@ -569,7 +566,9 @@ mod tests {
 
         let payload = build_payload("claude", &options, &[Message::user("hi")], true);
 
-        assert_eq!(payload["system"], "You are helpful.");
+        let system = payload["system"].as_str().expect("system should be a string");
+        assert!(system.contains("You are helpful."), "system should contain preamble");
+        assert!(system.contains("JSON Schema"), "system should contain JSON schema hint");
         assert_eq!(payload["tool_choice"]["type"], "any");
         assert_eq!(payload["tools"][0]["name"], "submit");
     }
@@ -581,7 +580,7 @@ mod tests {
             "model": "claude-x",
             "content": [{"type":"text","text":"plain text"}]
         });
-        let mapped = map_response(response, false, false).unwrap();
+        let mapped = map_response(response, false).unwrap();
         match mapped.output {
             ClientOutput::Output(Value::String(text)) => assert_eq!(text, "plain text"),
             _ => panic!("expected string output"),

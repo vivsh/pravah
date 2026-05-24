@@ -12,7 +12,7 @@ use super::flow::{Flow, FlowGraph};
 use super::nary::{MergeInputs, SplitOutputs};
 use super::nodes::{
     AgentInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo, MapInfo, StateNode, SuspendInfo,
-    ToolInfo, WorkInfo, build_tool_definition, node,
+    ToolInfo, ToolWorkInfo, WorkInfo, build_tool_definition, node,
 };
 use crate::flows::NodeId;
 use crate::flows::errors::{BuildError, FlowError};
@@ -114,15 +114,16 @@ impl FlowBuilder {
     }
 
     /// Registers a tool for agent `A` backed by a [`Tool`] impl, wiring the work node automatically.
-    pub fn tool<A: Agent, T: Tool>(self) -> Self {
+    pub fn tool<A: Agent, T: Tool>(mut self) -> Self {
+        let agent_id = self.flow.interner.intern(&A::node_id());
         let to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync> =
             Box::new(|value: Value| -> Result<Message, ToolError> {
                 let o: T::Output = serde_json::from_value(value).map_err(ToolError::TypeError)?;
                 T::to_message(o)
             });
         self.tool_impl::<A, T::Input, T::Output>(to_message)
-            .work(|input, ctx| async move {
-                T::call(input, ctx).await.map_err(FlowError::from)
+            .tool_work::<T::Input, T::Output, _, _>(agent_id, |input, ctx| async move {
+                T::call(input, ctx).await
             })
     }
 
@@ -159,32 +160,6 @@ impl FlowBuilder {
                         to_message,
                     });
                     info.tool_lookup.insert(tool_name, (entry_id, exit_id));
-                    let synthetic_name = pascal_to_snake(&A::Output::schema_name());
-                    if !info.tool_lookup.contains_key(&synthetic_name) {
-                        let synthetic_exit = info.exit;
-                        match build_tool_definition::<A::Output>() {
-                            Ok(def) => {
-                                info.tools.push(ToolInfo {
-                                    definition: def,
-                                    exit_id: synthetic_exit,
-                                    to_message: Box::new(|value: Value| {
-                                        Ok(Message::tool_output(
-                                            String::new(),
-                                            serde_json::to_string(&value).unwrap_or_default(),
-                                        ))
-                                    }),
-                                });
-                                info.tool_lookup
-                                    .insert(synthetic_name, (synthetic_exit, synthetic_exit));
-                            }
-                            Err(e) => {
-                                self.errors.push(format!(
-                                    "agent '{}': synthetic exit tool '{}' schema: {e}",
-                                    agent_str, synthetic_name
-                                ));
-                            }
-                        }
-                    }
                 }
                 None => {
                     self.errors.push(format!(
@@ -472,6 +447,53 @@ impl FlowBuilder {
             FlowNode::Work(WorkInfo {
                 name: from_id,
                 exit_name: exit_id,
+                func: shim,
+            }),
+        );
+        self
+    }
+
+    /// Registers an async tool-work node keyed by `From::schema_name()`.
+    /// Unlike `.work()`, the implementation returns [`ToolError`] directly.
+    /// Non-fatal errors are forwarded to the model; only [`ToolError::Fatal`] aborts the flow.
+    pub(crate) fn tool_work<From, Out, Fut, H>(mut self, agent_id: NodeId, func: H) -> Self
+    where
+        From: 'static + Serialize + DeserializeOwned + JsonSchema,
+        Out: 'static + Serialize + DeserializeOwned + JsonSchema,
+        Fut: std::future::Future<Output = Result<Out, ToolError>> + Send + 'static,
+        H: Fn(From, Context) -> Fut + Send + Sync + 'static,
+    {
+        let from_id_str = From::schema_name();
+        let from_id = self.flow.interner.intern(&from_id_str);
+        if self.flow.nodes.contains_key(&from_id) {
+            self.errors
+                .push(format!("tool_work '{}': duplicate node key", from_id_str));
+            return self;
+        }
+        let exit_id = self.flow.interner.intern(&Out::schema_name());
+        let shim: Box<
+            dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, ToolError>> + Send + Sync,
+        > = Box::new(move |value: &Value, ctx: Context| {
+            let typed: From = match serde_json::from_value(value.clone()) {
+                Ok(v) => v,
+                Err(e) => {
+                    let err = ToolError::TypeError(e);
+                    return Box::pin(async move { Err(err) });
+                }
+            };
+            let fut = func(typed, ctx);
+            Box::pin(async move {
+                let out = fut.await?;
+                serde_json::to_value(&out).map_err(ToolError::Serialize)
+            })
+        });
+        self.flow.nodes.insert(
+            from_id,
+            FlowNode::ToolWork(ToolWorkInfo {
+                name: from_id,
+                exit_name: exit_id,
+                agent_id,
+                tool_name: pascal_to_snake(&from_id_str),
                 func: shim,
             }),
         );

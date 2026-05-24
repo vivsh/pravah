@@ -87,6 +87,18 @@ pub(crate) struct WorkInfo {
         Box<dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, FlowError>> + Send + Sync>,
 }
 
+/// A tool-aware work node whose implementation returns [`ToolError`] directly.
+/// Non-fatal errors are forwarded to the model as structured error messages;
+/// only [`ToolError::Fatal`] aborts the flow.
+pub(crate) struct ToolWorkInfo {
+    pub(crate) name: NodeId,
+    pub(crate) exit_name: NodeId,
+    pub(crate) agent_id: NodeId,
+    pub(crate) tool_name: String,
+    pub(crate) func:
+        Box<dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, ToolError>> + Send + Sync>,
+}
+
 pub(crate) struct MapInfo {
     pub(crate) name: NodeId,
     pub(crate) exit_name: NodeId,
@@ -116,6 +128,7 @@ pub(crate) enum FlowNode {
     Fork(ForkInfo),
     Join(JoinInfo),
     Work(WorkInfo),
+    ToolWork(ToolWorkInfo),
     Map(MapInfo),
     Suspend(SuspendInfo),
     Flow(Arc<FlowGraph>),

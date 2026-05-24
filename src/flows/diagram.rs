@@ -20,6 +20,8 @@ use super::nodes::FlowNode;
 pub enum DiagramNodeKind {
     Agent,
     Work,
+    /// Tool-backed work node that routes non-fatal errors back to the model.
+    ToolWork,
     /// Pure synchronous transform.
     Map,
     Fork,
@@ -38,6 +40,7 @@ impl DiagramNodeKind {
         match self {
             Self::Agent => "agent",
             Self::Work => "work",
+            Self::ToolWork => "tool_work",
             Self::Map => "map",
             Self::Fork => "fork",
             Self::Join => "join",
@@ -118,7 +121,10 @@ impl FlowGraphDiagram {
         for node in &self.nodes {
             let safe_id = mermaid_id(&node.id);
             let decl = match node.kind {
-                DiagramNodeKind::Agent | DiagramNodeKind::Work | DiagramNodeKind::Map => {
+                DiagramNodeKind::Agent
+                    | DiagramNodeKind::Work
+                    | DiagramNodeKind::ToolWork
+                    | DiagramNodeKind::Map => {
                     format!(
                         "    {}[\"{} ({})\"]",
                         safe_id,
@@ -180,7 +186,10 @@ impl FlowGraphDiagram {
         for node in &self.nodes {
             let safe_id = dot_id(&node.id);
             let attrs = match node.kind {
-                DiagramNodeKind::Agent | DiagramNodeKind::Work | DiagramNodeKind::Map => format!(
+                DiagramNodeKind::Agent
+                    | DiagramNodeKind::Work
+                    | DiagramNodeKind::ToolWork
+                    | DiagramNodeKind::Map => format!(
                     "label=\"{}\\n({})\" shape=box style=rounded",
                     node.id,
                     node.kind.label_suffix()
@@ -306,6 +315,7 @@ fn tree_write_node(
     let kind_tag = match node_kind.get(id).copied() {
         Some(DiagramNodeKind::Agent) => " (agent)",
         Some(DiagramNodeKind::Work) => " (work)",
+        Some(DiagramNodeKind::ToolWork) => " (tool_work)",
         Some(DiagramNodeKind::Map) => " (map)",
         Some(DiagramNodeKind::Fork) => " (fork)",
         Some(DiagramNodeKind::Join) => " (join)",
@@ -430,6 +440,10 @@ fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
                 FlowNode::Work(info) => (
                     DiagramNodeKind::Work,
                     vec![(graph.interner.name_of(info.exit_name).to_string(), "work")],
+                ),
+                FlowNode::ToolWork(info) => (
+                    DiagramNodeKind::ToolWork,
+                    vec![(graph.interner.name_of(info.exit_name).to_string(), "tool_work")],
                 ),
                 FlowNode::Map(info) => (
                     DiagramNodeKind::Map,

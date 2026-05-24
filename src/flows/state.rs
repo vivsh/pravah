@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -27,9 +27,12 @@ pub enum AgentContinuation {
         active: HashMap<NodeId, (String, String)>,
         /// Calls queued for each slot that is already occupied (exit_id → queue).
         waiting: HashMap<NodeId, VecDeque<WaitingCall>>,
+        /// call_ids whose exit slots contain a [`ToolError`] payload rather than
+        /// a typed output value. Checked in `handle_pending_tools` before
+        /// calling `to_message`. Empty at every suspension point.
+        #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+        error_exits: HashSet<String>,
     },
-    /// The LLM returned a structured output; ready to write to the agent exit slot.
-    Exit(Value),
 }
 
 /// State for one agent node tracked inside the parent frame.
@@ -343,5 +346,23 @@ impl FlowState {
 
     pub(crate) fn frames_slice(&self) -> &[Frame] {
         &self.frames
+    }
+
+    /// Records that the currently-active call on `exit_id` for `agent_id` produced a
+    /// non-fatal [`ToolError`]. Looks up the call_id from the active map and inserts it
+    /// into `error_exits` so that `handle_pending_tools` can route it correctly.
+    /// Returns `false` if the agent or its active entry is not found.
+    pub(crate) fn add_tool_error_exit(&mut self, agent_id: NodeId, exit_id: NodeId) -> bool {
+        if let Some(AgentState {
+            continuation: AgentContinuation::PendingTool { active, error_exits, .. },
+            ..
+        }) = self.top_mut().and_then(|f| f.agent_states.get_mut(&agent_id))
+        {
+            if let Some((call_id, _)) = active.get(&exit_id) {
+                error_exits.insert(call_id.clone());
+                return true;
+            }
+        }
+        false
     }
 }

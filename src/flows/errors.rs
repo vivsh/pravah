@@ -1,14 +1,8 @@
 use thiserror::Error;
 
-use crate::tools::ToolError;
-
 /// Errors that can occur during flow execution or construction.
 #[derive(Debug, Error)]
 pub enum FlowError {
-    /// A tool invoked during agent execution failed.
-    #[error(transparent)]
-    Tool(#[from] ToolError),
-
     /// A node referenced by id does not exist in the graph.
     #[error("Node not found: {0}")]
     NotFound(String),

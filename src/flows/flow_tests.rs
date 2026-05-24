@@ -285,11 +285,11 @@ async fn schema_and_tools_dispatch_with_tools_includes_lookup() {
     let captured = factory.captured();
     assert_eq!(captured.len(), 1);
     let options = &captured[0];
-    assert_eq!(options.tool_choice, crate::clients::ToolChoice::Required);
+    assert_eq!(options.tool_choice, crate::clients::ToolChoice::Auto);
     assert_eq!(
         options.tools.len(),
-        2,
-        "should have lookup tool and synthetic exit tool"
+        1,
+        "should have lookup tool"
     );
 
     let lookup = options
@@ -298,30 +298,26 @@ async fn schema_and_tools_dispatch_with_tools_includes_lookup() {
         .find(|t| t.name == "lookup")
         .expect("lookup tool should be present");
     assert!(lookup.parameters.is_object());
-    let exit_tool = options
-        .tools
-        .iter()
-        .find(|t| t.name == "tool_agent_output")
-        .expect("synthetic exit tool should be present");
-    assert!(exit_tool.parameters.is_object());
 }
 
 /// `default_turn_budget_message` uses XML format for Anthropic/Gemini and plain
 /// imperative text for Ollama/OpenAI model URLs.
 #[test]
 fn default_turn_budget_message_is_provider_specific() {
-    let anthropic_msg = default_turn_budget_message("anthropic://claude-opus-4", Some("submit"));
-    let gemini_msg = default_turn_budget_message("gemini:///gemini-2.5-pro", Some("submit"));
-    let ollama_msg = default_turn_budget_message("ollama://qwen3-coder:30b", Some("submit"));
-    let openai_msg = default_turn_budget_message("openai://gpt-4o", Some("submit"));
+    let anthropic_msg = default_turn_budget_message("anthropic://claude-opus-4");
+    let gemini_msg = default_turn_budget_message("gemini:///gemini-2.5-pro");
+    let ollama_msg = default_turn_budget_message("ollama://qwen3-coder:30b");
+    let openai_msg = default_turn_budget_message("openai://gpt-4o");
 
     assert!(anthropic_msg.contains("<system-reminder>"), "anthropic should use XML");
     assert!(gemini_msg.contains("<system-reminder>"), "gemini should use XML");
     assert!(!ollama_msg.contains('<'), "ollama should use plain text");
     assert!(!openai_msg.contains('<'), "openai should use plain text");
 
-    assert!(anthropic_msg.contains("submit"), "tool name must appear");
-    assert!(ollama_msg.contains("submit"), "tool name must appear");
+    assert!(!anthropic_msg.contains("<tool>"), "should not name a specific tool");
+    assert!(anthropic_msg.contains("output format"), "should defer to the output format constraint");
+    assert!(!ollama_msg.contains("call the `"), "should not name a specific tool");
+    assert!(ollama_msg.contains("output format"), "should defer to the output format constraint");
 }
 
 /// Custom `turn_budget_message` is wrapped in XML for Anthropic/Gemini and
@@ -401,8 +397,8 @@ fn maybe_inject_injects_on_final_turn_only() {
     assert_eq!(msgs_first[0].content, "start", "original content must be preserved");
     assert!(matches!(msgs_first[1].role, Role::User), "reminder should be a user message");
     assert!(
-        msgs_first[1].content.contains("final_answer"),
-        "reminder should name the exit tool"
+        msgs_first[1].content.contains("FINAL TURN") || msgs_first[1].content.contains("TURN LIMIT"),
+        "reminder should signal final turn"
     );
 
     let history_empty = FlowHistory::new();

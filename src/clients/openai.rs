@@ -42,7 +42,7 @@ impl Client for OpenAiClient {
 
         let tools_enabled =
             !self.options.tools.is_empty() && self.options.tool_choice != ToolChoice::Disabled;
-        let wants_json_output = !tools_enabled && self.options.wants_json_output();
+        let wants_json_output = self.options.wants_json_output();
         let payload = build_payload(&self.model, &self.options, messages, tools_enabled);
 
         let response: Value = self
@@ -59,7 +59,7 @@ impl Client for OpenAiClient {
             .await
             .map_err(|e| ClientError::Llm(e.to_string()))?;
 
-        map_response(response, tools_enabled, wants_json_output)
+        map_response(response, wants_json_output)
     }
 
     async fn embed(&self, request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {
@@ -140,7 +140,8 @@ fn build_payload(
             ToolChoice::Auto => Value::String("auto".to_string()),
             ToolChoice::Disabled => Value::String("none".to_string()),
         };
-    } else if options.wants_json_output() {
+    }
+    if options.wants_json_output() {
         payload["text"] = json!({
             "format": match &options.output_schema {
                 Some(schema) => json!({
@@ -258,7 +259,6 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 
 fn map_response(
     response: Value,
-    tools_enabled: bool,
     wants_json_output: bool,
 ) -> Result<ClientResponse, ClientError> {
     let usage = response.get("usage").map(usage_from_value);
@@ -283,10 +283,6 @@ fn map_response(
         .with_usage(usage)
         .with_provider_model(provider_model)
         .with_raw_metadata(metadata));
-    }
-
-    if tools_enabled {
-        return Err(ClientError::MissingToolCalls(collect_text(&response)));
     }
 
     let text = collect_text(&response).ok_or(ClientError::EmptyResponse)?;
@@ -552,7 +548,7 @@ mod tests {
 
         let payload = build_payload("custom-model", &options, &[Message::user("hi")], true);
 
-        assert!(payload.get("text").is_none());
+        assert!(payload.get("text").is_some(), "text format should be set alongside tools");
         assert_eq!(payload["tools"][0]["name"], "submit");
         assert_eq!(payload["tool_choice"], "required");
     }
@@ -565,7 +561,7 @@ mod tests {
             "usage": {"input_tokens": 10, "output_tokens": 5},
             "output": [{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"}]
         });
-        let mapped = map_response(response, true, false).unwrap();
+        let mapped = map_response(response, false).unwrap();
         assert_eq!(mapped.usage.unwrap().total(), Some(15));
         assert_eq!(mapped.provider_model.as_deref(), Some("gpt-x"));
         match mapped.output {
@@ -581,7 +577,7 @@ mod tests {
             "model": "gpt-x",
             "output_text": "plain text"
         });
-        let mapped = map_response(response, false, false).unwrap();
+        let mapped = map_response(response, false).unwrap();
         match mapped.output {
             ClientOutput::Output(Value::String(text)) => assert_eq!(text, "plain text"),
             _ => panic!("expected string output"),

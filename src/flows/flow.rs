@@ -9,7 +9,8 @@ use super::builder::FlowBuilder;
 use super::compactor::count_complete_turns;
 use super::history::FlowHistory;
 use super::nodes::{
-    AgentInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo, MapInfo, SuspendInfo, WorkInfo,
+    AgentInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo, MapInfo, SuspendInfo, ToolWorkInfo,
+    WorkInfo,
 };
 use crate::flows::NodeId;
 use crate::flows::errors::{AgentError, BuildError, FlowError};
@@ -18,7 +19,7 @@ use crate::flows::state::{AgentContinuation, AgentState, Callable, FlowState, Wa
 use crate::flows::validation::validate;
 use crate::{
     clients::{
-        ClientFactory, ClientOptions, ClientOutput, Message, Role, ToolCall, TokenUsage,
+        ClientFactory, ClientOptions, ClientOutput, Message, Role,
         ToolChoice, materialize_messages,
     },
     context::Context,
@@ -112,6 +113,54 @@ impl FlowGraph {
         } else {
             false
         }
+    }
+
+    async fn handle_tool_work(
+        node: &ToolWorkInfo,
+        ctx: Context,
+        states: &mut FlowState,
+    ) -> Result<(), FlowError> {
+        let state = states.get_state(node.name).ok_or_else(|| {
+            FlowError::NotFound(format!(
+                "tool work node '{}' has no input state",
+                node.name.0
+            ))
+        })?;
+        match (node.func)(&state, ctx).await {
+            Ok(value) => {
+                if !states.set_state(node.exit_name, value, Some(node.name)) {
+                    return Err(FlowError::Internal {
+                        handler: "handle_tool_work",
+                        detail: "frame stack empty on set_state".into(),
+                    });
+                }
+            }
+            Err(e) if !e.is_fatal() => {
+                tracing::warn!(
+                    node = %node.name.0,
+                    error = %e,
+                    kind = %e.error_kind(),
+                    "tool work: non-fatal error will be forwarded to model"
+                );
+                if !states.set_state(node.exit_name, e.to_json(&node.tool_name), Some(node.name)) {
+                    return Err(FlowError::Internal {
+                        handler: "handle_tool_work",
+                        detail: "frame stack empty on set_state".into(),
+                    });
+                }
+                if !states.add_tool_error_exit(node.agent_id, node.exit_name) {
+                    return Err(FlowError::Internal {
+                        handler: "handle_tool_work",
+                        detail: "agent not found for error_exits update".into(),
+                    });
+                }
+            }
+            Err(e) => return Err(FlowError::Internal {
+                handler: "handle_tool_work",
+                detail: e.to_string(),
+            }),
+        }
+        Ok(())
     }
 
     async fn handle_work(
@@ -307,20 +356,6 @@ impl FlowGraph {
             }
 
             Some(AgentState {
-                continuation: AgentContinuation::Exit(value),
-                ..
-            }) => {
-                states.remove_agent_state(node.id);
-                if !states.set_state(node.exit, value, Some(node.id)) {
-                    return Err(FlowError::Internal {
-                        handler: "handle_agent",
-                        detail: "Exit: frame stack empty on set_state".into(),
-                    });
-                }
-                Ok(FlowStep::Continue)
-            }
-
-            Some(AgentState {
                 ref session_id,
                 continuation: AgentContinuation::Dispatch,
                 ..
@@ -335,14 +370,16 @@ impl FlowGraph {
                     AgentContinuation::PendingTool {
                         ref active,
                         ref waiting,
+                        ref error_exits,
                     },
                 ..
             }) => {
                 let session_id = session_id.clone();
                 let active = active.clone();
                 let waiting = waiting.clone();
+                let error_exits = error_exits.clone();
                 Self::handle_pending_tools(
-                    node, flow, history, states, session_id, active, waiting,
+                    node, flow, history, states, session_id, active, waiting, error_exits,
                 )
             }
         }
@@ -356,6 +393,7 @@ impl FlowGraph {
         session_id: String,
         mut active: HashMap<NodeId, (String, String)>,
         mut waiting: HashMap<NodeId, VecDeque<WaitingCall>>,
+        mut error_exits: HashSet<String>,
     ) -> Result<FlowStep, FlowError> {
         let agent_name = flow.interner.name_of(node.id);
         let mut completions: Vec<(NodeId, String)> = Vec::new();
@@ -381,19 +419,26 @@ impl FlowGraph {
                     handler: "handle_pending_tools",
                     detail: format!("no ToolInfo for exit_id {:?}", exit_id),
                 })?;
-            let mut msg = match (tool_info.to_message)(value) {
-                Ok(m) => m,
-                Err(e) if !e.is_fatal() => {
-                    tracing::warn!(
-                        agent = %agent_name,
-                        call_id = %call_id,
-                        error = %e,
-                        kind = %e.error_kind(),
-                        "tool error sent to model"
-                    );
-                    e.into_error_message(&tool_info.definition.name)
+            let mut msg = if error_exits.remove(call_id.as_str()) {
+                Message::tool_output(String::new(), value.to_string())
+            } else {
+                match (tool_info.to_message)(value) {
+                    Ok(m) => m,
+                    Err(e) if !e.is_fatal() => {
+                        tracing::warn!(
+                            agent = %agent_name,
+                            call_id = %call_id,
+                            error = %e,
+                            kind = %e.error_kind(),
+                            "tool error sent to model"
+                        );
+                        e.into_error_message(&tool_info.definition.name)
+                    }
+                    Err(e) => return Err(FlowError::Internal {
+                        handler: "handle_pending_tools",
+                        detail: e.to_string(),
+                    }),
                 }
-                Err(e) => return Err(FlowError::Tool(e)),
             };
             msg.role = Role::Tool { call_id };
             history.push(&session_id, agent_name, msg);
@@ -424,7 +469,7 @@ impl FlowGraph {
             s.continuation = if active.is_empty() {
                 AgentContinuation::Dispatch
             } else {
-                AgentContinuation::PendingTool { active, waiting }
+                AgentContinuation::PendingTool { active, waiting, error_exits }
             };
         }
         states.reinsert_state(node.id);
@@ -449,16 +494,11 @@ pub(crate) fn maybe_inject_turn_budget_message(
     if completed + 1 < budget as usize {
         return;
     }
-    let exit_tool = node
-        .tool_lookup
-        .iter()
-        .find(|&(_, &(_, exit_id))| exit_id == node.exit)
-        .map(|(name, _)| name.as_str());
     let text = node
         .turn_budget_message
         .as_deref()
         .map(|msg| wrap_for_provider(&node.model, msg))
-        .unwrap_or_else(|| default_turn_budget_message(&node.model, exit_tool));
+        .unwrap_or_else(|| default_turn_budget_message(&node.model));
     tracing::warn!(
         agent = %agent_name,
         completed_turns = completed,
@@ -476,69 +516,20 @@ pub(crate) fn wrap_for_provider(model_url: &str, text: &str) -> String {
     }
 }
 
-pub(crate) fn default_turn_budget_message(model_url: &str, exit_tool: Option<&str>) -> String {
-    let tool_name = exit_tool.unwrap_or("the final answer tool");
+pub(crate) fn default_turn_budget_message(model_url: &str) -> String {
     if model_url.starts_with("anthropic://") || model_url.starts_with("gemini://") {
-        format!(
-            "<system-reminder>\
-             <critical>TURN LIMIT REACHED</critical>\
-             <constraint>This is your final response turn. \
-             You MUST call <tool>{tool_name}</tool> exactly once with your best answer. \
-             Do not answer in plain text.</constraint>\
-             </system-reminder>"
-        )
+        "<system-reminder>\
+         <critical>TURN LIMIT REACHED</critical>\
+         <constraint>This is your final response turn. \
+         Do not call any more tools. \
+         Provide your best answer now, following the output format already specified.</constraint>\
+         </system-reminder>"
+            .to_string()
     } else {
-        format!(
-            "FINAL TURN: you must now call the `{tool_name}` tool exactly once \
-             with your best answer based on the conversation so far. \
-             Do not write prose — issue the tool call now."
-        )
+        "FINAL TURN: do not call any more tools. \
+         Provide your best answer now, following the output format already specified."
+            .to_string()
     }
-}
-
-fn complete_via_exit_tool(
-    node: &AgentInfo,
-    session_id: &str,
-    agent_name: &str,
-    thought: Option<String>,
-    usage: Option<TokenUsage>,
-    mut calls: Vec<ToolCall>,
-    exit_idx: usize,
-    history: &mut FlowHistory,
-    states: &mut FlowState,
-) -> Result<FlowStep, FlowError> {
-    if calls.len() > 1 {
-        tracing::warn!(
-            agent = %agent_name,
-            extra = calls.len() - 1,
-            "exit tool called alongside other tool(s); ignoring them"
-        );
-    }
-    let exit_call = calls.swap_remove(exit_idx);
-    history.push(
-        session_id,
-        agent_name,
-        Message {
-            role: Role::AssistantToolCalls {
-                calls: vec![exit_call.clone()],
-            },
-            content: thought.unwrap_or_default(),
-            attachments: Vec::new(),
-            usage,
-        },
-    );
-    history.push(
-        session_id,
-        agent_name,
-        Message::tool_output(
-            exit_call.id,
-            serde_json::to_string(&exit_call.args).unwrap_or_default(),
-        ),
-    );
-    if let Some(s) = states.get_agent_state_mut(node.id) {
-        s.continuation = AgentContinuation::Exit(exit_call.args);
-    }
-    Ok(FlowStep::Continue)
 }
 
 impl FlowGraph {
@@ -557,7 +548,7 @@ impl FlowGraph {
         let tool_choice = if defs.is_empty() {
             ToolChoice::Disabled
         } else {
-            ToolChoice::Required
+            ToolChoice::Auto
         };
         tracing::info!(
             agent = %agent_name,
@@ -657,14 +648,6 @@ impl FlowGraph {
 
             ClientOutput::ToolCalls { thought, calls } => {
                 tracing::debug!(agent = %agent_name, tool_calls = calls.len(), "agent issued tool calls");
-                if let Some(idx) = calls.iter().position(|c| {
-                    node.tool_lookup.get(&c.name).is_some_and(|&(_, eid)| eid == node.exit)
-                }) {
-                    return complete_via_exit_tool(
-                        node, session_id, &agent_name, thought, usage, calls, idx, history, states,
-                    );
-                }
-
                 let atc_msg = Message {
                     role: Role::AssistantToolCalls {
                         calls: calls.clone(),
@@ -708,13 +691,6 @@ impl FlowGraph {
                     };
 
                     if active.contains_key(&exit_id) {
-                        if exit_id == node.exit {
-                            return Err(AgentError::DuplicateToolCall {
-                                agent: agent_name.clone(),
-                                tool: call.name,
-                            }
-                            .into());
-                        }
                         waiting.entry(exit_id).or_default().push_back(WaitingCall {
                             call_id: call.id,
                             args: call.args,
@@ -734,7 +710,7 @@ impl FlowGraph {
 
                 let needs_pending = !active.is_empty();
                 let continuation = if needs_pending {
-                    AgentContinuation::PendingTool { active, waiting }
+                    AgentContinuation::PendingTool { active, waiting, error_exits: HashSet::new() }
                 } else {
                     AgentContinuation::Dispatch
                 };
@@ -801,6 +777,11 @@ impl FlowGraph {
                 FlowNode::Work(info) => {
                     tracing::debug!(node = %node_name, kind = "work", "dispatching node");
                     Self::handle_work(info, ctx, states).await?;
+                    return Ok(FlowStep::Continue);
+                }
+                FlowNode::ToolWork(info) => {
+                    tracing::debug!(node = %node_name, kind = "tool_work", "dispatching node");
+                    Self::handle_tool_work(info, ctx, states).await?;
                     return Ok(FlowStep::Continue);
                 }
                 FlowNode::Map(info) => {

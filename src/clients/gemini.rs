@@ -235,7 +235,6 @@ fn build_fn_decl(tool: &ToolDefinition) -> Result<FunctionDeclaration, ClientErr
 /// Maps the raw Gemini response into a [`ClientOutput`].
 fn map_response(
     response: GenerationResponse,
-    tools_enabled: bool,
     wants_json_output: bool,
 ) -> Result<ClientResponse, ClientError> {
     let usage = response.usage_metadata.as_ref().map(|usage| TokenUsage {
@@ -272,12 +271,6 @@ fn map_response(
         .with_provider_model(provider_model)
         .with_raw_metadata(raw_metadata));
     }
-    if tools_enabled {
-        let text = response.text();
-        let content = if text.is_empty() { None } else { Some(text) };
-        tracing::warn!(model_output = ?content, "LLM response contained no tool calls");
-        return Err(ClientError::MissingToolCalls(content));
-    }
     let text = response.text();
     if text.is_empty() {
         return Err(ClientError::EmptyResponse);
@@ -291,12 +284,12 @@ fn map_response(
     .with_raw_metadata(raw_metadata))
 }
 
-fn wants_json_output(options: &ClientOptions, tools_enabled: bool) -> bool {
-    !tools_enabled && options.wants_json_output()
+fn wants_json_output(options: &ClientOptions) -> bool {
+    options.wants_json_output()
 }
 
-fn response_schema(options: &ClientOptions, tools_enabled: bool) -> Option<Value> {
-    if !wants_json_output(options, tools_enabled) {
+fn response_schema(options: &ClientOptions) -> Option<Value> {
+    if !wants_json_output(options) {
         return None;
     }
     options
@@ -341,7 +334,8 @@ impl GeminiClient {
                     .with_tool(tool_spec)
                     .with_function_calling_mode(mode);
             }
-        } else if wants_json_output {
+        }
+        if wants_json_output {
             builder = builder.with_response_mime_type("application/json");
             if let Some(schema) = response_schema {
                 builder = builder.with_response_schema(schema);
@@ -375,13 +369,13 @@ impl Client for GeminiClient {
         let tools_enabled =
             !self.options.tools.is_empty() && self.options.tool_choice != ToolChoice::Disabled;
         validate_tools(Provider::Gemini, &self.options.tools)?;
-        let wants_json_output = wants_json_output(&self.options, tools_enabled);
-        let response_schema = response_schema(&self.options, tools_enabled);
+        let wants_json_output = wants_json_output(&self.options);
+        let response_schema = response_schema(&self.options);
         let gemini_messages = build_gemini_messages(messages);
         let response = self
             .call_api(gemini_messages, tools_enabled, wants_json_output, response_schema)
             .await?;
-        map_response(response, tools_enabled, wants_json_output)
+        map_response(response, wants_json_output)
     }
 
     async fn embed(&self, request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {
@@ -596,8 +590,8 @@ mod tests {
     #[test]
     fn response_mode_uses_explicit_json_setting() {
         let no_schema = ClientOptions::default();
-        assert!(!wants_json_output(&no_schema, false));
-        assert!(response_schema(&no_schema, false).is_none());
+        assert!(!wants_json_output(&no_schema));
+        assert!(response_schema(&no_schema).is_none());
 
         let with_schema = ClientOptions::default()
             .with_response_format(crate::clients::ResponseFormat::Json)
@@ -608,8 +602,8 @@ mod tests {
                 },
                 "required": ["answer"]
             }));
-        assert!(wants_json_output(&with_schema, false));
-        assert!(response_schema(&with_schema, false).is_some());
+        assert!(wants_json_output(&with_schema));
+        assert!(response_schema(&with_schema).is_some());
     }
 
     /// Input schema hints do not change Gemini response mode on their own.
@@ -617,7 +611,7 @@ mod tests {
     fn input_schema_alone_does_not_enable_json_output() {
         let with_input_schema = ClientOptions::default()
             .with_input_schema(json!({ "type": "object" }));
-        assert!(!wants_json_output(&with_input_schema, false));
-        assert!(response_schema(&with_input_schema, false).is_none());
+        assert!(!wants_json_output(&with_input_schema));
+        assert!(response_schema(&with_input_schema).is_none());
     }
 }

@@ -62,10 +62,8 @@ impl ToolError {
         }
     }
 
-    /// Serializes this error as a structured JSON string for use as a tool-result payload.
-    ///
-    /// `tool_name` is the registered name of the tool (e.g. `"ReadFile"`).
-    pub fn to_json(&self, tool_name: &str) -> String {
+    /// Serializes this error as a structured JSON value for use as a tool-result payload.
+    pub fn to_json(&self, tool_name: &str) -> Value {
         serde_json::json!({
             "tool": tool_name,
             "ok": false,
@@ -73,14 +71,13 @@ impl ToolError {
             "message": self.to_string(),
             "recoverable": true,
         })
-        .to_string()
     }
 
     /// Converts this error into a tool-result [`Message`] that is sent back to the model.
     ///
     /// Only call this for non-fatal errors; fatal errors should abort the flow via `FlowError`.
     pub fn into_error_message(self, tool_name: &str) -> Message {
-        Message::tool_output(String::new(), self.to_json(tool_name))
+        Message::tool_output(String::new(), self.to_json(tool_name).to_string())
     }
 }
 

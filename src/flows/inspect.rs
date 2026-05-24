@@ -195,8 +195,7 @@ impl<'a> FlowInspector<'a> {
                 let agent_name = self.name_in_frame(frame, agent_id);
                 let phase = match &agent_state.continuation {
                     AgentContinuation::Dispatch => PhaseKind::Dispatch,
-                    AgentContinuation::Exit(_) => PhaseKind::Exit,
-                    AgentContinuation::PendingTool { active, waiting } => {
+                    AgentContinuation::PendingTool { active, waiting, .. } => {
                         let mut active_calls = active
                             .values()
                             .map(|(_, call_name)| call_name.clone())
