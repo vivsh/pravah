@@ -436,6 +436,9 @@ pub struct ClientOptions {
     pub response_format: ResponseFormat,
     /// Sampling temperature.
     pub temperature: Option<f32>,
+    /// Name of the output type expected from this agent run.
+    /// Used by clients that need to inject an exit tool.
+    pub(crate) output_type_name: String,
 }
 
 impl ClientOptions {
@@ -568,6 +571,37 @@ pub(super) fn validate_tools(
     Ok(())
 }
 
+/// Injects a synthetic exit-tool into `options`, converting structured-output
+/// delivery into a required tool call.
+///
+/// Moves `output_schema` into a [`ToolDefinition`], sets `tool_choice` to
+/// [`ToolChoice::Required`], clears `output_schema`, and resets
+/// `response_format` to [`ResponseFormat::Text`].
+pub(crate) fn inject_exit_tool(options: &mut ClientOptions) {
+    if options.output_type_name.is_empty() {
+        return;
+    }
+    let name = options.output_type_name.clone();
+    let parameters = options
+        .output_schema
+        .take()
+        .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+    options.tools.push(ToolDefinition {
+        name,
+        description: "Submit your final answer.".to_string(),
+        parameters,
+    });
+    options.tool_choice = ToolChoice::Required;
+    options.response_format = ResponseFormat::Text;
+}
+
+/// Searches `calls` for a tool call whose name matches `name`.
+///
+/// Returns the call's argument payload when found.
+pub(crate) fn extract_exit_tool_call(calls: &[ToolCall], name: &str) -> Option<Value> {
+    calls.iter().find(|c| c.name == name).map(|c| c.args.clone())
+}
+
 #[allow(dead_code)]
 pub(super) fn parse_json_output(text: &str) -> Result<Value, ClientError> {
     serde_json::from_str(text).map_err(|e| {
@@ -634,8 +668,61 @@ pub struct EmbedResponse {
 /// push tool-result messages after dispatch.
 #[async_trait]
 pub trait Client: Send + Sync {
+    /// The parsed model URL used to construct this client.
+    fn model_url(&self) -> &LlmUrl;
+
     /// The provider backing this client instance.
-    fn provider(&self) -> Provider;
+    fn provider(&self) -> Provider {
+        self.model_url().provider.clone()
+    }
+
+    /// Returns `true` when this client uses an exit-tool strategy to collect
+    /// structured output (Ollama always; Gemini before version 3.1).
+    fn uses_exit_tool(&self) -> bool {
+        self.model_url().needs_exit_tool()
+    }
+
+    /// Wraps a reminder message in a provider-appropriate envelope.
+    ///
+    /// Anthropic and Gemini use an XML `<system-reminder>` wrapper; all other
+    /// providers return the text unchanged.
+    fn wrap_system_reminder(&self, text: &str) -> String {
+        match self.provider() {
+            Provider::Anthropic | Provider::Gemini => {
+                format!("<system-reminder><critical>{text}</critical></system-reminder>")
+            }
+            _ => text.to_string(),
+        }
+    }
+
+    /// Returns a default turn-budget reminder message for this provider.
+    ///
+    /// When `exit_tool_name` is `Some`, the message names the exit tool to call.
+    fn default_turn_budget_message(&self, exit_tool_name: Option<&str>) -> String {
+        if let Some(name) = exit_tool_name {
+            let msg = format!(
+                "This is your final response turn. \
+                 Call the `{name}` tool with your final answer now."
+            );
+            return self.wrap_system_reminder(&msg);
+        }
+        match self.provider() {
+            Provider::Anthropic | Provider::Gemini => {
+                "<system-reminder>\
+                 <critical>TURN LIMIT REACHED</critical>\
+                 <constraint>This is your final response turn. \
+                 Do not call any more tools. \
+                 Provide your best answer now, following the output format already specified.</constraint>\
+                 </system-reminder>"
+                    .to_string()
+            }
+            _ => {
+                "FINAL TURN: do not call any more tools. \
+                 Provide your best answer now, following the output format already specified."
+                    .to_string()
+            }
+        }
+    }
 
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError>;
 
@@ -702,7 +789,17 @@ mod tests {
 
     struct DummyFactory;
 
-    struct DummyClient;
+    struct DummyClient {
+        url: LlmUrl,
+    }
+
+    impl DummyClient {
+        fn new() -> Self {
+            Self {
+                url: LlmUrl::parse("openai:///test-model").expect("valid test URL"),
+            }
+        }
+    }
 
     struct MarkerLayer;
 
@@ -713,8 +810,8 @@ mod tests {
 
     #[async_trait]
     impl Client for DummyClient {
-        fn provider(&self) -> Provider {
-            Provider::OpenAi
+        fn model_url(&self) -> &LlmUrl {
+            &self.url
         }
 
         async fn execute(&self, _messages: &[Message]) -> Result<ClientResponse, ClientError> {
@@ -731,7 +828,7 @@ mod tests {
             _model_url: &str,
             _options: ClientOptions,
         ) -> Result<Box<dyn Client>, ClientError> {
-            Ok(Box::new(DummyClient))
+            Ok(Box::new(DummyClient::new()))
         }
     }
 
@@ -923,7 +1020,7 @@ mod tests {
         assert!(factory.marked);
 
         let client = factory
-            .create("openai://test-model", ClientOptions::default())
+            .create("openai:///test-model", ClientOptions::default())
             .expect("layered factory should create a client");
         let response = client
             .execute(&[Message::user("hi")])

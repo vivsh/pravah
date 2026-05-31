@@ -3,7 +3,7 @@ use tokio::time::Duration;
 
 use crate::clients::{
     Client, ClientError, ClientFactory, ClientFactoryLayer, ClientOptions, ClientResponse,
-    EmbedRequest, EmbedResponse, Message, Provider,
+    EmbedRequest, EmbedResponse, LlmUrl, Message,
 };
 
 /// Retry settings for transient client failures.
@@ -75,8 +75,8 @@ struct RetryingClient {
 
 #[async_trait]
 impl Client for RetryingClient {
-    fn provider(&self) -> Provider {
-        self.inner.provider()
+    fn model_url(&self) -> &LlmUrl {
+        self.inner.model_url()
     }
 
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {

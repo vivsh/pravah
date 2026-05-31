@@ -9,8 +9,8 @@ use super::super::tools::ToolDefinition;
 use super::{
     Attachment, Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest,
     EmbedResponse, LlmUrl, Message, Provider, Role, ThinkingLevel, TokenUsage, ToolCall, ToolChoice,
-    configured_base_url, decode_output_text, optional_api_key, parse_json_output,
-    validate_tools,
+    configured_base_url, decode_output_text, extract_exit_tool_call, inject_exit_tool,
+    optional_api_key, parse_json_output, validate_tools,
 };
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
@@ -21,6 +21,8 @@ struct OllamaClient {
     base_url: String,
     model: String,
     options: ClientOptions,
+    url: LlmUrl,
+    exit_tool_name: Option<String>,
 }
 
 impl OllamaClient {
@@ -42,20 +44,29 @@ impl OllamaClient {
     }
 }
 
-pub fn new_client(url: &LlmUrl, options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
+pub fn new_client(url: &LlmUrl, mut options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
+    let exit_tool_name = if url.needs_exit_tool() && !options.output_type_name.is_empty() {
+        let name = options.output_type_name.clone();
+        inject_exit_tool(&mut options);
+        Some(name)
+    } else {
+        None
+    };
     Ok(Box::new(OllamaClient {
         http: HttpClient::new(),
         api_key: optional_api_key(url, "OLLAMA_API_KEY"),
         base_url: configured_base_url(url, DEFAULT_BASE_URL),
         model: url.model.clone(),
         options,
+        url: url.clone(),
+        exit_tool_name,
     }))
 }
 
 #[async_trait]
 impl Client for OllamaClient {
-    fn provider(&self) -> Provider {
-        Provider::Ollama
+    fn model_url(&self) -> &LlmUrl {
+        &self.url
     }
 
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
@@ -69,7 +80,20 @@ impl Client for OllamaClient {
 
         let payload = build_payload(&self.model, &self.options, messages, tools_enabled);
         let response = self.post_json(&endpoint, &payload).await?;
-        map_response(response, wants_json_output)
+        let result = map_response(response, wants_json_output)?;
+
+        if let Some(ref name) = self.exit_tool_name {
+            if let ClientOutput::ToolCalls { calls, .. } = &result.output {
+                if let Some(args) = extract_exit_tool_call(calls, name) {
+                    return Ok(ClientResponse::new(Provider::Ollama, ClientOutput::Output(args))
+                        .with_usage(result.usage)
+                        .with_provider_model(result.provider_model)
+                        .with_raw_metadata(result.raw_metadata));
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     async fn embed(&self, request: &EmbedRequest) -> Result<EmbedResponse, ClientError> {

@@ -100,8 +100,8 @@ struct RateLimitingClient {
 
 #[async_trait]
 impl Client for RateLimitingClient {
-    fn provider(&self) -> Provider {
-        self.inner.provider()
+    fn model_url(&self) -> &LlmUrl {
+        self.inner.model_url()
     }
 
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {

@@ -2,17 +2,16 @@ use async_trait::async_trait;
 
 use crate::clients::{
     Client, ClientError, ClientFactory, ClientFactoryLayer, ClientOptions, ClientResponse,
-    EmbedRequest, EmbedResponse, Message, Provider,
+    EmbedRequest, EmbedResponse, LlmUrl, Message,
 };
-
 struct TracingClient {
     inner: Box<dyn Client>,
 }
 
 #[async_trait]
 impl Client for TracingClient {
-    fn provider(&self) -> Provider {
-        self.inner.provider()
+    fn model_url(&self) -> &LlmUrl {
+        self.inner.model_url()
     }
 
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
@@ -106,7 +105,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::clients::{ClientOutput, Message};
+    use crate::clients::{ClientOutput, Message, Provider};
     use crate::flows::{RateLimit, RateLimitLayer, RetryConfig, RetryLayer};
     use tokio::time::Duration;
 
@@ -117,6 +116,7 @@ mod tests {
     }
 
     struct FlakyClient {
+        url: crate::clients::LlmUrl,
         failures_left: Arc<AtomicUsize>,
         attempts: Arc<AtomicUsize>,
     }
@@ -132,8 +132,8 @@ mod tests {
 
     #[async_trait]
     impl Client for FlakyClient {
-        fn provider(&self) -> Provider {
-            Provider::OpenAi
+        fn model_url(&self) -> &crate::clients::LlmUrl {
+            &self.url
         }
 
         async fn execute(&self, _messages: &[Message]) -> Result<ClientResponse, ClientError> {
@@ -153,10 +153,13 @@ mod tests {
     impl ClientFactory for FlakyFactory {
         fn create(
             &self,
-            _model_url: &str,
+            model_url: &str,
             _options: ClientOptions,
         ) -> Result<Box<dyn Client>, ClientError> {
+            let url = crate::clients::LlmUrl::parse(model_url)
+                .unwrap_or_else(|_| crate::clients::LlmUrl::parse("openai:///test-model").expect("fallback"));
             Ok(Box::new(FlakyClient {
+                url,
                 failures_left: Arc::clone(&self.failures_left),
                 attempts: Arc::clone(&self.attempts),
             }))

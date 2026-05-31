@@ -17,6 +17,7 @@ struct OpenAiClient {
     base_url: String,
     model: String,
     options: ClientOptions,
+    url: LlmUrl,
 }
 
 pub fn new_client(url: &LlmUrl, options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
@@ -27,13 +28,14 @@ pub fn new_client(url: &LlmUrl, options: ClientOptions) -> Result<Box<dyn Client
         base_url: configured_base_url(url, DEFAULT_BASE_URL),
         model: url.model.clone(),
         options,
+        url: url.clone(),
     }))
 }
 
 #[async_trait]
 impl Client for OpenAiClient {
-    fn provider(&self) -> Provider {
-        Provider::OpenAi
+    fn model_url(&self) -> &LlmUrl {
+        &self.url
     }
 
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {

@@ -146,6 +146,32 @@ impl LlmUrl {
     }
 }
 
+/// Returns `true` when Gemini models below version 3.1 need an exit-tool workaround.
+pub(crate) fn gemini_needs_exit_tool(model: &str) -> bool {
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    let model = model.strip_prefix("gemini-").unwrap_or(model);
+    let version = model.split('-').next().unwrap_or(model);
+    let mut parts = version.split('.');
+    let major: u32 = match parts.next().and_then(|s| s.parse().ok()) {
+        Some(n) => n,
+        None => return false,
+    };
+    let minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (major, minor) < (3, 1)
+}
+
+impl LlmUrl {
+    /// Returns `true` when this URL's provider uses an exit-tool strategy to
+    /// collect structured output (Ollama always; Gemini before version 3.1).
+    pub(crate) fn needs_exit_tool(&self) -> bool {
+        match self.provider {
+            crate::clients::Provider::Ollama => true,
+            crate::clients::Provider::Gemini => gemini_needs_exit_tool(&self.model),
+            _ => false,
+        }
+    }
+}
+
 fn parse_provider_scheme(
     scheme: &str,
     original: &str,

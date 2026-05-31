@@ -76,7 +76,6 @@ impl FlowBuilder {
         let config = A::configure();
         let output_str = A::Output::schema_name();
         let output_id = self.flow.interner.intern(&output_str);
-        let exit_tool_name = config.exit_tool.should_use(&config.model_url).then_some(output_str.clone());
         let agent_info = AgentInfo {
             id: name,
             tools: Vec::new(),
@@ -91,7 +90,7 @@ impl FlowBuilder {
             keep_alive: config.keep_alive,
             turn_budget: config.turn_budget,
             turn_budget_message: config.turn_budget_message,
-            exit_tool_name,
+            output_type_name: output_str,
         };
         self.flow
             .nodes

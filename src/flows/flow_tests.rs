@@ -6,15 +6,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::flow::{
-    default_turn_budget_message, maybe_inject_turn_budget_message, wrap_for_provider,
+    maybe_inject_turn_budget_message,
 };
 use super::nodes::{AgentInfo, ToolInfo};
 use super::{Flow, FlowBuilder, FlowError};
 use crate::clients::{
     Attachment, Client, ClientError, ClientFactory, ClientOptions, ClientOutput,
-    ClientResponse, Message, Provider, Role, ToolCall,
+    ClientResponse, LlmUrl, Message, Role, ToolCall,
 };
-use crate::commons::{Agent, AgentConfig, ExitToolMode};
+use crate::commons::{Agent, AgentConfig};
 use crate::context::Context;
 use crate::tools::ToolOutput;
 
@@ -32,6 +32,16 @@ struct CapturingFactory {
 
 struct CapturingClient {
     mode: ResponseMode,
+    url: LlmUrl,
+    exit_tool_name: Option<String>,
+}
+
+impl CapturingClient {
+    fn for_url(mode: ResponseMode, model_url: &str) -> Self {
+        let url = LlmUrl::parse(model_url)
+            .unwrap_or_else(|_| LlmUrl::parse("openai:///test-model").expect("fallback URL is valid"));
+        Self { mode, url, exit_tool_name: None }
+    }
 }
 
 impl CapturingFactory {
@@ -52,39 +62,56 @@ impl CapturingFactory {
 
 #[async_trait]
 impl Client for CapturingClient {
-    fn provider(&self) -> Provider {
-        Provider::OpenAi
+    fn model_url(&self) -> &LlmUrl {
+        &self.url
     }
 
     async fn execute(&self, _messages: &[Message]) -> Result<ClientResponse, ClientError> {
-        match &self.mode {
-            ResponseMode::Output(value) => Ok(ClientResponse::new(
-                Provider::OpenAi,
+        let response = match &self.mode {
+            ResponseMode::Output(value) => ClientResponse::new(
+                self.provider(),
                 ClientOutput::Output(value.clone()),
-            )),
-            ResponseMode::ToolCalls(calls) => Ok(ClientResponse::new(
-                Provider::OpenAi,
+            ),
+            ResponseMode::ToolCalls(calls) => ClientResponse::new(
+                self.provider(),
                 ClientOutput::ToolCalls {
                     thought: None,
                     calls: calls.clone(),
                 },
-            )),
+            ),
+        };
+        if let Some(ref name) = self.exit_tool_name {
+            if let ClientOutput::ToolCalls { calls, .. } = &response.output {
+                if let Some(args) = crate::clients::extract_exit_tool_call(calls, name) {
+                    return Ok(ClientResponse::new(self.provider(), ClientOutput::Output(args)));
+                }
+            }
         }
+        Ok(response)
     }
 }
 
 impl ClientFactory for CapturingFactory {
     fn create(
         &self,
-        _model_url: &str,
+        model_url: &str,
         options: ClientOptions,
     ) -> Result<Box<dyn Client>, ClientError> {
         self.options
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(options);
+            .push(options.clone());
+        let url = LlmUrl::parse(model_url)
+            .unwrap_or_else(|_| LlmUrl::parse("openai:///test-model").expect("fallback URL is valid"));
+        let exit_tool_name = if url.needs_exit_tool() && !options.output_type_name.is_empty() {
+            Some(options.output_type_name.clone())
+        } else {
+            None
+        };
         Ok(Box::new(CapturingClient {
             mode: self.mode.clone(),
+            url,
+            exit_tool_name,
         }))
     }
 }
@@ -103,7 +130,7 @@ impl Agent for PlainAgentInput {
     type Output = PlainAgentOutput;
 
     fn configure() -> AgentConfig {
-        AgentConfig::new("Answer briefly.", "openai://test-model")
+        AgentConfig::new("Answer briefly.", "openai:///test-model")
     }
 }
 
@@ -138,7 +165,7 @@ impl Agent for MessageAgentInput {
     }
 
     fn configure() -> AgentConfig {
-        AgentConfig::new("Answer briefly.", "openai://test-model")
+        AgentConfig::new("Answer briefly.", "openai:///test-model")
     }
 }
 
@@ -178,7 +205,7 @@ impl Agent for ToolAgentInput {
     type Output = ToolAgentOutput;
 
     fn configure() -> AgentConfig {
-        AgentConfig::new("Use tools before answering.", "openai://test-model")
+        AgentConfig::new("Use tools before answering.", "openai:///test-model")
     }
 }
 
@@ -196,8 +223,7 @@ impl Agent for ExitToolAgentInput {
     type Output = ExitToolAgentOutput;
 
     fn configure() -> AgentConfig {
-        AgentConfig::new("Answer concisely.", "gemini://gemini-2.5-pro")
-            .with_exit_tool_mode(ExitToolMode::Auto)
+        AgentConfig::new("Answer concisely.", "gemini:///gemini-2.5-pro")
     }
 }
 
@@ -326,10 +352,15 @@ async fn schema_and_tools_dispatch_with_tools_includes_lookup() {
 /// imperative text for Ollama/OpenAI model URLs.
 #[test]
 fn default_turn_budget_message_is_provider_specific() {
-    let anthropic_msg = default_turn_budget_message("anthropic://claude-opus-4", None);
-    let gemini_msg = default_turn_budget_message("gemini:///gemini-2.5-pro", None);
-    let ollama_msg = default_turn_budget_message("ollama://qwen3-coder:30b", None);
-    let openai_msg = default_turn_budget_message("openai://gpt-4o", None);
+    let anthropic = CapturingClient::for_url(ResponseMode::Output(json!({})), "anthropic:///claude-opus-4");
+    let gemini = CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro");
+    let ollama = CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///qwen3-coder:30b");
+    let openai = CapturingClient::for_url(ResponseMode::Output(json!({})), "openai:///gpt-4o");
+
+    let anthropic_msg = anthropic.default_turn_budget_message(None);
+    let gemini_msg = gemini.default_turn_budget_message(None);
+    let ollama_msg = ollama.default_turn_budget_message(None);
+    let openai_msg = openai.default_turn_budget_message(None);
 
     assert!(anthropic_msg.contains("<system-reminder>"), "anthropic should use XML");
     assert!(gemini_msg.contains("<system-reminder>"), "gemini should use XML");
@@ -341,8 +372,10 @@ fn default_turn_budget_message_is_provider_specific() {
     assert!(!ollama_msg.contains("call the `"), "should not name a specific tool");
     assert!(ollama_msg.contains("output format"), "should defer to the output format constraint");
 
-    let exit_msg_gemini = default_turn_budget_message("gemini://gemini-2.5-pro", Some("MyOutput"));
-    let exit_msg_openai = default_turn_budget_message("openai://gpt-4o", Some("MyOutput"));
+    let gemini_exit = CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro");
+    let openai_exit = CapturingClient::for_url(ResponseMode::Output(json!({})), "openai:///gpt-4o");
+    let exit_msg_gemini = gemini_exit.default_turn_budget_message(Some("MyOutput"));
+    let exit_msg_openai = openai_exit.default_turn_budget_message(Some("MyOutput"));
     assert!(exit_msg_gemini.contains("MyOutput"), "exit tool reminder should name the tool");
     assert!(exit_msg_gemini.contains("<system-reminder>"), "gemini exit reminder should use XML");
     assert!(exit_msg_openai.contains("MyOutput"), "exit tool reminder should name the tool");
@@ -354,21 +387,25 @@ fn default_turn_budget_message_is_provider_specific() {
 #[test]
 fn wrap_for_provider_wraps_xml_providers_only() {
     let raw = "you must stop now";
+    let anthropic = CapturingClient::for_url(ResponseMode::Output(json!({})), "anthropic:///claude-opus-4");
+    let gemini = CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro");
+    let openai = CapturingClient::for_url(ResponseMode::Output(json!({})), "openai:///gpt-4o");
+    let ollama = CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///qwen3:8b");
     assert!(
-        wrap_for_provider("anthropic://claude-opus-4", raw).contains("<system-reminder>"),
+        anthropic.wrap_system_reminder(raw).contains("<system-reminder>"),
         "anthropic should be wrapped"
     );
     assert!(
-        wrap_for_provider("gemini://gemini-2.5-pro", raw).contains("<system-reminder>"),
+        gemini.wrap_system_reminder(raw).contains("<system-reminder>"),
         "gemini should be wrapped"
     );
     assert_eq!(
-        wrap_for_provider("openai://gpt-4o", raw),
+        openai.wrap_system_reminder(raw),
         raw,
         "openai should be unchanged"
     );
     assert_eq!(
-        wrap_for_provider("ollama://qwen3:8b", raw),
+        ollama.wrap_system_reminder(raw),
         raw,
         "ollama should be unchanged"
     );
@@ -408,21 +445,22 @@ fn maybe_inject_injects_on_final_turn_only() {
         preamble: "".into(),
         make_environment: |_| None,
         input_schema: serde_json::json!({}),
-        model: "ollama://qwen3:8b".into(),
+        model: "ollama:///qwen3:8b".into(),
         exit: exit_id,
         output_schema: serde_json::json!({}),
         tool_lookup,
         keep_alive: false,
         turn_budget: Some(2),
         turn_budget_message: None,
-        exit_tool_name: None,
+        output_type_name: "".into(),
     };
 
     let mut history = FlowHistory::new();
     history.push(session_id, "test_agent", Message::assistant("thinking..."));
 
+    let client = CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///qwen3:8b");
     let mut msgs_first: Vec<Message> = vec![Message::user("start")];
-    maybe_inject_turn_budget_message(&node, "test_agent", session_id, &history, &mut msgs_first);
+    maybe_inject_turn_budget_message(&node, &client, "test_agent", session_id, &history, &mut msgs_first);
     assert_eq!(msgs_first.len(), 2, "reminder should be a new message");
     assert_eq!(msgs_first[0].content, "start", "original content must be preserved");
     assert!(matches!(msgs_first[1].role, Role::User), "reminder should be a user message");
@@ -435,6 +473,7 @@ fn maybe_inject_injects_on_final_turn_only() {
     let mut msgs_early: Vec<Message> = vec![Message::user("start")];
     maybe_inject_turn_budget_message(
         &node,
+        &client,
         "test_agent",
         session_id,
         &history_empty,
@@ -482,14 +521,14 @@ fn maybe_inject_preserves_tool_payloads() {
         preamble: "".into(),
         make_environment: |_| None,
         input_schema: serde_json::json!({}),
-        model: "gemini://gemini-2.5-pro".into(),
+        model: "gemini:///gemini-2.5-pro".into(),
         exit: exit_id,
         output_schema: serde_json::json!({}),
         tool_lookup,
         keep_alive: false,
         turn_budget: Some(2),
         turn_budget_message: None,
-        exit_tool_name: None,
+        output_type_name: "".into(),
     };
 
     let mut history = FlowHistory::new();
@@ -516,8 +555,9 @@ fn maybe_inject_preserves_tool_payloads() {
         Message::tool_output("call-1".into(), r#"{"result":"ok"}"#),
     );
 
+    let client = CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro");
     let mut session_msgs = history.for_session(session_id);
-    maybe_inject_turn_budget_message(&node, "test_agent", session_id, &history, &mut session_msgs);
+    maybe_inject_turn_budget_message(&node, &client, "test_agent", session_id, &history, &mut session_msgs);
 
     assert_eq!(session_msgs.len(), 3, "reminder should be appended after the tool result");
     assert!(matches!(session_msgs[1].role, Role::Tool { .. }), "tool message must stay a tool result");
@@ -529,8 +569,8 @@ fn maybe_inject_preserves_tool_payloads() {
     );
 }
 
-/// An agent with `exit_tool` configured sends a synthetic submit tool in the
-/// tool list, forces `Required` tool choice, and omits structured-text output schema.
+/// An agent using a provider that requires exit-tool sends `output_type_name` in
+/// options; the capturing client extracts the tool call and returns it as output.
 #[tokio::test]
 async fn exit_tool_injects_submit_tool_in_options() {
     let exit_args = json!({ "result": "done" });
@@ -552,10 +592,19 @@ async fn exit_tool_injects_submit_tool_in_options() {
     let captured = factory.captured();
     assert_eq!(captured.len(), 1);
     let options = &captured[0];
-    assert_eq!(options.tool_choice, crate::clients::ToolChoice::Required, "exit-tool agent must use Required");
-    assert!(options.output_schema.is_none(), "exit-tool path must not request structured text output");
-    let submit_tool = options.tools.iter().find(|t| t.name == "ExitToolAgentOutput");
-    assert!(submit_tool.is_some(), "synthetic submit tool should be present in tool list");
+    assert_eq!(
+        options.output_type_name, "ExitToolAgentOutput",
+        "dispatch must pass output_type_name to the factory"
+    );
+    assert!(
+        options.output_schema.is_some(),
+        "dispatch must always pass output_schema"
+    );
+    assert_ne!(
+        options.tool_choice,
+        crate::clients::ToolChoice::Required,
+        "dispatch must not force Required; that is the client's responsibility"
+    );
 }
 
 /// `maybe_inject_turn_budget_message` fires for exit-tool agents that have no
@@ -578,19 +627,20 @@ fn maybe_inject_fires_for_exit_tool_agent_without_real_tools() {
         preamble: "".into(),
         make_environment: |_| None,
         input_schema: serde_json::json!({}),
-        model: "openai://test".into(),
+        model: "ollama:///test".into(),
         exit: exit_id,
         output_schema: serde_json::json!({}),
         tool_lookup: HashMap::new(),
         keep_alive: false,
         turn_budget: Some(1),
         turn_budget_message: None,
-        exit_tool_name: Some("ExitOutput".into()),
+        output_type_name: "ExitOutput".into(),
     };
 
+    let client = CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///test");
     let history = FlowHistory::new();
     let mut msgs: Vec<Message> = vec![Message::user("start")];
-    maybe_inject_turn_budget_message(&node, "agent", session_id, &history, &mut msgs);
+    maybe_inject_turn_budget_message(&node, &client, "agent", session_id, &history, &mut msgs);
     assert_eq!(msgs.len(), 2, "reminder should be injected for exit-tool agent with no real tools");
     assert!(msgs[1].content.contains("ExitOutput"), "reminder should name the exit tool");
 }
