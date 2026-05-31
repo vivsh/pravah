@@ -14,14 +14,14 @@ use crate::clients::{
     Attachment, Client, ClientError, ClientFactory, ClientOptions, ClientOutput,
     ClientResponse, Message, Provider, Role, ToolCall,
 };
-use crate::commons::{Agent, AgentConfig};
+use crate::commons::{Agent, AgentConfig, ExitToolMode};
 use crate::context::Context;
 use crate::tools::ToolOutput;
 
 #[derive(Clone)]
 enum ResponseMode {
     Output(Value),
-    ToolCall { name: String, args: Value },
+    ToolCalls(Vec<ToolCall>),
 }
 
 #[derive(Clone)]
@@ -62,16 +62,11 @@ impl Client for CapturingClient {
                 Provider::OpenAi,
                 ClientOutput::Output(value.clone()),
             )),
-            ResponseMode::ToolCall { name, args } => Ok(ClientResponse::new(
+            ResponseMode::ToolCalls(calls) => Ok(ClientResponse::new(
                 Provider::OpenAi,
                 ClientOutput::ToolCalls {
                     thought: None,
-                    calls: vec![ToolCall {
-                        id: "call-1".into(),
-                        name: name.clone(),
-                        args: args.clone(),
-                        thought_signatures: None,
-                    }],
+                    calls: calls.clone(),
                 },
             )),
         }
@@ -184,6 +179,33 @@ impl Agent for ToolAgentInput {
 
     fn configure() -> AgentConfig {
         AgentConfig::new("Use tools before answering.", "openai://test-model")
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+struct ExitToolAgentInput {
+    query: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+struct ExitToolAgentOutput {
+    result: String,
+}
+
+impl Agent for ExitToolAgentInput {
+    type Output = ExitToolAgentOutput;
+
+    fn configure() -> AgentConfig {
+        AgentConfig::new("Answer concisely.", "gemini://gemini-2.5-pro")
+            .with_exit_tool_mode(ExitToolMode::Auto)
+    }
+}
+
+impl Flow for ExitToolAgentInput {
+    type Output = ExitToolAgentOutput;
+
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.agent::<ExitToolAgentInput>()
     }
 }
 
@@ -304,10 +326,10 @@ async fn schema_and_tools_dispatch_with_tools_includes_lookup() {
 /// imperative text for Ollama/OpenAI model URLs.
 #[test]
 fn default_turn_budget_message_is_provider_specific() {
-    let anthropic_msg = default_turn_budget_message("anthropic://claude-opus-4");
-    let gemini_msg = default_turn_budget_message("gemini:///gemini-2.5-pro");
-    let ollama_msg = default_turn_budget_message("ollama://qwen3-coder:30b");
-    let openai_msg = default_turn_budget_message("openai://gpt-4o");
+    let anthropic_msg = default_turn_budget_message("anthropic://claude-opus-4", None);
+    let gemini_msg = default_turn_budget_message("gemini:///gemini-2.5-pro", None);
+    let ollama_msg = default_turn_budget_message("ollama://qwen3-coder:30b", None);
+    let openai_msg = default_turn_budget_message("openai://gpt-4o", None);
 
     assert!(anthropic_msg.contains("<system-reminder>"), "anthropic should use XML");
     assert!(gemini_msg.contains("<system-reminder>"), "gemini should use XML");
@@ -318,6 +340,13 @@ fn default_turn_budget_message_is_provider_specific() {
     assert!(anthropic_msg.contains("output format"), "should defer to the output format constraint");
     assert!(!ollama_msg.contains("call the `"), "should not name a specific tool");
     assert!(ollama_msg.contains("output format"), "should defer to the output format constraint");
+
+    let exit_msg_gemini = default_turn_budget_message("gemini://gemini-2.5-pro", Some("MyOutput"));
+    let exit_msg_openai = default_turn_budget_message("openai://gpt-4o", Some("MyOutput"));
+    assert!(exit_msg_gemini.contains("MyOutput"), "exit tool reminder should name the tool");
+    assert!(exit_msg_gemini.contains("<system-reminder>"), "gemini exit reminder should use XML");
+    assert!(exit_msg_openai.contains("MyOutput"), "exit tool reminder should name the tool");
+    assert!(!exit_msg_openai.contains('<'), "openai exit reminder should use plain text");
 }
 
 /// Custom `turn_budget_message` is wrapped in XML for Anthropic/Gemini and
@@ -386,6 +415,7 @@ fn maybe_inject_injects_on_final_turn_only() {
         keep_alive: false,
         turn_budget: Some(2),
         turn_budget_message: None,
+        exit_tool_name: None,
     };
 
     let mut history = FlowHistory::new();
@@ -459,6 +489,7 @@ fn maybe_inject_preserves_tool_payloads() {
         keep_alive: false,
         turn_budget: Some(2),
         turn_budget_message: None,
+        exit_tool_name: None,
     };
 
     let mut history = FlowHistory::new();
@@ -496,4 +527,70 @@ fn maybe_inject_preserves_tool_payloads() {
         session_msgs[2].content.contains("<system-reminder>"),
         "gemini reminders should keep XML wrapping"
     );
+}
+
+/// An agent with `exit_tool` configured sends a synthetic submit tool in the
+/// tool list, forces `Required` tool choice, and omits structured-text output schema.
+#[tokio::test]
+async fn exit_tool_injects_submit_tool_in_options() {
+    let exit_args = json!({ "result": "done" });
+    let factory = CapturingFactory::new(ResponseMode::ToolCalls(vec![ToolCall {
+        id: "c1".into(),
+        name: "ExitToolAgentOutput".into(),
+        args: exit_args.clone(),
+        thought_signatures: None,
+    }]));
+    let mut runtime = crate::flows::runtime::FlowRuntime::new(ExitToolAgentInput {
+        query: "test".into(),
+    })
+    .expect("runtime should build")
+    .with_factory(factory.clone());
+
+    runtime.next(Context::default()).await.expect("init step");
+    runtime.next(Context::default()).await.expect("dispatch step");
+
+    let captured = factory.captured();
+    assert_eq!(captured.len(), 1);
+    let options = &captured[0];
+    assert_eq!(options.tool_choice, crate::clients::ToolChoice::Required, "exit-tool agent must use Required");
+    assert!(options.output_schema.is_none(), "exit-tool path must not request structured text output");
+    let submit_tool = options.tools.iter().find(|t| t.name == "ExitToolAgentOutput");
+    assert!(submit_tool.is_some(), "synthetic submit tool should be present in tool list");
+}
+
+/// `maybe_inject_turn_budget_message` fires for exit-tool agents that have no
+/// real tools registered, and the reminder names the exit tool.
+#[test]
+fn maybe_inject_fires_for_exit_tool_agent_without_real_tools() {
+    use crate::flows::history::FlowHistory;
+    use crate::flows::interner::Interner;
+    use std::collections::HashMap;
+
+    let session_id = "s1";
+    let mut interner = Interner::new();
+    let agent_id = interner.intern("agent");
+    let exit_id = interner.intern("ExitOutput");
+
+    let node = AgentInfo {
+        id: agent_id,
+        tools: vec![],
+        make_message: |_, _| Ok(Message::user("hi")),
+        preamble: "".into(),
+        make_environment: |_| None,
+        input_schema: serde_json::json!({}),
+        model: "openai://test".into(),
+        exit: exit_id,
+        output_schema: serde_json::json!({}),
+        tool_lookup: HashMap::new(),
+        keep_alive: false,
+        turn_budget: Some(1),
+        turn_budget_message: None,
+        exit_tool_name: Some("ExitOutput".into()),
+    };
+
+    let history = FlowHistory::new();
+    let mut msgs: Vec<Message> = vec![Message::user("start")];
+    maybe_inject_turn_budget_message(&node, "agent", session_id, &history, &mut msgs);
+    assert_eq!(msgs.len(), 2, "reminder should be injected for exit-tool agent with no real tools");
+    assert!(msgs[1].content.contains("ExitOutput"), "reminder should name the exit tool");
 }

@@ -27,11 +27,6 @@ pub(crate) trait DynHistoryStore: Send + Sync {
         &self,
         history: &mut FlowHistory,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-    async fn load_dyn(
-        &self,
-        session_ids: &[&str],
-    ) -> Result<Vec<HistoryEntry>, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 #[async_trait]
@@ -41,13 +36,6 @@ impl<T: HistoryStore> DynHistoryStore for T {
         history: &mut FlowHistory,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.flush(history).await.map_err(|e| Box::new(e) as _)
-    }
-
-    async fn load_dyn(
-        &self,
-        session_ids: &[&str],
-    ) -> Result<Vec<HistoryEntry>, Box<dyn std::error::Error + Send + Sync>> {
-        self.load(session_ids).await.map_err(|e| Box::new(e) as _)
     }
 }
 

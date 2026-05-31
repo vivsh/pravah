@@ -20,7 +20,7 @@ use crate::flows::validation::validate;
 use crate::{
     clients::{
         ClientFactory, ClientOptions, ClientOutput, Message, Role,
-        ToolChoice, materialize_messages,
+        ToolChoice, materialize_messages, schema::sanitize_strict,
     },
     context::Context,
     tools::{SuspendedValue, ToolDefinition},
@@ -484,7 +484,7 @@ pub(crate) fn maybe_inject_turn_budget_message(
     history: &FlowHistory,
     session_msgs: &mut Vec<Message>,
 ) {
-    if node.tools.is_empty() {
+    if node.tools.is_empty() && node.exit_tool_name.is_none() {
         return;
     }
     let Some(budget) = node.turn_budget else {
@@ -498,7 +498,7 @@ pub(crate) fn maybe_inject_turn_budget_message(
         .turn_budget_message
         .as_deref()
         .map(|msg| wrap_for_provider(&node.model, msg))
-        .unwrap_or_else(|| default_turn_budget_message(&node.model));
+        .unwrap_or_else(|| default_turn_budget_message(&node.model, node.exit_tool_name.as_deref()));
     tracing::warn!(
         agent = %agent_name,
         completed_turns = completed,
@@ -516,7 +516,14 @@ pub(crate) fn wrap_for_provider(model_url: &str, text: &str) -> String {
     }
 }
 
-pub(crate) fn default_turn_budget_message(model_url: &str) -> String {
+pub(crate) fn default_turn_budget_message(model_url: &str, exit_tool_name: Option<&str>) -> String {
+    if let Some(name) = exit_tool_name {
+        let msg = format!(
+            "This is your final response turn. \
+             Call the `{name}` tool with your final answer now."
+        );
+        return wrap_for_provider(model_url, &msg);
+    }
     if model_url.starts_with("anthropic://") || model_url.starts_with("gemini://") {
         "<system-reminder>\
          <critical>TURN LIMIT REACHED</critical>\
@@ -544,8 +551,15 @@ impl FlowGraph {
     ) -> Result<FlowStep, FlowError> {
         let agent_name = flow.interner.name_of(node.id).to_string();
 
-        let defs: Vec<ToolDefinition> = node.tools.iter().map(|t| t.definition.clone()).collect();
-        let tool_choice = if defs.is_empty() {
+        let mut defs: Vec<ToolDefinition> = node.tools.iter().map(|t| t.definition.clone()).collect();
+        let tool_choice = if let Some(ref exit_name) = node.exit_tool_name {
+            defs.push(ToolDefinition {
+                name: exit_name.clone(),
+                description: "Submit your final answer.".to_string(),
+                parameters: sanitize_strict(node.output_schema.clone()),
+            });
+            ToolChoice::Required
+        } else if defs.is_empty() {
             ToolChoice::Disabled
         } else {
             ToolChoice::Auto
@@ -563,8 +577,12 @@ impl FlowGraph {
             .with_input_schema(node.input_schema.clone())
             .with_tools(defs)
             .with_tool_choice(tool_choice)
-            .with_output_schema(node.output_schema.clone())
             .with_name(agent_name.clone());
+        let options = if node.exit_tool_name.is_none() {
+            options.with_output_schema(node.output_schema.clone())
+        } else {
+            options
+        };
         let options = if has_prior_history {
             options
         } else {
@@ -647,6 +665,29 @@ impl FlowGraph {
             }
 
             ClientOutput::ToolCalls { thought, calls } => {
+                let exit_call_args: Option<serde_json::Value> = node
+                    .exit_tool_name
+                    .as_ref()
+                    .and_then(|name| calls.iter().find(|c| &c.name == name).map(|c| c.args.clone()));
+
+                if let Some(val) = exit_call_args {
+                    tracing::info!(agent = %agent_name, "exit tool called; agent produced output");
+                    let content = serde_json::to_string(&val).map_err(AgentError::Serialize)?;
+                    let msg = match usage {
+                        Some(u) => Message::assistant(content).with_usage(u),
+                        None => Message::assistant(content),
+                    };
+                    history.push(session_id, &agent_name, msg);
+                    states.remove_agent_state(node.id);
+                    if !states.set_state(node.exit, val, Some(node.id)) {
+                        return Err(FlowError::Internal {
+                            handler: "dispatch_agent",
+                            detail: "ExitTool: frame stack empty on set_state".into(),
+                        });
+                    }
+                    return Ok(FlowStep::Continue);
+                }
+
                 tracing::debug!(agent = %agent_name, tool_calls = calls.len(), "agent issued tool calls");
                 let atc_msg = Message {
                     role: Role::AssistantToolCalls {

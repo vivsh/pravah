@@ -59,6 +59,9 @@ pub(crate) struct AgentInfo {
     pub(crate) keep_alive: bool,
     pub(crate) turn_budget: Option<u32>,
     pub(crate) turn_budget_message: Option<String>,
+    /// When `Some(name)`, structured output is obtained by injecting a synthetic
+    /// tool with this name instead of using `response_mime_type`.
+    pub(crate) exit_tool_name: Option<String>,
 }
 
 pub(crate) struct EitherInfo {

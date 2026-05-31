@@ -103,10 +103,6 @@ impl Frame {
             keep_alive_sessions: IndexMap::new(),
         }
     }
-
-    pub(crate) fn can_exit(&self) -> bool {
-        self.states.contains_key(&self.callable.exit)
-    }
 }
 
 /// Mutable runtime state.
@@ -308,19 +304,8 @@ impl FlowState {
             .and_then(|f| f.states.get_index(i).map(|(&k, v)| (k, v)))
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.top()
-            .into_iter()
-            .flat_map(|f| f.states.keys().copied())
-    }
-
     pub fn callable_index(&self) -> Option<usize> {
         self.top().map(|f| f.callable.index)
-    }
-
-    /// Returns the entry slot for the top frame's callable.
-    pub(crate) fn callable_entry(&self) -> Option<NodeId> {
-        self.top().map(|f| f.callable.entry)
     }
 
     /// Returns the session id of the first active agent in the top frame,
