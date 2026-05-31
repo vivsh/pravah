@@ -80,14 +80,14 @@ That keeps routing deterministic and resumption unambiguous.
 
 ```toml
 [dependencies]
-pravah = "0.3.19"
+pravah = "0.3.23"
 ```
 
 To opt into providers explicitly:
 
 ```toml
 [dependencies]
-pravah = { version = "0.3.19", default-features = false, features = [
+pravah = { version = "0.3.23", default-features = false, features = [
   "provider-openai",
   "provider-anthropic",
   "provider-gemini",
@@ -196,7 +196,6 @@ For a simple persistent conversation without graph construction, use
 | [examples/linear_flow.rs](examples/linear_flow.rs)     | Minimal agent -> work pipeline            |
 | [examples/split_merge.rs](examples/split_merge.rs)     | Fan-out and fan-in composition            |
 | [examples/nested_flow.rs](examples/nested_flow.rs)     | Embedded subflows as reusable nodes       |
-| [examples/human_input.rs](examples/human_input.rs)     | Human approval through suspend and resume |
 | [examples/snapshot.rs](examples/snapshot.rs)           | Save and restore runtime state            |
 | [examples/image_prompt.rs](examples/image_prompt.rs)   | Initial user message with an image        |
 | [examples/ollama_client.rs](examples/ollama_client.rs) | Direct provider client usage              |
