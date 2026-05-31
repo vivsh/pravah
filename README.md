@@ -82,14 +82,14 @@ That keeps routing deterministic and resumption unambiguous.
 
 ```toml
 [dependencies]
-pravah = "0.3.23"
+pravah = "0.4.0"
 ```
 
 To opt into providers explicitly:
 
 ```toml
 [dependencies]
-pravah = { version = "0.3.23", default-features = false, features = [
+pravah = { version = "0.4.0", default-features = false, features = [
   "provider-openai",
   "provider-anthropic",
   "provider-gemini",
@@ -202,8 +202,10 @@ For a simple persistent conversation without graph construction, use
 | [examples/image_prompt.rs](examples/image_prompt.rs)   | Initial user message with an image     |
 | [examples/ollama_client.rs](examples/ollama_client.rs) | Direct provider client usage           |
 | [examples/debate.rs](examples/debate.rs)               | Multi-agent branching workflow         |
-| [examples/story.rs](examples/story.rs)                 | Looping flow with repeated agent turns |
-| [examples/gen_diagrams.rs](examples/gen_diagrams.rs)   | Tree, Mermaid, and DOT graph output    |     | [examples/each_node.rs](examples/each_node.rs) | Fan-out over a list with the `each` node |
+| [examples/story.rs](examples/story.rs)                 | Looping flow with repeated agent turns       |
+| [examples/gen_diagrams.rs](examples/gen_diagrams.rs)   | Tree, Mermaid, and DOT graph output          |
+| [examples/each_node.rs](examples/each_node.rs)         | Fan-out over a list with the `each` node     |
+| [examples/tool_flow.rs](examples/tool_flow.rs)         | Sub-flow registered as an agent tool         |
 
 ## When To Use Pravah
 

@@ -19,7 +19,7 @@ fn node_outputs(node: &FlowNode) -> Vec<NodeId> {
         FlowNode::Fork(f) => f.children.clone(),
         FlowNode::Join(j) => vec![j.target],
         FlowNode::Either(e) => vec![e.left_name, e.right_name],
-        FlowNode::Flow(_) => vec![],
+        FlowNode::Flow(inner) => inner.parent_exit.into_iter().collect(),
         FlowNode::Each(_) => vec![],
     }
 }

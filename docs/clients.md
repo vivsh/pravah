@@ -164,6 +164,28 @@ builder.agent::<MyAgent>().tool::<MyAgent, ReadFile>()
 
 `.tool::<A, T>()` registers the `Tool` impl and wires the work node automatically.
 
+**Shorthand API — `tool_flow` for sub-flow tools:**
+
+Use `.tool_flow::<A, F>()` when the tool implementation is itself a full flow.
+The model sees the tool name derived from `F`, and calling it runs the entire
+sub-flow inline. `F::Output` must implement `ToolOutput`.
+
+```rust
+impl Flow for ArticleRequest {
+    type Output = ArticleSummary;
+
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
+            .agent::<ArticleRequest>()
+            .tool_flow::<ArticleRequest, VerifyClaim>()
+    }
+}
+```
+
+This is equivalent to `.tool_with::<ArticleRequest, VerifyClaim, VerificationResult>().flow::<VerifyClaim>()`.
+
+See [../examples/tool_flow.rs](../examples/tool_flow.rs).
+
 **Explicit API — `tool_with` for flow-backed tools:**
 
 Use `.tool_with::<A, I, O>()` when you want to back a tool with an embedded flow

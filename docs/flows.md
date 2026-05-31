@@ -53,8 +53,9 @@ computes how values move between nodes.
 | `split(f)`          | Fan out to multiple branches                                              |
 | `merge(f)`          | Collect branch outputs once all are ready                                 |
 | `suspend::<I, O>()` | Pause the flow and resume later with `O`                                  |
-| `flow::<F>()`       | Embed another flow as a node                                              |
-| `each::<F>()`       | Run sub-flow `F` once per item in a `Vec<F>`, collect `Vec<F::Output>`    |
+| `flow::<F>()`            | Embed another flow as a node                                                        |
+| `tool_flow::<A, F>()`    | Attach sub-flow `F` as a callable tool on agent `A`                                 |
+| `each::<F>()`            | Run sub-flow `F` once per item in a `Vec<F>`, collect `Vec<F::Output>`              |
 
 `fork` and `join` are binary aliases for `split` and `merge`.
 
@@ -188,6 +189,30 @@ Nested flows preserve the same guarantees as top-level flows: deterministic
 execution, resumability, typed boundaries, and snapshot safety.
 
 See [../examples/nested_flow.rs](../examples/nested_flow.rs).
+
+## Sub-flow Tools
+
+`tool_flow::<A, F>()` registers a flow as a callable tool on agent `A`. The
+agent decides at runtime whether and when to invoke it. Each call runs the
+entire sub-flow inline before returning the result to the agent.
+
+```rust
+impl Flow for ArticleRequest {
+    type Output = ArticleSummary;
+
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
+            .agent::<ArticleRequest>()
+            .tool_flow::<ArticleRequest, VerifyClaim>()
+    }
+}
+```
+
+`tool_flow::<A, F>()` is shorthand for
+`.tool_with::<A, F, F::Output>().flow::<F>()`. The tool name seen by the model
+is derived from `F`'s schema name. `F::Output` must implement `ToolOutput`.
+
+See [../examples/tool_flow.rs](../examples/tool_flow.rs).
 
 ## Each Node
 
