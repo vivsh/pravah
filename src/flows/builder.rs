@@ -11,7 +11,7 @@ use serde_json::Value;
 use super::flow::{Flow, FlowGraph};
 use super::nary::{MergeInputs, SplitOutputs};
 use super::nodes::{
-    AgentInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo, MapInfo, StateNode, SuspendInfo,
+    AgentInfo, EachInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo, MapInfo, StateNode, SuspendInfo,
     ToolInfo, ToolWorkInfo, WorkInfo, build_tool_definition, node,
 };
 use crate::flows::NodeId;
@@ -409,6 +409,47 @@ impl FlowBuilder {
             .nodes
             .insert(input_id, FlowNode::Flow(Arc::new(inner)));
 
+        self
+    }
+
+    /// Fans out over a `Vec<F>` input, running the `F` sub-flow for each element
+    /// sequentially.
+    ///
+    /// The input slot is keyed by the schema name of `Vec<F>` and the output slot
+    /// by `Vec<F::Output>`. Items are processed one at a time; results are collected
+    /// in order and written to the output slot once all items are done.
+    pub fn each<F: Flow>(mut self) -> Self {
+        let input_str = <Vec<F> as JsonSchema>::schema_name();
+        let input_id = self.flow.interner.intern(&input_str);
+
+        if self.flow.nodes.contains_key(&input_id) {
+            self.errors.push(format!("each '{}': duplicate node key", input_str));
+            return self;
+        }
+
+        let exit_str = <Vec<F::Output> as JsonSchema>::schema_name();
+        let exit_id = self.flow.interner.intern(&exit_str);
+
+        let mut inner = match FlowGraph::from_flow::<F>() {
+            Ok(g) => g,
+            Err(e) => {
+                self.errors.push(format!("each '{}': {e}", input_str));
+                return self;
+            }
+        };
+
+        inner.parent_entry = Some(input_id);
+        inner.parent_exit = Some(input_id);
+
+        self.flow.nodes.insert(
+            input_id,
+            FlowNode::Each(Arc::new(EachInfo {
+                id: input_id,
+                exit: exit_id,
+                inner: Arc::new(inner),
+                callable_index: 0,
+            })),
+        );
         self
     }
 

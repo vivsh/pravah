@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use super::flow::FlowGraph;
-use super::nodes::{AgentInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo};
+use super::nodes::{AgentInfo, EachInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo};
 use crate::flows::{NodeId, errors::BuildError};
 
 fn node_outputs(node: &FlowNode) -> Vec<NodeId> {
@@ -20,6 +20,7 @@ fn node_outputs(node: &FlowNode) -> Vec<NodeId> {
         FlowNode::Join(j) => vec![j.target],
         FlowNode::Either(e) => vec![e.left_name, e.right_name],
         FlowNode::Flow(_) => vec![],
+        FlowNode::Each(_) => vec![],
     }
 }
 
@@ -128,6 +129,20 @@ fn check_either(key_str: &str, info: &EitherInfo, graph: &FlowGraph, problems: &
     }
 }
 
+fn check_each(key_str: &str, info: &EachInfo, graph: &FlowGraph, problems: &mut Vec<String>) {
+    if info.id == info.exit {
+        problems.push(format!(
+            "each '{key_str}': exit equals input — node would overwrite its own input"
+        ));
+    }
+    let exit_str = graph.interner.name_of(info.exit);
+    if graph.interner.fwd.get(exit_str).is_none() {
+        problems.push(format!(
+            "each '{key_str}': output type '{exit_str}' is not registered in the parent graph"
+        ));
+    }
+}
+
 fn check_flow(key_str: &str, inner: &Arc<FlowGraph>, graph: &FlowGraph, problems: &mut Vec<String>) {
     let Some(inner_name) = inner.parent_entry else {
         problems.push(format!("flow '{key_str}': missing name or exit_name"));
@@ -171,6 +186,7 @@ pub fn validate_nodes(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> R
             FlowNode::Join(info) => check_join(info, nodes, graph, &mut seen_join_groups, &mut problems),
             FlowNode::Either(info) => check_either(key_str, info, graph, &mut problems),
             FlowNode::Flow(inner) => check_flow(key_str, inner, graph, &mut problems),
+            FlowNode::Each(info) => check_each(key_str, info, graph, &mut problems),
             _ => {}
         }
     }
@@ -196,6 +212,7 @@ fn build_successors(nodes: &HashMap<NodeId, FlowNode>, graph: &FlowGraph) -> Has
                 let exit_str = inner.interner.name_of(inner.exit);
                 graph.interner.fwd.get(exit_str).copied().map(|id| vec![id]).unwrap_or_default()
             }
+            FlowNode::Each(info) => vec![info.exit],
         };
         (key, succs)
     }).collect()

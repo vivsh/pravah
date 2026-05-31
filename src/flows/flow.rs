@@ -9,13 +9,13 @@ use super::builder::FlowBuilder;
 use super::compactor::count_complete_turns;
 use super::history::FlowHistory;
 use super::nodes::{
-    AgentInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo, MapInfo, SuspendInfo, ToolWorkInfo,
-    WorkInfo,
+    AgentInfo, EachInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo, MapInfo, SuspendInfo,
+    ToolWorkInfo, WorkInfo,
 };
 use crate::flows::NodeId;
 use crate::flows::errors::{AgentError, BuildError, FlowError};
 use crate::flows::interner::Interner;
-use crate::flows::state::{AgentContinuation, AgentState, Callable, FlowState, WaitingCall};
+use crate::flows::state::{AgentContinuation, AgentState, Callable, EachState, FlowState, WaitingCall};
 use crate::flows::validation::validate;
 use crate::{
     clients::{
@@ -280,6 +280,98 @@ impl FlowGraph {
             });
         }
         Ok(())
+    }
+
+    /// Fans out over a `Vec<F>` by running the child sub-flow once per item,
+    /// collecting `F::Output` results into `Vec<F::Output>`.
+    ///
+    /// On the first visit, the input slot holds a JSON array of `F` items.
+    /// On each subsequent visit, the feedback slot (`info.id`) holds one completed
+    /// `F::Output` from the child frame that just exited.
+    ///
+    /// Fails if the input slot is absent or is not a JSON array.
+    fn handle_each(info: &EachInfo, states: &mut FlowState) -> Result<FlowStep, FlowError> {
+        let callable = Callable {
+            parent_entry: info.id,
+            parent_exit: info.id,
+            entry: info.inner.entry,
+            exit: info.inner.exit,
+            index: info.callable_index,
+            keep_alive: false,
+        };
+
+        if states.each_queue_has(info.id) {
+            let result = states.take_state(info.id).ok_or_else(|| FlowError::Internal {
+                handler: "handle_each",
+                detail: "feedback slot empty on subsequent visit".into(),
+            })?;
+            let queue = states.each_queue_get_mut(info.id).ok_or_else(|| FlowError::Internal {
+                handler: "handle_each",
+                detail: "each queue missing after has() returned true".into(),
+            })?;
+            queue.results.push(result);
+
+            if let Some(next_item) = queue.remaining.pop_front() {
+                if !states.set_state(info.id, next_item, None) {
+                    return Err(FlowError::Internal {
+                        handler: "handle_each",
+                        detail: "frame stack empty on set_state for next item".into(),
+                    });
+                }
+                states.call_enter(callable);
+            } else {
+                let each_state = states.each_queue_remove(info.id).ok_or_else(|| FlowError::Internal {
+                    handler: "handle_each",
+                    detail: "queue vanished before results could be collected".into(),
+                })?;
+                if !states.set_state(info.exit, Value::Array(each_state.results), None) {
+                    return Err(FlowError::Internal {
+                        handler: "handle_each",
+                        detail: "frame stack empty on set_state for exit".into(),
+                    });
+                }
+            }
+            return Ok(FlowStep::Continue);
+        }
+
+        let vec_value = states.take_state(info.id).ok_or_else(|| FlowError::Internal {
+            handler: "handle_each",
+            detail: "input slot missing on first visit".into(),
+        })?;
+        let items: Vec<Value> = vec_value
+            .as_array()
+            .ok_or_else(|| FlowError::Internal {
+                handler: "handle_each",
+                detail: "input is not a JSON array".into(),
+            })?
+            .clone();
+
+        if items.is_empty() {
+            if !states.set_state(info.exit, Value::Array(vec![]), None) {
+                return Err(FlowError::Internal {
+                    handler: "handle_each",
+                    detail: "frame stack empty on set_state for empty exit".into(),
+                });
+            }
+            return Ok(FlowStep::Continue);
+        }
+
+        let mut remaining: VecDeque<Value> = items.into();
+        let Some(first) = remaining.pop_front() else {
+            return Err(FlowError::Internal {
+                handler: "handle_each",
+                detail: "deque was empty despite non-empty items check".into(),
+            });
+        };
+        states.each_queue_init(info.id, EachState { remaining, results: Vec::new() });
+        if !states.set_state(info.id, first, None) {
+            return Err(FlowError::Internal {
+                handler: "handle_each",
+                detail: "frame stack empty on set_state for first item".into(),
+            });
+        }
+        states.call_enter(callable);
+        Ok(FlowStep::Continue)
     }
 
     fn handle_suspend(info: &SuspendInfo, states: &mut FlowState) -> Result<FlowStep, FlowError> {
@@ -853,6 +945,10 @@ impl FlowGraph {
                     states.call_enter(callable);
 
                     return Ok(FlowStep::Continue);
+                }
+                FlowNode::Each(info) => {
+                    tracing::debug!(node = %node_name, kind = "each", "dispatching node");
+                    return Self::handle_each(info, states);
                 }
             }
         }

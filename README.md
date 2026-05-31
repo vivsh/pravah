@@ -24,6 +24,7 @@ One call to `next()` performs exactly one bounded step:
 - one merge transition
 - one suspend boundary
 - one nested flow step
+- one each-fanout dispatch (one item per step)
 
 After each step you can inspect the runtime, snapshot it, store it, retry it,
 or resume it elsewhere. Nothing important is trapped in thread-local state or
@@ -39,6 +40,7 @@ Pravah is a good fit when you need:
 - deterministic orchestration
 - bounded tool-using agent loops
 - multi-turn agent conversations with persistent history
+- sequential fan-out over typed collections (`each` node)
 
 Runtime control hints stay separate from persisted conversation state. For
 example, a final-turn reminder from an agent turn budget is injected only into
@@ -190,18 +192,18 @@ For a simple persistent conversation without graph construction, use
 
 ## Examples
 
-| Example                                                | What it shows                             |
-| ------------------------------------------------------ | ----------------------------------------- |
-| [examples/chat.rs](examples/chat.rs)                   | Single-session chat with history          |
-| [examples/linear_flow.rs](examples/linear_flow.rs)     | Minimal agent -> work pipeline            |
-| [examples/split_merge.rs](examples/split_merge.rs)     | Fan-out and fan-in composition            |
-| [examples/nested_flow.rs](examples/nested_flow.rs)     | Embedded subflows as reusable nodes       |
-| [examples/snapshot.rs](examples/snapshot.rs)           | Save and restore runtime state            |
-| [examples/image_prompt.rs](examples/image_prompt.rs)   | Initial user message with an image        |
-| [examples/ollama_client.rs](examples/ollama_client.rs) | Direct provider client usage              |
-| [examples/debate.rs](examples/debate.rs)               | Multi-agent branching workflow            |
-| [examples/story.rs](examples/story.rs)                 | Looping flow with repeated agent turns    |
-| [examples/gen_diagrams.rs](examples/gen_diagrams.rs)   | Tree, Mermaid, and DOT graph output       |
+| Example                                                | What it shows                          |
+| ------------------------------------------------------ | -------------------------------------- | --- | ---------------------------------------------- | ---------------------------------------- |
+| [examples/chat.rs](examples/chat.rs)                   | Single-session chat with history       |
+| [examples/linear_flow.rs](examples/linear_flow.rs)     | Minimal agent -> work pipeline         |
+| [examples/split_merge.rs](examples/split_merge.rs)     | Fan-out and fan-in composition         |
+| [examples/nested_flow.rs](examples/nested_flow.rs)     | Embedded subflows as reusable nodes    |
+| [examples/snapshot.rs](examples/snapshot.rs)           | Save and restore runtime state         |
+| [examples/image_prompt.rs](examples/image_prompt.rs)   | Initial user message with an image     |
+| [examples/ollama_client.rs](examples/ollama_client.rs) | Direct provider client usage           |
+| [examples/debate.rs](examples/debate.rs)               | Multi-agent branching workflow         |
+| [examples/story.rs](examples/story.rs)                 | Looping flow with repeated agent turns |
+| [examples/gen_diagrams.rs](examples/gen_diagrams.rs)   | Tree, Mermaid, and DOT graph output    |     | [examples/each_node.rs](examples/each_node.rs) | Fan-out over a list with the `each` node |
 
 ## When To Use Pravah
 

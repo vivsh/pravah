@@ -594,3 +594,92 @@ fn maybe_inject_fires_for_exit_tool_agent_without_real_tools() {
     assert_eq!(msgs.len(), 2, "reminder should be injected for exit-tool agent with no real tools");
     assert!(msgs[1].content.contains("ExitOutput"), "reminder should name the exit tool");
 }
+// ── Each node tests ───────────────────────────────────────────────────────────
+
+/// Simple item type for each-node tests: wraps a single integer.
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+struct EachItem {
+    value: i64,
+}
+
+/// Output produced by the per-item sub-flow.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct EachItemOutput {
+    doubled: i64,
+}
+
+impl Flow for EachItem {
+    type Output = EachItemOutput;
+
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder.work(|item: EachItem, _ctx: Context| async move {
+            Ok(EachItemOutput { doubled: item.value * 2 })
+        })
+    }
+}
+
+/// A flow that fans out over `Vec<EachItem>` and collects `Vec<EachItemOutput>`.
+/// The flow input IS the vec; each node is the entry.
+impl Flow for Vec<EachItem> {
+    type Output = EachFlowOutput;
+
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
+            .each::<EachItem>()
+            .work(|items: Vec<EachItemOutput>, _ctx: Context| async move {
+                Ok(EachFlowOutput { results: items })
+            })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct EachFlowOutput {
+    results: Vec<EachItemOutput>,
+}
+
+/// `each` node runs the sub-flow once per item and collects all results into `Vec<F::Output>`.
+#[tokio::test]
+async fn each_node_runs_sub_flow_for_each_item() {
+    use crate::flows::runtime::{FlowRuntime, RunLimits};
+
+    let mut runtime = FlowRuntime::new(vec![
+        EachItem { value: 1 },
+        EachItem { value: 2 },
+        EachItem { value: 3 },
+    ])
+    .expect("runtime should build");
+
+    let outcome = runtime
+        .run_until(Context::default(), RunLimits::default())
+        .await
+        .expect("run should succeed");
+
+    let result = match outcome {
+        crate::flows::runtime::RunOutcome::Done(v) => v,
+        other => panic!("expected Done, got {other:?}"),
+    };
+
+    let doubled: Vec<i64> = result.results.iter().map(|r| r.doubled).collect();
+    assert_eq!(doubled, vec![2, 4, 6]);
+}
+
+/// `each` node with an empty input vec immediately writes an empty `Vec<F::Output>`.
+#[tokio::test]
+async fn each_node_with_empty_vec_returns_empty_result() {
+    use crate::flows::runtime::{FlowRuntime, RunLimits};
+
+    let mut runtime = FlowRuntime::new(vec![] as Vec<EachItem>)
+        .expect("runtime should build");
+
+    let outcome = runtime
+        .run_until(Context::default(), RunLimits::default())
+        .await
+        .expect("run should succeed");
+
+    let result = match outcome {
+        crate::flows::runtime::RunOutcome::Done(v) => v,
+        other => panic!("expected Done, got {other:?}"),
+    };
+
+    assert!(result.results.is_empty());
+}

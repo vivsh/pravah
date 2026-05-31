@@ -125,6 +125,21 @@ pub(crate) fn node<A: JsonSchema + Serialize>(input: A) -> Result<StateNode, Flo
     })
 }
 
+/// Fan-out node: runs the same child flow once for each element of a `Vec<F>` input,
+/// collecting the results into a `Vec<F::Output>`.
+pub(crate) struct EachInfo {
+    /// Input slot NodeId (schema name of `Vec<F>` in the parent graph).
+    /// Also acts as the feedback slot — the child's output is written here
+    /// so that `step_inner` re-dispatches this node for the next item.
+    pub(crate) id: NodeId,
+    /// Output slot NodeId (schema name of `Vec<F::Output>` in the parent graph).
+    pub(crate) exit: NodeId,
+    /// Child graph that processes one `F` item at a time.
+    pub(crate) inner: Arc<FlowGraph>,
+    /// Index into the runtime's callable table, assigned by `collect_callables`.
+    pub(crate) callable_index: usize,
+}
+
 pub(crate) enum FlowNode {
     Agent(Arc<AgentInfo>),
     Either(EitherInfo),
@@ -135,6 +150,7 @@ pub(crate) enum FlowNode {
     Map(MapInfo),
     Suspend(SuspendInfo),
     Flow(Arc<FlowGraph>),
+    Each(Arc<EachInfo>),
 }
 
 impl AgentInfo {

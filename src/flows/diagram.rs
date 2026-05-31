@@ -31,6 +31,8 @@ pub enum DiagramNodeKind {
     Suspend,
     /// Embedded child flow.
     Flow,
+    /// Fan-out node.
+    Each,
     /// Edge target with no node definition in the graph.
     Terminal,
 }
@@ -47,6 +49,7 @@ impl DiagramNodeKind {
             Self::Either => "either",
             Self::Suspend => "suspend",
             Self::Flow => "flow",
+            Self::Each => "each",
             Self::Terminal => "terminal",
         }
     }
@@ -155,8 +158,9 @@ impl FlowGraphDiagram {
                 }
                 DiagramNodeKind::Flow => {
                     format!("    {}[\"\\[{} (flow)\\]\"]", safe_id, node.id)
-                }
-            };
+                }                DiagramNodeKind::Each => {
+                    format!("    {}[\"\\[{} (each)\\]\"]" , safe_id, node.id)
+                }            };
             out.push_str(&decl);
             out.push('\n');
         }
@@ -209,6 +213,7 @@ impl FlowGraphDiagram {
                     format!("label=\"{}\" shape=doublecircle", node.id)
                 }
                 DiagramNodeKind::Flow => format!("label=\"{}\\n(flow)\" shape=box3d", node.id),
+                DiagramNodeKind::Each => format!("label=\"{}\\n(each)\" shape=box3d", node.id),
             };
             out.push_str(&format!("    {} [{}];\n", safe_id, attrs));
         }
@@ -322,6 +327,7 @@ fn tree_write_node(
         Some(DiagramNodeKind::Either) => " (either)",
         Some(DiagramNodeKind::Suspend) => " (suspend)",
         Some(DiagramNodeKind::Flow) => " (flow)",
+        Some(DiagramNodeKind::Each) => " (each)",
         Some(DiagramNodeKind::Terminal) => " ◉",
         None => "",
     };
@@ -476,6 +482,10 @@ fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
                         .exit;
                     let exit_str = inner.interner.name_of(exit).to_string();
                     (DiagramNodeKind::Flow, vec![(exit_str, "flow")])
+                }
+                FlowNode::Each(info) => {
+                    let exit_str = graph.interner.name_of(info.exit).to_string();
+                    (DiagramNodeKind::Each, vec![(exit_str, "each")])
                 }
             };
             Some(NodeDesc {

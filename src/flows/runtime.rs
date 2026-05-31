@@ -189,6 +189,28 @@ impl<I: Flow> FlowRuntime<I> {
                             });
                         }
                     }
+                    FlowNode::Each(info_arc) => {
+                        if let Some(info_mut) = Arc::get_mut(info_arc) {
+                            if let Some(inner_mut) = Arc::get_mut(&mut info_mut.inner) {
+                                Self::collect_callables(inner_mut, callables)?;
+                                let idx = callables.len();
+                                inner_mut.callable_index = idx;
+                                info_mut.callable_index = idx;
+                                let inner_clone = info_mut.inner.clone();
+                                callables.push(FlowCall(inner_clone));
+                            } else {
+                                return Err(FlowError::Internal {
+                                    handler: "collect_callables",
+                                    detail: "failed to get exclusive Arc reference to each inner flow".into(),
+                                });
+                            }
+                        } else {
+                            return Err(FlowError::Internal {
+                                handler: "collect_callables",
+                                detail: "failed to get exclusive Arc reference to EachInfo".into(),
+                            });
+                        }
+                    }
                     _ => {}
                 }
             }

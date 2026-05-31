@@ -35,6 +35,28 @@ pub enum AgentContinuation {
     },
 }
 
+/// Per-item state tracked while an `each` node is fanning out.
+///
+/// # Known limitations
+///
+/// - `keep_alive` agents inside the sub-flow do not carry conversation history
+///   across items. Each item's child frame is fresh, so repeated iterations see
+///   independent sessions even when `keep_alive: true` is set on the agent.
+///   To share history across items, the sub-flow would need to store session ids
+///   in the parent frame's `keep_alive_sessions` map.
+///
+/// - Completed sub-flow sessions are never fed through the history compactor.
+///   `run_compaction_and_flush` only visits live frames, so a long fan-out over
+///   agent-heavy sub-flows grows `FlowHistory` without bound until the outer
+///   runtime is dropped.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub(crate) struct EachState {
+    /// Items yet to be processed.
+    pub(crate) remaining: VecDeque<Value>,
+    /// Outputs collected so far from completed sub-flow runs.
+    pub(crate) results: Vec<Value>,
+}
+
 /// State for one agent node tracked inside the parent frame.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct AgentState {
@@ -91,6 +113,10 @@ pub(crate) struct Frame {
     /// Populated on first visit and reused on subsequent iterations.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub(crate) keep_alive_sessions: IndexMap<NodeId, String>,
+
+    /// Per-each-node fan-out state, keyed by the each node's input `NodeId`.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub(crate) each_queues: IndexMap<NodeId, EachState>,
 }
 
 impl Frame {
@@ -101,6 +127,7 @@ impl Frame {
             callable: call,
             session_id: Uuid::now_v7().to_string(),
             keep_alive_sessions: IndexMap::new(),
+            each_queues: IndexMap::new(),
         }
     }
 }
@@ -229,6 +256,31 @@ impl FlowState {
         if let Some(frame) = self.top_mut() {
             frame.agent_states.shift_remove(&node_id);
         }
+    }
+
+    // ── EachState accessors ───────────────────────────────────────────────────
+
+    /// Returns `true` when the top frame has an active each-queue for `id`.
+    pub(crate) fn each_queue_has(&self, id: NodeId) -> bool {
+        self.top().is_some_and(|f| f.each_queues.contains_key(&id))
+    }
+
+    /// Inserts a fresh each-queue for `id`. Returns `false` when the stack is empty.
+    pub(crate) fn each_queue_init(&mut self, id: NodeId, state: EachState) -> bool {
+        match self.top_mut() {
+            Some(frame) => { frame.each_queues.insert(id, state); true }
+            None => false,
+        }
+    }
+
+    /// Returns a mutable reference to the each-queue for `id`.
+    pub(crate) fn each_queue_get_mut(&mut self, id: NodeId) -> Option<&mut EachState> {
+        self.top_mut().and_then(|f| f.each_queues.get_mut(&id))
+    }
+
+    /// Removes and returns the each-queue for `id`.
+    pub(crate) fn each_queue_remove(&mut self, id: NodeId) -> Option<EachState> {
+        self.top_mut().and_then(|f| f.each_queues.shift_remove(&id))
     }
 
     /// Returns the stable session id for `agent_id`.

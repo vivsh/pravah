@@ -54,6 +54,7 @@ computes how values move between nodes.
 | `merge(f)`          | Collect branch outputs once all are ready                                 |
 | `suspend::<I, O>()` | Pause the flow and resume later with `O`                                  |
 | `flow::<F>()`       | Embed another flow as a node                                              |
+| `each::<F>()`       | Run sub-flow `F` once per item in a `Vec<F>`, collect `Vec<F::Output>`    |
 
 `fork` and `join` are binary aliases for `split` and `merge`.
 
@@ -166,7 +167,6 @@ fn configure() -> AgentConfig {
 }
 ```
 
-
 With `keep_alive`, one agent keeps its own conversation history within the
 current parent frame.
 
@@ -188,6 +188,48 @@ Nested flows preserve the same guarantees as top-level flows: deterministic
 execution, resumability, typed boundaries, and snapshot safety.
 
 See [../examples/nested_flow.rs](../examples/nested_flow.rs).
+
+## Each Node
+
+`each::<F>()` fans out over a `Vec<F>` input, running the sub-flow `F` once for
+each element sequentially, and collecting the results into `Vec<F::Output>`.
+
+```rust
+impl Flow for Vec<ReviewTask> {
+    type Output = ReviewSummary;
+
+    fn build(builder: FlowBuilder) -> FlowBuilder {
+        builder
+            .each::<ReviewTask>()           // Vec<ReviewTask> → Vec<ReviewOutput>
+            .work(|results: Vec<ReviewOutput>, _| async move {
+                Ok(ReviewSummary { items: results })
+            })
+    }
+}
+```
+
+The flow entry is the `Vec<F>` itself. Items are processed one at a time; the
+engine pushes a child frame for each item, lets it run to completion, then
+moves on to the next. The parent frame is not resumed until all items are done.
+
+An empty input vec immediately writes an empty `Vec<F::Output>` and continues
+without ever pushing a child frame.
+
+Snapshots work correctly mid-iteration: `each_queues` (remaining items and
+partial results) is fully serialized.
+
+### Limitations
+
+- **No cross-item history.** Each item runs in a fresh child frame. Agents with
+  `keep_alive` inside the sub-flow do not carry conversation history from one
+  item to the next.
+
+- **Completed sessions are not compacted.** History compaction only runs over
+  live frames. For large fan-outs over agent-heavy sub-flows, `FlowHistory`
+  grows unboundedly until the runtime is dropped.
+
+- **Sequential only.** Items are processed in order, one at a time. There is no
+  parallel dispatch.
 
 ## Snapshots And Persistence
 
@@ -298,6 +340,7 @@ rate-limit layers.
 - [../examples/human_input.rs](../examples/human_input.rs): suspend and resume through a tool
 - [../examples/snapshot.rs](../examples/snapshot.rs): snapshot and restore
 - [../examples/story.rs](../examples/story.rs): looping flow with repeated turns
+- [../examples/each_node.rs](../examples/each_node.rs): fan-out over a list with the `each` node
 - [../examples/debate.rs](../examples/debate.rs): larger multi-agent orchestration
 - [../examples/gen_diagrams.rs](../examples/gen_diagrams.rs): tree, Mermaid, and DOT output
 
