@@ -114,6 +114,26 @@ impl FlowBuilder {
         self.tool_impl::<A, I, O>(to_message)
     }
 
+    /// Attaches flow `F` as a tool to agent `A` and registers `F` as an embedded sub-flow.
+    ///
+    /// Equivalent to `.tool_with::<A, F, F::Output>().flow::<F>()` but without the
+    /// repetition. The agent will see a tool whose input schema is derived from `F`
+    /// and whose result is the serialized `F::Output`. The sub-flow runs inline inside
+    /// the parent frame, so suspension and snapshots work correctly.
+    pub fn tool_flow<A, F>(self) -> Self
+    where
+        A: Agent,
+        F: Flow,
+        F::Output: ToolOutput,
+    {
+        let to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync> =
+            Box::new(|value: Value| -> Result<Message, ToolError> {
+                let o: F::Output = serde_json::from_value(value).map_err(ToolError::TypeError)?;
+                o.to_message()
+            });
+        self.tool_impl::<A, F, F::Output>(to_message).flow::<F>()
+    }
+
     /// Registers a tool for agent `A` backed by a [`Tool`] impl, wiring the work node automatically.
     pub fn tool<A: Agent, T: Tool>(mut self) -> Self {
         let agent_id = self.flow.interner.intern(&A::node_id());
