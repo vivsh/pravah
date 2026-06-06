@@ -429,7 +429,7 @@ impl Client for GeminiClient {
 /// Fails when the API key cannot be resolved.
 pub fn new_client(url: &LlmUrl, mut options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
     let client = build_client(url)?;
-    let exit_tool_name = if url.needs_exit_tool() && !options.output_type_name.is_empty() {
+    let exit_tool_name = if url.needs_exit_tool() && !options.output_type_name.is_empty() && !options.tools.is_empty() {
         let name = options.output_type_name.clone();
         inject_exit_tool(&mut options);
         Some(name)
