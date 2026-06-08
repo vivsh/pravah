@@ -1,7 +1,7 @@
 //! Diagram generation example that exercises the main flow node types.
 
 use either::Either;
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep, Node};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::flows::FlowGraphDiagram;
 use pravah::Context;
 use schemars::JsonSchema;
@@ -55,8 +55,8 @@ impl Agent for OutlineRequest {
 
 impl Flow for OutlineRequest {
     type Output = Outline;
-    fn define(root: Node<Self>) -> FlowBuilder {
-        root.agent().finalize()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent()
     }
 }
 
@@ -68,8 +68,8 @@ impl Agent for LongDraft {
 
 impl Flow for LongDraft {
     type Output = ReviewedDraft;
-    fn define(root: Node<Self>) -> FlowBuilder {
-        root.agent().finalize()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent()
     }
 }
 
@@ -153,7 +153,7 @@ async fn run_review_flow(draft: LongDraft, ctx: Context) -> Result<ReviewedDraft
 impl Flow for ArticleRequest {
     type Output = FinalArticle;
 
-    fn define(root: Node<Self>) -> FlowBuilder {
+    fn build(root: Node<Self>) -> Node<Self::Output> {
         let (research, audience) = root.split(split_request);
 
         research.agent()
@@ -165,7 +165,6 @@ impl Flow for ArticleRequest {
                 |quick| quick.agent(),
                 |long| long.work(run_review_flow).agent(),
             )
-            .finalize()
     }
 }
 

@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep, Node};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -136,11 +136,10 @@ async fn format_verdict(verdict: DebateVerdict, _ctx: Context) -> Result<DebateR
 impl Flow for DebateDraft {
     type Output = DebateReport;
 
-    fn define(root: Node<Self>) -> FlowBuilder {
+    fn build(root: Node<Self>) -> Node<Self::Output> {
         root
             .agent()
             .work(format_verdict)
-            .finalize()
     }
 }
 
@@ -148,13 +147,12 @@ impl Flow for DebateDraft {
 impl Flow for DebateInput {
     type Output = DebateReport;
 
-    fn define(root: Node<Self>) -> FlowBuilder {
+    fn build(root: Node<Self>) -> Node<Self::Output> {
         let (pro, con) = root.split(split_claim);
 
         pro.agent()
             .merge(con.agent(), |(pro, con)| merge_arguments(pro, con))
             .flow()
-            .finalize()
     }
 }
 

@@ -9,7 +9,7 @@ use super::flow::{
     maybe_inject_turn_budget_message,
 };
 use super::nodes::{AgentInfo, ToolInfo};
-use super::{Flow, FlowBuilder, FlowError};
+use super::{Flow, FlowError, Node};
 use crate::clients::{
     Attachment, Client, ClientError, ClientFactory, ClientOptions, ClientOutput,
     ClientResponse, LlmUrl, Message, Role, ToolCall,
@@ -137,8 +137,8 @@ impl Agent for PlainAgentInput {
 impl Flow for PlainAgentInput {
     type Output = PlainAgentOutput;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder.agent::<PlainAgentInput>()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent()
     }
 }
 
@@ -172,8 +172,8 @@ impl Agent for MessageAgentInput {
 impl Flow for MessageAgentInput {
     type Output = MessageAgentOutput;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder.agent::<MessageAgentInput>()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent()
     }
 }
 
@@ -230,23 +230,22 @@ impl Agent for ExitToolAgentInput {
 impl Flow for ExitToolAgentInput {
     type Output = ExitToolAgentOutput;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder.agent::<ExitToolAgentInput>()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent()
     }
 }
 
 impl Flow for ToolAgentInput {
     type Output = ToolAgentOutput;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<ToolAgentInput>()
-            .tool_with::<ToolAgentInput, LookupInput, LookupOutput>()
-            .work(|input: LookupInput, _ctx: Context| async move {
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(|toolbox| {
+            toolbox.tool_with(|input: LookupInput, _ctx: Context| async move {
                 Ok(LookupOutput {
                     result: input.query,
                 })
             })
+        })
     }
 }
 
@@ -661,8 +660,8 @@ struct EachItemOutput {
 impl Flow for EachItem {
     type Output = EachItemOutput;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder.work(|item: EachItem, _ctx: Context| async move {
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.work(|item: EachItem, _ctx: Context| async move {
             Ok(EachItemOutput { doubled: item.value * 2 })
         })
     }
@@ -673,9 +672,9 @@ impl Flow for EachItem {
 impl Flow for Vec<EachItem> {
     type Output = EachFlowOutput;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .each::<EachItem>()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root
+            .each()
             .work(|items: Vec<EachItemOutput>, _ctx: Context| async move {
                 Ok(EachFlowOutput { results: items })
             })

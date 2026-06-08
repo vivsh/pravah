@@ -82,22 +82,11 @@ That keeps routing deterministic and resumption unambiguous.
 
 ```toml
 [dependencies]
-pravah = "0.4.1"
+pravah = "0.4.2"
 ```
 
-To opt into providers explicitly:
-
-```toml
-[dependencies]
-pravah = { version = "0.4.1", default-features = false, features = [
-  "provider-openai",
-  "provider-anthropic",
-  "provider-gemini",
-  "provider-ollama",
-] }
-```
-
-Remove the providers you do not need.
+Configure provider credentials with the environment variables documented in
+[docs/clients.md](docs/clients.md).
 
 ## Getting Started
 
@@ -106,7 +95,7 @@ deterministic transform. See [examples/linear_flow.rs](examples/linear_flow.rs)
 for the full runnable file.
 
 ```rust
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep, Node};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -151,8 +140,8 @@ async fn format_bullets(bullets: BulletPoints, _ctx: Context) -> Result<Report, 
 impl Flow for SummariseRequest {
   type Output = Report;
 
-  fn define(root: Node<Self>) -> FlowBuilder {
-    root.agent().work(format_bullets).finalize()
+  fn build(root: Node<Self>) -> Node<Self::Output> {
+    root.agent().work(format_bullets)
   }
 }
 

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use pravah::clients::{Attachment, Message, Role};
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep, Node};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -103,8 +103,8 @@ impl Agent for VisionPrompt {
 impl Flow for VisionPrompt {
     type Output = VisionResult;
 
-    fn define(root: Node<Self>) -> FlowBuilder {
-        root.agent().finalize()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent()
     }
 }
 

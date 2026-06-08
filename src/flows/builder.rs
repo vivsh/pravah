@@ -27,8 +27,10 @@ use crate::{
 
 /// Builder for constructing a [`FlowGraph`] by registering nodes in order.
 ///
-/// Obtain one via [`Flow::build`](crate::flows::Flow). Chain calls to register
-/// nodes, then call [`build`](FlowBuilder::build) to validate and produce the graph.
+/// Most flows should implement [`Flow::build`](crate::flows::Flow::build)
+/// and return `Node<Self::Output>`. Obtain a builder via
+/// [`Node::finalize`](crate::flows::Node::finalize) when you need the low-level
+/// API.
 pub struct FlowBuilder {
     flow: FlowGraph,
     errors: Vec<String>,

@@ -4,7 +4,7 @@
 //! Sub-flow: `ReviewItem` → agent → `ReviewSentiment`
 //! Outer flow: `ReviewBatch` → map → `Vec<ReviewItem>` → each() → `Vec<ReviewSentiment>` → work → `SentimentReport`
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep, Node};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -53,8 +53,8 @@ impl Agent for ReviewItem {
 impl Flow for ReviewItem {
     type Output = ReviewSentiment;
 
-    fn define(root: Node<Self>) -> FlowBuilder {
-        root.agent().finalize()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent()
     }
 }
 
@@ -89,12 +89,11 @@ fn unwrap_batch(batch: ReviewBatch) -> Vec<ReviewItem> {
 impl Flow for ReviewBatch {
     type Output = SentimentReport;
 
-    fn define(root: Node<Self>) -> FlowBuilder {
+    fn build(root: Node<Self>) -> Node<Self::Output> {
         root
             .map(unwrap_batch)
             .each()
             .work(tally)
-            .finalize()
     }
 }
 

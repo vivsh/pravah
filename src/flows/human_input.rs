@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::context::Context;
-use crate::flows::{Flow, FlowBuilder};
+use crate::flows::{Flow, Node};
 use crate::flows::errors::FlowError;
 use crate::tools::ToolOutput;
 
@@ -93,11 +93,11 @@ enum HumanInputDecision {
 impl Flow for HumanInput {
     type Output = HumanOutput;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root
             .work(try_cli_input)
             .either(route_decision)
-            .suspend::<PendingHumanInput, HumanOutput>()
+            .branch(|done| done, |pending| pending.suspend::<HumanOutput>())
     }
 }
 

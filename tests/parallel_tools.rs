@@ -1,9 +1,9 @@
 //! Integration tests for parallel and queued tool dispatch.
 
 use pravah::clients::ClientError;
-use pravah::flows::{Agent, AgentConfig, AgentError, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, AgentError, Flow, FlowError, FlowRuntime, FlowStep, Node, Toolbox};
 use pravah::testing::{ScriptedFactory, mock_tool_call};
-use pravah::tools::ToolOutput;
+use pravah::tools::{ToolError, ToolOutput};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -66,11 +66,23 @@ impl ToolOutput for ReverseOutput {}
 // Work handlers
 // ---------------------------------------------------------------------------
 
-async fn echo_handler(input: EchoInput, _ctx: Context) -> Result<EchoOutput, FlowError> {
+async fn echo_handler(input: EchoInput, _ctx: Context) -> Result<EchoOutput, ToolError> {
     Ok(EchoOutput { echoed: input.text })
 }
-async fn reverse_handler(input: ReverseInput, _ctx: Context) -> Result<ReverseOutput, FlowError> {
+async fn reverse_handler(input: ReverseInput, _ctx: Context) -> Result<ReverseOutput, ToolError> {
     Ok(ReverseOutput { reversed: input.text.chars().rev().collect() })
+}
+
+fn with_echo<A: Agent>(toolbox: Toolbox<A>) -> Toolbox<A> {
+    toolbox.tool_with(|input: EchoInput, ctx: Context| async move {
+        echo_handler(input, ctx).await
+    })
+}
+
+fn with_echo_and_reverse<A: Agent>(toolbox: Toolbox<A>) -> Toolbox<A> {
+    with_echo(toolbox).tool_with(|input: ReverseInput, ctx: Context| async move {
+        reverse_handler(input, ctx).await
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -93,13 +105,8 @@ macro_rules! simple_agent {
 simple_agent!(ParallelIn, ParallelOut, "Use echo and reverse.");
 impl Flow for ParallelIn {
     type Output = ParallelOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<ParallelIn>()
-            .tool_with::<ParallelIn, EchoInput, EchoOutput>()
-            .tool_with::<ParallelIn, ReverseInput, ReverseOutput>()
-            .work(echo_handler)
-            .work(reverse_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo_and_reverse)
     }
 }
 
@@ -108,11 +115,8 @@ impl Flow for ParallelIn {
 simple_agent!(LlmFailIn, LlmFailOut, "Use echo.");
 impl Flow for LlmFailIn {
     type Output = LlmFailOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<LlmFailIn>()
-            .tool_with::<LlmFailIn, EchoInput, EchoOutput>()
-            .work(echo_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo)
     }
 }
 
@@ -121,13 +125,8 @@ impl Flow for LlmFailIn {
 simple_agent!(UnknownParallelIn, UnknownParallelOut, "Use echo and reverse.");
 impl Flow for UnknownParallelIn {
     type Output = UnknownParallelOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<UnknownParallelIn>()
-            .tool_with::<UnknownParallelIn, EchoInput, EchoOutput>()
-            .tool_with::<UnknownParallelIn, ReverseInput, ReverseOutput>()
-            .work(echo_handler)
-            .work(reverse_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo_and_reverse)
     }
 }
 

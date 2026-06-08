@@ -22,40 +22,37 @@ deterministic routing, replayable progress, and unambiguous resume points.
 ## Building A Flow
 
 Implement `Flow` for the input type, declare the output type, and assemble the
-graph with `FlowBuilder`.
+graph by returning the terminal typed node from `build`.
 
 ```rust
 impl Flow for Proposal {
     type Output = Brief;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .split(split_proposal)
-            .agent::<TechTrack>()
-            .agent::<MktTrack>()
-            .agent::<RiskTrack>()
-            .merge(merge_brief)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        let (tech, mkt, risk) = root.split(split_proposal);
+
+        tech.agent().merge((mkt.agent(), risk.agent()), merge_brief)
     }
 }
 ```
 
-You describe nodes by input and output type. Pravah validates the graph and
-computes how values move between nodes.
+You describe nodes by input and output type. Pravah compiles the fluent chain
+into a validated graph and computes how values move between nodes.
 
 ## Node Types
 
-| Builder method      | What it does                                                              |
-| ------------------- | ------------------------------------------------------------------------- |
-| `agent::<A>()`      | LLM-backed node with structured output or a tool loop                     |
-| `work(f)`           | Effectful async transform: `async fn(I, Context) -> Result<O, FlowError>` |
-| `map(f)`            | Pure synchronous transform: `fn(I) -> O`                                  |
-| `either(f)`         | Route to one branch: `fn(I) -> Either<A, B>`                              |
-| `split(f)`          | Fan out to multiple branches                                              |
-| `merge(f)`          | Collect branch outputs once all are ready                                 |
-| `suspend::<I, O>()` | Pause the flow and resume later with `O`                                  |
-| `flow::<F>()`            | Embed another flow as a node                                                        |
-| `tool_flow::<A, F>()`    | Attach sub-flow `F` as a callable tool on agent `A`                                 |
-| `each::<F>()`            | Run sub-flow `F` once per item in a `Vec<F>`, collect `Vec<F::Output>`              |
+| Fluent call                 | What it does                                                              |
+| --------------------------- | ------------------------------------------------------------------------- |
+| `agent()`                   | LLM-backed node with structured output or a tool loop                     |
+| `agent_with(|toolbox| ...)` | Configure tools on the current agent before advancing to the agent output |
+| `work(f)`                   | Effectful async transform: `async fn(I, Context) -> Result<O, FlowError>` |
+| `map(f)`                    | Pure synchronous transform: `fn(I) -> O`                                  |
+| `either(f)`                 | Route to one branch: `fn(I) -> Either<A, B>`                              |
+| `split(f)`                  | Fan out to multiple branches                                              |
+| `merge(f)`                  | Collect branch outputs once all are ready                                 |
+| `suspend::<O>()`            | Pause the flow and resume later with `O`                                  |
+| `flow()`                    | Embed another flow as a node                                              |
+| `each()`                    | Run a sub-flow once per item in a `Vec<F>`, collect `Vec<F::Output>`      |
 
 `fork` and `join` are binary aliases for `split` and `merge`.
 
@@ -118,30 +115,28 @@ There are two suspension styles.
 
 ### Flow-Level Suspend
 
-Use `suspend::<I, O>()` when the graph should pause at a dedicated node.
+Use `suspend::<O>()` when the graph should pause at a dedicated node and later
+resume with `O`.
 
 ```rust
-builder.suspend::<ApprovalRequest, ApprovalDecision>()
+root.work(build_approval_request).suspend::<ApprovalDecision>()
 ```
 
-When a value of type `I` reaches that node, the runtime returns
+When the current node value reaches that suspend point, the runtime returns
 `FlowStep::Suspend`. Resume by supplying a value of type `O`.
 
 ### Tool-Level Suspend
 
 To suspend from inside an agent tool loop, implement the tool as a sub-flow
-that contains a `suspend::<I, O>()` node, then register it as both a tool and a
-flow.
+That contains a `suspend::<O>()` node, then register it as a tool on the
+current agent.
 
 ```rust
 impl Flow for BlogRequest {
     type Output = FinalResult;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<BlogRequest>()
-            .tool_with::<BlogRequest, HumanInput, HumanOutput>()
-            .flow::<HumanInput>()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(|toolbox| toolbox.tool_flow::<HumanInput>())
     }
 }
 ```
@@ -149,7 +144,7 @@ impl Flow for BlogRequest {
 When the agent calls that tool, the engine enters the `HumanInput` sub-flow.
 If the sub-flow suspends, the outer runtime also returns `FlowStep::Suspend`.
 
-See [../examples/human_input.rs](../examples/human_input.rs).
+See the built-in [HumanInput flow](../src/flows/human_input.rs).
 
 ## Multi-Turn Agent Conversations
 
@@ -177,11 +172,11 @@ A nested flow has the same outer shape as a node: typed input, typed output,
 and stepwise execution.
 
 ```rust
-fn build(builder: FlowBuilder) -> FlowBuilder {
-    builder
+fn build(root: Node<Self>) -> Node<Self::Output> {
+    root
         .work(derive_query)
-        .flow::<ResearchQuery>()
-        .agent::<ResearchResult>()
+        .flow()
+        .agent()
 }
 ```
 
@@ -192,25 +187,23 @@ See [../examples/nested_flow.rs](../examples/nested_flow.rs).
 
 ## Sub-flow Tools
 
-`tool_flow::<A, F>()` registers a flow as a callable tool on agent `A`. The
-agent decides at runtime whether and when to invoke it. Each call runs the
+`tool_flow::<F>()` registers a flow as a callable tool on the current agent.
+The agent decides at runtime whether and when to invoke it. Each call runs the
 entire sub-flow inline before returning the result to the agent.
 
 ```rust
 impl Flow for ArticleRequest {
     type Output = ArticleSummary;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<ArticleRequest>()
-            .tool_flow::<ArticleRequest, VerifyClaim>()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(|toolbox| toolbox.tool_flow::<VerifyClaim>())
     }
 }
 ```
 
-`tool_flow::<A, F>()` is shorthand for
-`.tool_with::<A, F, F::Output>().flow::<F>()`. The tool name seen by the model
-is derived from `F`'s schema name. `F::Output` must implement `ToolOutput`.
+The tool name seen by the model is derived from `F`'s schema name. `F::Output`
+must implement `ToolOutput`. For a custom non-flow handler, use
+`agent_with(|toolbox| toolbox.tool_with(...))` instead.
 
 See [../examples/tool_flow.rs](../examples/tool_flow.rs).
 
@@ -220,15 +213,14 @@ See [../examples/tool_flow.rs](../examples/tool_flow.rs).
 each element sequentially, and collecting the results into `Vec<F::Output>`.
 
 ```rust
-impl Flow for Vec<ReviewTask> {
+impl Flow for ReviewBatch {
     type Output = ReviewSummary;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .each::<ReviewTask>()           // Vec<ReviewTask> → Vec<ReviewOutput>
-            .work(|results: Vec<ReviewOutput>, _| async move {
-                Ok(ReviewSummary { items: results })
-            })
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root
+            .map(into_review_tasks)         // ReviewBatch -> Vec<ReviewTask>
+            .each()                         // Vec<ReviewTask> -> Vec<ReviewOutput>
+            .work(summarise_reviews)
     }
 }
 ```
@@ -362,7 +354,7 @@ rate-limit layers.
 - [../examples/linear_flow.rs](../examples/linear_flow.rs): one agent, one work node
 - [../examples/split_merge.rs](../examples/split_merge.rs): multi-branch composition
 - [../examples/nested_flow.rs](../examples/nested_flow.rs): embedded subflows
-- [../examples/human_input.rs](../examples/human_input.rs): suspend and resume through a tool
+- [../src/flows/human_input.rs](../src/flows/human_input.rs): built-in suspendable human-input sub-flow
 - [../examples/snapshot.rs](../examples/snapshot.rs): snapshot and restore
 - [../examples/story.rs](../examples/story.rs): looping flow with repeated turns
 - [../examples/each_node.rs](../examples/each_node.rs): fan-out over a list with the `each` node

@@ -2,10 +2,10 @@
 
 use pravah::clients::{ClientError, Role};
 use pravah::flows::{
-    Agent, AgentConfig, AgentError, BuildError, Flow, FlowBuilder, FlowError, FlowGraph, FlowRuntime, FlowStep, PhaseKind,
+    Agent, AgentConfig, AgentError, Flow, FlowError, FlowRuntime, FlowStep, Node, PhaseKind, Toolbox,
 };
 use pravah::testing::{CapturingHistoryStore, ScriptedFactory, mock_tool_call};
-use pravah::tools::ToolOutput;
+use pravah::tools::{ToolError, ToolOutput};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -70,11 +70,23 @@ impl ToolOutput for ReverseOutput {}
 // Work handlers
 // ---------------------------------------------------------------------------
 
-async fn echo_handler(input: EchoInput, _ctx: Context) -> Result<EchoOutput, FlowError> {
+async fn echo_handler(input: EchoInput, _ctx: Context) -> Result<EchoOutput, ToolError> {
     Ok(EchoOutput { echoed: input.text })
 }
-async fn reverse_handler(input: ReverseInput, _ctx: Context) -> Result<ReverseOutput, FlowError> {
+async fn reverse_handler(input: ReverseInput, _ctx: Context) -> Result<ReverseOutput, ToolError> {
     Ok(ReverseOutput { reversed: input.text.chars().rev().collect() })
+}
+
+fn with_echo<A: Agent>(toolbox: Toolbox<A>) -> Toolbox<A> {
+    toolbox.tool_with(|input: EchoInput, ctx: Context| async move {
+        echo_handler(input, ctx).await
+    })
+}
+
+fn with_echo_and_reverse<A: Agent>(toolbox: Toolbox<A>) -> Toolbox<A> {
+    with_echo(toolbox).tool_with(|input: ReverseInput, ctx: Context| async move {
+        reverse_handler(input, ctx).await
+    })
 }
 
 
@@ -98,8 +110,8 @@ macro_rules! simple_agent {
 simple_agent!(DirectIn, DirectOut, "Answer directly.");
 impl Flow for DirectIn {
     type Output = DirectOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder.agent::<DirectIn>()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent()
     }
 }
 
@@ -108,11 +120,8 @@ impl Flow for DirectIn {
 simple_agent!(ValidIn, ValidOut, "Use echo then answer.");
 impl Flow for ValidIn {
     type Output = ValidOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<ValidIn>()
-            .tool_with::<ValidIn, EchoInput, EchoOutput>()
-            .work(echo_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo)
     }
 }
 
@@ -121,13 +130,8 @@ impl Flow for ValidIn {
 simple_agent!(MultiToolIn, MultiToolOut, "Use echo and reverse.");
 impl Flow for MultiToolIn {
     type Output = MultiToolOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<MultiToolIn>()
-            .tool_with::<MultiToolIn, EchoInput, EchoOutput>()
-            .tool_with::<MultiToolIn, ReverseInput, ReverseOutput>()
-            .work(echo_handler)
-            .work(reverse_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo_and_reverse)
     }
 }
 
@@ -136,11 +140,8 @@ impl Flow for MultiToolIn {
 simple_agent!(DupIn, DupOut, "Use echo.");
 impl Flow for DupIn {
     type Output = DupOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<DupIn>()
-            .tool_with::<DupIn, EchoInput, EchoOutput>()
-            .work(echo_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo)
     }
 }
 
@@ -149,11 +150,8 @@ impl Flow for DupIn {
 simple_agent!(UnknownIn, UnknownOut, "Use echo.");
 impl Flow for UnknownIn {
     type Output = UnknownOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<UnknownIn>()
-            .tool_with::<UnknownIn, EchoInput, EchoOutput>()
-            .work(echo_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo)
     }
 }
 
@@ -164,11 +162,8 @@ impl Flow for UnknownIn {
 simple_agent!(HistoryIn, HistoryOut, "Use echo.");
 impl Flow for HistoryIn {
     type Output = HistoryOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<HistoryIn>()
-            .tool_with::<HistoryIn, EchoInput, EchoOutput>()
-            .work(echo_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo)
     }
 }
 
@@ -177,11 +172,8 @@ impl Flow for HistoryIn {
 simple_agent!(ChainIn, ChainOut, "Chain echo.");
 impl Flow for ChainIn {
     type Output = ChainOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<ChainIn>()
-            .tool_with::<ChainIn, EchoInput, EchoOutput>()
-            .work(echo_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo)
     }
 }
 
@@ -190,11 +182,8 @@ impl Flow for ChainIn {
 simple_agent!(LlmErrIn, LlmErrOut, "Call echo.");
 impl Flow for LlmErrIn {
     type Output = LlmErrOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<LlmErrIn>()
-            .tool_with::<LlmErrIn, EchoInput, EchoOutput>()
-            .work(echo_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo)
     }
 }
 
@@ -203,11 +192,8 @@ impl Flow for LlmErrIn {
 simple_agent!(StructModeIn, StructModeOut, "Answer directly.");
 impl Flow for StructModeIn {
     type Output = StructModeOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<StructModeIn>()
-            .tool_with::<StructModeIn, EchoInput, EchoOutput>()
-            .work(echo_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo)
     }
 }
 
@@ -216,11 +202,8 @@ impl Flow for StructModeIn {
 simple_agent!(StoreIn, StoreOut, "Echo and answer.");
 impl Flow for StoreIn {
     type Output = StoreOut;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<StoreIn>()
-            .tool_with::<StoreIn, EchoInput, EchoOutput>()
-            .work(echo_handler)
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(with_echo)
     }
 }
 
@@ -508,37 +491,3 @@ async fn test_no_scripted_responses_remain_after_direct_run() {
 // Validation tests
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)] struct MissingWorkAgent { q: String }
-#[derive(Debug, Serialize, Deserialize, JsonSchema)] struct MissingWorkResult { r: String }
-simple_agent!(MissingWorkAgent, MissingWorkResult, "Use echo.");
-
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)] struct OrphanWorkAgent { q: String }
-#[derive(Debug, Serialize, Deserialize, JsonSchema)] struct OrphanWorkResult { r: String }
-simple_agent!(OrphanWorkAgent, OrphanWorkResult, "No tools.");
-impl Flow for OrphanWorkAgent {
-    type Output = OrphanWorkResult;
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<OrphanWorkAgent>()
-            // Work node registered but no .tool() — orphan, unreachable from entry.
-            .work(echo_handler)
-    }
-}
-
-/// Verifies that a work node with no matching tool registration is caught during
-/// `FlowRuntime::new` because the reachability pass flags it as unreachable from entry.
-#[test]
-fn test_build_rejects_orphan_work_node() {
-    let result = FlowRuntime::new(OrphanWorkAgent { q: "x".into() });
-    match result {
-        Err(FlowError::Build(BuildError::Invalid(msgs))) => {
-            assert!(
-                msgs.iter().any(|m| m.contains("unreachable")),
-                "expected 'unreachable' in validation errors, got: {msgs:?}",
-            );
-        }
-        Ok(_) => panic!("build should have failed — work node is not reachable from entry"),
-        Err(e) => panic!("unexpected error variant: {e}"),
-    }
-}

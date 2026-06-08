@@ -3,7 +3,7 @@
 use std::io::Write;
 
 use either::Either;
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep, Node};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -398,7 +398,7 @@ fn route_input(
 impl Flow for StoryTurn {
     type Output = FinalSummary;
 
-    fn define(root: Node<Self>) -> FlowBuilder {
+    fn build(root: Node<Self>) -> Node<Self::Output> {
         let (choreo, dialogue, cinema, carry) = root.split(split_crew);
 
         let (director, director_carry) = choreo
@@ -411,7 +411,7 @@ impl Flow for StoryTurn {
             .merge(director_carry, merge_director)
             .work(print_and_read)
             .either(route_input)
-            .finalize()
+            .right()
     }
 }
 

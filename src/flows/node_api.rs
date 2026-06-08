@@ -20,9 +20,9 @@ use crate::tools::{Tool, ToolError, ToolOutput};
 /// and return a new `Node` with an updated type parameter, encoding the I/O
 /// contract of each step at compile time.
 ///
-/// Obtain a root node via [`Flow::define`](crate::flows::Flow::define).
-/// Finalise the chain by calling [`finalize`](Node::finalize) to recover the
-/// [`FlowBuilder`] and then call [`build`](FlowBuilder::build) on it.
+/// Obtain a root node via [`Flow::build`](crate::flows::Flow::build) and end
+/// the chain at `Node<F::Output>`. [`finalize`](Node::finalize) exists as the
+/// low-level bridge back to [`FlowBuilder`] for internal paths.
 pub struct Node<O> {
     builder: Arc<Mutex<FlowBuilder>>,
     _marker: PhantomData<fn() -> O>,
@@ -33,9 +33,18 @@ impl<O> Node<O> {
         Node { builder, _marker: PhantomData }
     }
 
-    /// Wraps an existing builder into a root node. Used by the `Flow::build` fallback path.
+    /// Wraps an existing builder into a root node for flow compilation.
     pub(crate) fn from_builder(builder: FlowBuilder) -> Self {
         Node { builder: Arc::new(Mutex::new(builder)), _marker: PhantomData }
+    }
+
+    /// Applies low-level [`FlowBuilder`] operations from this point in the chain.
+    ///
+    /// Prefer the typed node methods when they cover the shape you need. This
+    /// escape hatch exists for advanced or transitional cases that still need
+    /// direct builder access.
+    pub fn with_builder<P>(self, f: impl FnOnce(FlowBuilder) -> FlowBuilder) -> Node<P> {
+        self.mutate_into(f)
     }
 
     fn mutate(self, f: impl FnOnce(FlowBuilder) -> FlowBuilder) -> Self {
@@ -108,8 +117,8 @@ impl<O> Node<O> {
     /// Branches into one of two typed paths.
     ///
     /// Use [`EitherNode::branch`] to define both paths when they later converge
-    /// to the same output type, or [`EitherNode::finalize`] when this `either`
-    /// is terminal for the flow.
+    /// to the same output type, or select one arm with [`EitherNode::left`] or
+    /// [`EitherNode::right`] when one branch continues through existing nodes.
     pub fn either<A, B, H>(self, func: H) -> EitherNode<A, B>
     where
         O: 'static + Serialize + DeserializeOwned + JsonSchema,
@@ -153,8 +162,8 @@ impl<O> Node<O> {
     /// Registers an orphan branch without affecting the current output type.
     ///
     /// Orphan branches — those not part of a [`merge`](Node::merge) — should be
-    /// passed to `hold` before calling [`finalize`](Node::finalize) to make the
-    /// intent explicit and ensure the `Arc` is dropped cleanly.
+    /// passed to `hold` before returning the terminal node from `build` to make
+    /// the intent explicit and ensure the `Arc` is dropped cleanly.
     ///
     /// # Errors
     ///
@@ -181,7 +190,8 @@ impl<O> Node<O> {
 ///
 /// The left and right branches share the same underlying builder. Use
 /// [`branch`](EitherNode::branch) when both arms converge to the same output
-/// type, or [`finalize`](EitherNode::finalize) when the conditional is terminal.
+/// type. Use [`left`](EitherNode::left) or [`right`](EitherNode::right) when
+/// one arm should continue through nodes that are already part of the graph.
 pub struct EitherNode<A, B> {
     builder: Arc<Mutex<FlowBuilder>>,
     _marker: PhantomData<fn() -> (A, B)>,
@@ -193,6 +203,16 @@ impl<A, B> EitherNode<A, B> {
             builder,
             _marker: PhantomData,
         }
+    }
+
+    /// Continues from the left branch as the current typed node.
+    pub fn left(self) -> Node<A> {
+        Node::with_arc(self.builder)
+    }
+
+    /// Continues from the right branch as the current typed node.
+    pub fn right(self) -> Node<B> {
+        Node::with_arc(self.builder)
     }
 
     /// Builds both branches and rejoins them at a common output type.
@@ -217,7 +237,7 @@ impl<A, B> EitherNode<A, B> {
         Node::with_arc(self.builder)
     }
 
-    /// Finalises a terminal conditional branch.
+    /// Extracts the underlying builder for low-level or internal paths.
     pub fn finalize(self) -> FlowBuilder {
         let mut guard = self.builder.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *guard)

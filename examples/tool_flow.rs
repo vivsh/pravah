@@ -12,7 +12,7 @@
 //! ```
 //! For non-flow tools, use the low-level `tool_with` on `Toolbox`.
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowRuntime, FlowStep, Node};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowRuntime, FlowStep, Node};
 use pravah::tools::ToolOutput;
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
@@ -55,8 +55,8 @@ impl Agent for VerifyClaim {
 impl Flow for VerifyClaim {
     type Output = VerificationResult;
 
-    fn define(root: Node<Self>) -> FlowBuilder {
-        root.agent().finalize()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent()
     }
 }
 
@@ -93,10 +93,9 @@ impl Agent for ArticleRequest {
 impl Flow for ArticleRequest {
     type Output = ArticleSummary;
 
-    fn define(root: Node<Self>) -> FlowBuilder {
+    fn build(root: Node<Self>) -> Node<Self::Output> {
         root
             .agent_with(|toolbox| toolbox.tool_flow::<VerifyClaim>())
-            .finalize()
     }
 }
 

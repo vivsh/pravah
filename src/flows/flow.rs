@@ -50,16 +50,11 @@ impl<T: std::fmt::Debug> std::fmt::Debug for FlowStep<T> {
 /// A typed, declarative agent flow.
 ///
 /// Implement this trait to declare a flow graph. Pravah resolves the graph
-/// at runtime using `define` and drives it via [`crate::flows::FlowRuntime`].
-///
-/// # Migration
-///
-/// Implement [`define`](Flow::define) for new flows. The legacy [`build`](Flow::build)
-/// method is deprecated but still works; its default delegates to `define`.
+/// at runtime using `build` and drives it via [`crate::flows::FlowRuntime`].
 ///
 /// # Panics
 ///
-/// If neither `define` nor `build` is overridden, any attempt to compile the flow
+/// If `build` is not overridden, any attempt to compile the flow
 /// will panic with a message naming the unimplemented type.
 pub trait Flow: 'static + JsonSchema + Serialize + DeserializeOwned + Send + Sync {
     /// Final output produced when all nodes complete.
@@ -67,21 +62,13 @@ pub trait Flow: 'static + JsonSchema + Serialize + DeserializeOwned + Send + Syn
 
     /// Constructs the flow graph using the fluent [`Node`] API.
     ///
-    /// `root` is a pre-typed entry node for `Self`. Chain node methods on it and
-    /// call [`finalize`](Node::finalize) to return the builder.
-    fn define(_root: Node<Self>) -> FlowBuilder {
+    /// `root` is a pre-typed entry node for `Self`. Chain node methods on it
+    /// until the final expression has type `Node<Self::Output>`.
+    fn build(_root: Node<Self>) -> Node<Self::Output> {
         unimplemented!(
-            "`{}` must implement `Flow::define`",
+            "`{}` must implement `Flow::build`",
             std::any::type_name::<Self>()
         )
-    }
-
-    /// Constructs the flow graph by registering nodes onto `builder`.
-    ///
-    /// Deprecated: implement [`define`](Flow::define) instead.
-    #[deprecated(note = "implement `define(root: Node<Self>)` instead")]
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        Self::define(Node::from_builder(builder))
     }
 
     /// Unique identifier for this flow's entry node; defaults to the JSON Schema name.
@@ -130,8 +117,10 @@ impl FlowGraph {
     pub fn from_flow<F: Flow>() -> Result<Self, FlowError> {
         let entry = F::node_id();
         let exit = F::Output::schema_name();
-        #[allow(deprecated)]
-        F::build(FlowBuilder::new()).build()?.with_entry(entry, exit)
+        F::build(Node::from_builder(FlowBuilder::new()))
+            .finalize()
+            .build()?
+            .with_entry(entry, exit)
     }
 
     /// Returns true when every parent for this join is present in state.

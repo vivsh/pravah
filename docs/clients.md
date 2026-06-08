@@ -90,14 +90,15 @@ Supported query parameters are:
 
 Thinking levels are `off`, `low`, `medium`, `high`, and `xhigh`.
 
-### Feature Flags And Credentials
+### Credentials
 
-Provider support is controlled by Cargo features:
+Provider clients ship with the crate. Configure credentials through the default
+environment variable for each provider:
 
-- `provider-openai` uses `OPENAI_API_KEY`
-- `provider-anthropic` uses `ANTHROPIC_API_KEY`
-- `provider-gemini` uses `GEMINI_API_KEY`
-- `provider-ollama` uses `OLLAMA_API_KEY` when present, but can also run without auth
+- OpenAI uses `OPENAI_API_KEY`
+- Anthropic uses `ANTHROPIC_API_KEY`
+- Gemini uses `GEMINI_API_KEY`
+- Ollama uses `OLLAMA_API_KEY` when the server requires auth, but can also run without it
 
 `api_key_env` overrides the default environment variable. It is resolved when
 the model URL is parsed. If the named variable is missing, Pravah fails early.
@@ -158,15 +159,15 @@ impl Tool for ReadFile {
     }
 }
 
-// In the flow:
-builder.agent::<MyAgent>().tool::<MyAgent, ReadFile>()
+// In `build`:
+root.agent_with(|toolbox| toolbox.tool::<ReadFile>())
 ```
 
 `.tool::<A, T>()` registers the `Tool` impl and wires the work node automatically.
 
 **Shorthand API — `tool_flow` for sub-flow tools:**
 
-Use `.tool_flow::<A, F>()` when the tool implementation is itself a full flow.
+Use `.tool_flow::<F>()` when the tool implementation is itself a full flow.
 The model sees the tool name derived from `F`, and calling it runs the entire
 sub-flow inline. `F::Output` must implement `ToolOutput`.
 
@@ -174,32 +175,30 @@ sub-flow inline. `F::Output` must implement `ToolOutput`.
 impl Flow for ArticleRequest {
     type Output = ArticleSummary;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<ArticleRequest>()
-            .tool_flow::<ArticleRequest, VerifyClaim>()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(|toolbox| toolbox.tool_flow::<VerifyClaim>())
     }
 }
 ```
 
-This is equivalent to `.tool_with::<ArticleRequest, VerifyClaim, VerificationResult>().flow::<VerifyClaim>()`.
-
 See [../examples/tool_flow.rs](../examples/tool_flow.rs).
 
-**Explicit API — `tool_with` for flow-backed tools:**
+**Explicit API — `tool_with` for custom handlers:**
 
-Use `.tool_with::<A, I, O>()` when you want to back a tool with an embedded flow
-or supply the work node manually. `O` must implement `ToolOutput`.
+Use `.tool_with(...)` when you want to register a low-level tool handler
+directly on the current agent. The input and output types come from the
+closure signature, and the output must implement `ToolOutput`.
 
 ```rust
-impl Flow for BlogRequest {
-    type Output = FinalResult;
+impl Flow for MyAgent {
+    type Output = MyAgentOutput;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<BlogRequest>()
-            .tool_with::<BlogRequest, HumanInput, HumanOutput>()
-            .flow::<HumanInput>()
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(|toolbox| {
+            toolbox.tool_with(|input: ReadFileInput, ctx: Context| async move {
+                ReadFile::call(input, ctx).await
+            })
+        })
     }
 }
 ```
@@ -358,9 +357,10 @@ RateLimit -> Retry -> Tracing -> DefaultClientFactory -> provider client
 ## Example Map
 
 - [../examples/linear_flow.rs](../examples/linear_flow.rs): minimal typed agent
-- [../examples/human_input.rs](../examples/human_input.rs): tool call that suspends through a subflow
+- [../src/flows/human_input.rs](../src/flows/human_input.rs): built-in flow for suspendable human input
 - [../examples/image_prompt.rs](../examples/image_prompt.rs): initial user attachments
 - [../examples/ollama_client.rs](../examples/ollama_client.rs): direct provider client usage
+- [../examples/tool_flow.rs](../examples/tool_flow.rs): tool registration with a sub-flow
 - [../examples/debate.rs](../examples/debate.rs): multi-agent model usage across branches
 
 If you are done with provider setup, continue with [flows.md](flows.md) for
