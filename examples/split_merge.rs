@@ -1,6 +1,6 @@
 //! Split/merge example with three agent branches converging into one brief.
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -119,13 +119,12 @@ fn merge_brief((tech, mkt, risk): (TechAnalysis, MktAnalysis, RiskAnalysis)) -> 
 impl Flow for Proposal {
     type Output = Brief;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .split(split_proposal)
-            .agent::<TechTrack>()
-            .agent::<MktTrack>()
-            .agent::<RiskTrack>()
-            .merge(merge_brief)
+    fn define(root: Node<Self>) -> FlowBuilder {
+        let (tech, mkt, risk) = root.split(split_proposal);
+
+        tech.agent()
+            .merge((mkt.agent(), risk.agent()), merge_brief)
+            .finalize()
     }
 }
 

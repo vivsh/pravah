@@ -34,17 +34,30 @@ pub struct FlowBuilder {
     errors: Vec<String>,
 }
 
-impl FlowBuilder {
-    pub(crate) fn new() -> Self {
+impl Default for FlowBuilder {
+    fn default() -> Self {
         Self {
             flow: FlowGraph::new(),
             errors: Vec::new(),
         }
     }
+}
+
+impl FlowBuilder {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
 
     /// Applies `f` to this builder, enabling modular flow composition.
     pub fn pipe(self, f: impl FnOnce(Self) -> Self) -> Self {
         f(self)
+    }
+
+    /// Records an error without stopping the chain. Used by the Node API to surface
+    /// cross-builder misuse at `.build()` time rather than panicking.
+    pub(crate) fn error(mut self, msg: impl Into<String>) -> Self {
+        self.errors.push(msg.into());
+        self
     }
 
     /// Registers an agent node keyed by `A::node_id()`.
@@ -146,6 +159,19 @@ impl FlowBuilder {
             .tool_work::<T::Input, T::Output, _, _>(agent_id, |input, ctx| async move {
                 T::call(input, ctx).await
             })
+    }
+
+    pub(crate) fn tool_with_handler<A, I, O, Fut, H>(mut self, func: H) -> Self
+    where
+        A: Agent,
+        I: 'static + Serialize + DeserializeOwned + JsonSchema + Send,
+        O: ToolOutput,
+        Fut: std::future::Future<Output = Result<O, ToolError>> + Send + 'static,
+        H: Fn(I, Context) -> Fut + Send + Sync + 'static,
+    {
+        let agent_id = self.flow.interner.intern(&A::node_id());
+        self.tool_with::<A, I, O>()
+            .tool_work::<I, O, _, _>(agent_id, func)
     }
 
     fn tool_impl<A, I, O>(

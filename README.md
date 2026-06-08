@@ -82,14 +82,14 @@ That keeps routing deterministic and resumption unambiguous.
 
 ```toml
 [dependencies]
-pravah = "0.4.0"
+pravah = "0.4.1"
 ```
 
 To opt into providers explicitly:
 
 ```toml
 [dependencies]
-pravah = { version = "0.4.0", default-features = false, features = [
+pravah = { version = "0.4.1", default-features = false, features = [
   "provider-openai",
   "provider-anthropic",
   "provider-gemini",
@@ -106,7 +106,7 @@ deterministic transform. See [examples/linear_flow.rs](examples/linear_flow.rs)
 for the full runnable file.
 
 ```rust
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -151,8 +151,8 @@ async fn format_bullets(bullets: BulletPoints, _ctx: Context) -> Result<Report, 
 impl Flow for SummariseRequest {
   type Output = Report;
 
-  fn build(builder: FlowBuilder) -> FlowBuilder {
-    builder.agent::<SummariseRequest>().work(format_bullets)
+  fn define(root: Node<Self>) -> FlowBuilder {
+    root.agent().work(format_bullets).finalize()
   }
 }
 
@@ -192,20 +192,20 @@ For a simple persistent conversation without graph construction, use
 
 ## Examples
 
-| Example                                                | What it shows                          |
-| ------------------------------------------------------ | -------------------------------------- | --- | ---------------------------------------------- | ---------------------------------------- |
-| [examples/chat.rs](examples/chat.rs)                   | Single-session chat with history       |
-| [examples/linear_flow.rs](examples/linear_flow.rs)     | Minimal agent -> work pipeline         |
-| [examples/split_merge.rs](examples/split_merge.rs)     | Fan-out and fan-in composition         |
-| [examples/nested_flow.rs](examples/nested_flow.rs)     | Embedded subflows as reusable nodes    |
-| [examples/snapshot.rs](examples/snapshot.rs)           | Save and restore runtime state         |
-| [examples/image_prompt.rs](examples/image_prompt.rs)   | Initial user message with an image     |
-| [examples/ollama_client.rs](examples/ollama_client.rs) | Direct provider client usage           |
-| [examples/debate.rs](examples/debate.rs)               | Multi-agent branching workflow         |
-| [examples/story.rs](examples/story.rs)                 | Looping flow with repeated agent turns       |
-| [examples/gen_diagrams.rs](examples/gen_diagrams.rs)   | Tree, Mermaid, and DOT graph output          |
-| [examples/each_node.rs](examples/each_node.rs)         | Fan-out over a list with the `each` node     |
-| [examples/tool_flow.rs](examples/tool_flow.rs)         | Sub-flow registered as an agent tool         |
+| Example                                                | What it shows                            |
+| ------------------------------------------------------ | ---------------------------------------- |
+| [examples/chat.rs](examples/chat.rs)                   | Single-session chat with history         |
+| [examples/linear_flow.rs](examples/linear_flow.rs)     | Minimal agent -> work pipeline           |
+| [examples/split_merge.rs](examples/split_merge.rs)     | Fan-out and fan-in composition           |
+| [examples/nested_flow.rs](examples/nested_flow.rs)     | Embedded subflows as reusable nodes      |
+| [examples/snapshot.rs](examples/snapshot.rs)           | Save and restore runtime state           |
+| [examples/image_prompt.rs](examples/image_prompt.rs)   | Initial user message with an image       |
+| [examples/ollama_client.rs](examples/ollama_client.rs) | Direct provider client usage             |
+| [examples/debate.rs](examples/debate.rs)               | Multi-agent branching workflow           |
+| [examples/story.rs](examples/story.rs)                 | Looping flow with repeated agent turns   |
+| [examples/gen_diagrams.rs](examples/gen_diagrams.rs)   | Tree, Mermaid, and DOT graph output      |
+| [examples/each_node.rs](examples/each_node.rs)         | Fan-out over a list with the `each` node |
+| [examples/tool_flow.rs](examples/tool_flow.rs)         | Sub-flow registered as an agent tool     |
 
 ## When To Use Pravah
 

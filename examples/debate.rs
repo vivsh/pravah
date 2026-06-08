@@ -1,8 +1,8 @@
-//! Debate example with fork/join plus a nested verdict flow.
+//! Debate example with split/merge plus a nested verdict flow.
 
 use std::io::{self, Write};
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -136,10 +136,11 @@ async fn format_verdict(verdict: DebateVerdict, _ctx: Context) -> Result<DebateR
 impl Flow for DebateDraft {
     type Output = DebateReport;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<DebateDraft>()
+    fn define(root: Node<Self>) -> FlowBuilder {
+        root
+            .agent()
             .work(format_verdict)
+            .finalize()
     }
 }
 
@@ -147,13 +148,13 @@ impl Flow for DebateDraft {
 impl Flow for DebateInput {
     type Output = DebateReport;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .fork(split_claim)
-            .agent::<ProRequest>()
-            .agent::<ConRequest>()
-            .join(merge_arguments)
-            .flow::<DebateDraft>()
+    fn define(root: Node<Self>) -> FlowBuilder {
+        let (pro, con) = root.split(split_claim);
+
+        pro.agent()
+            .merge(con.agent(), |(pro, con)| merge_arguments(pro, con))
+            .flow()
+            .finalize()
     }
 }
 

@@ -5,16 +5,14 @@
 //! its own agent. The outer agent collects those results and includes them in
 //! the final summary.
 //!
-//! Key builder call:
+//! Key fluent call:
 //! ```text
-//! builder
-//!     .agent::<ArticleRequest>()
-//!     .tool_flow::<ArticleRequest, VerifyClaim>()
+//! root
+//!     .agent_with(|toolbox| toolbox.tool_flow::<VerifyClaim>())
 //! ```
-//! This is equivalent to `.tool_with::<ArticleRequest, VerifyClaim, VerificationResult>().flow::<VerifyClaim>()`
-//! but without the repetition.
+//! For non-flow tools, use the low-level `tool_with` on `Toolbox`.
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowRuntime, FlowStep, Node};
 use pravah::tools::ToolOutput;
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
@@ -57,8 +55,8 @@ impl Agent for VerifyClaim {
 impl Flow for VerifyClaim {
     type Output = VerificationResult;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder.agent::<VerifyClaim>()
+    fn define(root: Node<Self>) -> FlowBuilder {
+        root.agent().finalize()
     }
 }
 
@@ -95,10 +93,10 @@ impl Agent for ArticleRequest {
 impl Flow for ArticleRequest {
     type Output = ArticleSummary;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<ArticleRequest>()
-            .tool_flow::<ArticleRequest, VerifyClaim>()
+    fn define(root: Node<Self>) -> FlowBuilder {
+        root
+            .agent_with(|toolbox| toolbox.tool_flow::<VerifyClaim>())
+            .finalize()
     }
 }
 

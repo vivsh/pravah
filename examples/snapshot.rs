@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use pravah::flows::{Flow, FlowBuilder, FlowError, FlowRuntime, FlowSnapshot, FlowStep};
+use pravah::flows::{Flow, FlowBuilder, FlowError, FlowRuntime, FlowSnapshot, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -61,11 +61,12 @@ async fn format_record(rec: EnrichedRecord, _ctx: Context) -> Result<FinalRecord
 impl Flow for RawRecord {
     type Output = FinalRecord;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
+    fn define(root: Node<Self>) -> FlowBuilder {
+        root
             .work(normalise)
             .work(enrich)
             .work(format_record)
+            .finalize()
     }
 }
 

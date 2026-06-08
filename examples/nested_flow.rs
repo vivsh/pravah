@@ -1,6 +1,6 @@
 //! Nested flow example where an outer flow delegates research to an inner flow.
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -32,9 +32,8 @@ impl Agent for ResearchQuery {
 impl Flow for ResearchQuery {
     type Output = ResearchResult;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .agent::<ResearchQuery>()
+    fn define(root: Node<Self>) -> FlowBuilder {
+        root.agent().finalize()
     }
 }
 
@@ -75,11 +74,12 @@ async fn derive_query(req: BlogRequest, _ctx: Context) -> Result<ResearchQuery, 
 impl Flow for BlogRequest {
     type Output = FinalArticle;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
+    fn define(root: Node<Self>) -> FlowBuilder {
+        root
             .work(derive_query)
-            .flow::<ResearchQuery>()
-            .agent::<ResearchResult>()
+            .flow()
+            .agent()
+            .finalize()
     }
 }
 

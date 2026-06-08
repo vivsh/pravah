@@ -3,7 +3,7 @@
 use std::io::Write;
 
 use either::Either;
-use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep};
+use pravah::flows::{Agent, AgentConfig, Flow, FlowBuilder, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -398,18 +398,20 @@ fn route_input(
 impl Flow for StoryTurn {
     type Output = FinalSummary;
 
-    fn build(builder: FlowBuilder) -> FlowBuilder {
-        builder
-            .split(split_crew)
-            .agent::<ChoreographerBrief>()
-            .agent::<DialogueBrief>()
-            .agent::<CinematographerBrief>()
-            .merge(merge_all_notes)
-            .split(split4)
-            .agent::<DirectorBrief>()
-            .merge(merge_director)
+    fn define(root: Node<Self>) -> FlowBuilder {
+        let (choreo, dialogue, cinema, carry) = root.split(split_crew);
+
+        let (director, director_carry) = choreo
+            .agent()
+            .merge((dialogue.agent(), cinema.agent(), carry), merge_all_notes)
+            .split(split4);
+
+        director
+            .agent()
+            .merge(director_carry, merge_director)
             .work(print_and_read)
             .either(route_input)
+            .finalize()
     }
 }
 
