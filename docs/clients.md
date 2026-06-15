@@ -183,11 +183,43 @@ impl Flow for ArticleRequest {
 
 See [../examples/tool_flow.rs](../examples/tool_flow.rs).
 
-**Explicit API — `tool_with` for custom handlers:**
+**Explicit API — `tool_with` for inline tool subgraphs:**
 
-Use `.tool_with(...)` when you want to register a low-level tool handler
-directly on the current agent. The input and output types come from the
-closure signature, and the output must implement `ToolOutput`.
+Use `.tool_with::<I, O>(|tool| ...)` when the tool implementation needs full
+flow composition: `work`, `map`, `either`, `split`/`merge`, `suspend`, nested
+flows, or any other normal node branching rooted at the tool input.
+
+```rust
+impl Flow for VerifyClaim {
+    type Output = VerificationResult;
+
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root
+            .work(fetch_claim)
+            .either(route_claim)
+            .branch(
+                |simple| simple.work(check_simple_claim),
+                |deep| deep.flow(),
+            )
+    }
+}
+
+impl Flow for MyAgent {
+    type Output = MyAgentOutput;
+
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(|toolbox| toolbox.tool_with::<VerifyClaim, VerificationResult>(|tool| tool.flow()))
+    }
+}
+```
+
+Tool names are derived from the input type schema name. The model sees that
+schema as the tool contract.
+
+**Low-level API — `tool_handler` for one-shot handlers:**
+
+Use `.tool_handler(...)` when the tool is just a direct async function and does
+not need an internal subgraph.
 
 ```rust
 impl Flow for MyAgent {
@@ -195,16 +227,13 @@ impl Flow for MyAgent {
 
     fn build(root: Node<Self>) -> Node<Self::Output> {
         root.agent_with(|toolbox| {
-            toolbox.tool_with(|input: ReadFileInput, ctx: Context| async move {
+            toolbox.tool_handler(|input: ReadFileInput, ctx: Context| async move {
                 ReadFile::call(input, ctx).await
             })
         })
     }
 }
 ```
-
-Tool names are derived from the input type schema name. The model sees that
-schema as the tool contract.
 
 ### Tool Results
 

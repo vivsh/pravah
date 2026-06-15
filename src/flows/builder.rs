@@ -114,7 +114,9 @@ impl FlowBuilder {
     }
 
     /// Attaches a tool to agent `A` with explicit input/output types.
-    /// Must be followed by a `.work()` call to provide the implementation.
+    ///
+    /// Register the implementation by continuing the graph from `I` until it
+    /// produces `O`.
     pub fn tool_with<A, I, O>(self) -> Self
     where
         A: Agent,

@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::clients::{ClientError, Message, Role, TokenUsage};
@@ -5,7 +6,7 @@ use crate::flows::compactor::CompactionResult;
 
 /// One history row with Pravah metadata around a wire-format [`Message`].
 /// External code should create entries through [`FlowHistory::push`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     /// Stable row id for persistence.
     pub id: Uuid,
@@ -36,7 +37,7 @@ impl HistoryEntry {
 
 /// Append-only history for all active agent sessions.
 /// Token counters are updated on every [`push`](FlowHistory::push).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FlowHistory {
     entries: Vec<HistoryEntry>,
     next_position: u64,
@@ -49,6 +50,36 @@ impl FlowHistory {
     /// Creates an empty history with zeroed counters.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reconstructs a [`FlowHistory`] from a flat list of stored entries.
+    ///
+    /// Use this when loading row-per-entry data from a relational database.
+    /// Token totals are recomputed only from the provided entries; if evicted
+    /// rows were hard-deleted before loading, the totals will reflect only the
+    /// surviving rows.
+    pub fn from_entries(entries: Vec<HistoryEntry>) -> Self {
+        let mut next_position: u64 = 0;
+        let mut last_usage_pos: Option<u64> = None;
+        let mut last_usage: Option<TokenUsage> = None;
+        let mut total_input: Option<u32> = None;
+        let mut total_output: Option<u32> = None;
+
+        for entry in &entries {
+            if entry.position >= next_position {
+                next_position = entry.position + 1;
+            }
+            if let Some(u) = entry.message.usage {
+                if last_usage_pos.map_or(true, |p| entry.position > p) {
+                    last_usage_pos = Some(entry.position);
+                    last_usage = Some(u);
+                }
+                total_input = add_opt(total_input, u.input);
+                total_output = add_opt(total_output, u.output);
+            }
+        }
+
+        Self { entries, next_position, last_usage, total_input, total_output }
     }
 
     /// Appends a new history entry.

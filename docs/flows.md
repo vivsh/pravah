@@ -41,18 +41,18 @@ into a validated graph and computes how values move between nodes.
 
 ## Node Types
 
-| Fluent call                 | What it does                                                              |
-| --------------------------- | ------------------------------------------------------------------------- |
-| `agent()`                   | LLM-backed node with structured output or a tool loop                     |
-| `agent_with(|toolbox| ...)` | Configure tools on the current agent before advancing to the agent output |
-| `work(f)`                   | Effectful async transform: `async fn(I, Context) -> Result<O, FlowError>` |
-| `map(f)`                    | Pure synchronous transform: `fn(I) -> O`                                  |
-| `either(f)`                 | Route to one branch: `fn(I) -> Either<A, B>`                              |
-| `split(f)`                  | Fan out to multiple branches                                              |
-| `merge(f)`                  | Collect branch outputs once all are ready                                 |
-| `suspend::<O>()`            | Pause the flow and resume later with `O`                                  |
-| `flow()`                    | Embed another flow as a node                                              |
-| `each()`                    | Run a sub-flow once per item in a `Vec<F>`, collect `Vec<F::Output>`      |
+| Fluent call      | What it does                                                              |
+| ---------------- | ------------------------------------------------------------------------- | ----- | ------------------------------------------------------------------------- |
+| `agent()`        | LLM-backed node with structured output or a tool loop                     |
+| `agent_with(     | toolbox                                                                   | ...)` | Configure tools on the current agent before advancing to the agent output |
+| `work(f)`        | Effectful async transform: `async fn(I, Context) -> Result<O, FlowError>` |
+| `map(f)`         | Pure synchronous transform: `fn(I) -> O`                                  |
+| `either(f)`      | Route to one branch: `fn(I) -> Either<A, B>`                              |
+| `split(f)`       | Fan out to multiple branches                                              |
+| `merge(f)`       | Collect branch outputs once all are ready                                 |
+| `suspend::<O>()` | Pause the flow and resume later with `O`                                  |
+| `flow()`         | Embed another flow as a node                                              |
+| `each()`         | Run a sub-flow once per item in a `Vec<F>`, collect `Vec<F::Output>`      |
 
 `fork` and `join` are binary aliases for `split` and `merge`.
 
@@ -203,7 +203,8 @@ impl Flow for ArticleRequest {
 
 The tool name seen by the model is derived from `F`'s schema name. `F::Output`
 must implement `ToolOutput`. For a custom non-flow handler, use
-`agent_with(|toolbox| toolbox.tool_with(...))` instead.
+`agent_with(|toolbox| toolbox.tool_handler(...))` instead, or use
+`tool_with::<I, O>(|tool| ...)` to build an inline tool subgraph.
 
 See [../examples/tool_flow.rs](../examples/tool_flow.rs).
 

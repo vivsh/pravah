@@ -240,7 +240,7 @@ impl Flow for ToolAgentInput {
 
     fn build(root: Node<Self>) -> Node<Self::Output> {
         root.agent_with(|toolbox| {
-            toolbox.tool_with(|input: LookupInput, _ctx: Context| async move {
+            toolbox.tool_handler(|input: LookupInput, _ctx: Context| async move {
                 Ok(LookupOutput {
                     result: input.query,
                 })

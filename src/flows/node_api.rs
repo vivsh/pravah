@@ -278,8 +278,38 @@ impl<A: Agent> Toolbox<A> {
         self.mutate(|b| b.tool::<A, T>())
     }
 
-    /// Attaches a low-level tool handler with explicit input and output types.
-    pub fn tool_with<I, O, Fut, H>(self, func: H) -> Self
+    /// Attaches a tool whose implementation is built from an arbitrary subgraph.
+    ///
+    /// The closure starts at `Node<I>` and must return `Node<O>`, allowing the
+    /// tool to use any flow composition that is valid in the normal fluent API.
+    pub fn tool_with<I, O, Build>(self, build: Build) -> Self
+    where
+        I: 'static + Serialize + DeserializeOwned + JsonSchema + Send,
+        O: ToolOutput,
+        Build: FnOnce(Node<I>) -> Node<O>,
+    {
+        let builder = self.builder;
+        {
+            let mut guard = builder.lock().unwrap_or_else(|e| e.into_inner());
+            let b = std::mem::take(&mut *guard);
+            *guard = b.tool_with::<A, I, O>();
+        }
+
+        let output = build(Node::with_arc(Arc::clone(&builder)));
+        let same_builder = Arc::ptr_eq(&output.builder, &builder);
+        drop(output);
+
+        if !same_builder {
+            let mut guard = builder.lock().unwrap_or_else(|e| e.into_inner());
+            let b = std::mem::take(&mut *guard);
+            *guard = b.error("tool_with: tool returned a node from a different builder");
+        }
+
+        Toolbox::with_arc(builder)
+    }
+
+    /// Attaches a low-level one-shot tool handler with explicit input and output types.
+    pub fn tool_handler<I, O, Fut, H>(self, func: H) -> Self
     where
         I: 'static + Serialize + DeserializeOwned + JsonSchema + Send,
         O: ToolOutput,
@@ -294,7 +324,7 @@ impl<A: Agent> Toolbox<A> {
     where
         F::Output: ToolOutput,
     {
-        self.mutate(|b| b.tool_flow::<A, F>())
+        self.tool_with::<F, F::Output, _>(|tool| tool.flow())
     }
 }
 

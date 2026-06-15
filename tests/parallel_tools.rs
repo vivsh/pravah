@@ -74,13 +74,13 @@ async fn reverse_handler(input: ReverseInput, _ctx: Context) -> Result<ReverseOu
 }
 
 fn with_echo<A: Agent>(toolbox: Toolbox<A>) -> Toolbox<A> {
-    toolbox.tool_with(|input: EchoInput, ctx: Context| async move {
+    toolbox.tool_handler(|input: EchoInput, ctx: Context| async move {
         echo_handler(input, ctx).await
     })
 }
 
 fn with_echo_and_reverse<A: Agent>(toolbox: Toolbox<A>) -> Toolbox<A> {
-    with_echo(toolbox).tool_with(|input: ReverseInput, ctx: Context| async move {
+    with_echo(toolbox).tool_handler(|input: ReverseInput, ctx: Context| async move {
         reverse_handler(input, ctx).await
     })
 }

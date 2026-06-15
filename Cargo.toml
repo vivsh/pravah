@@ -1,6 +1,6 @@
 [package]
 name = "pravah"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 description = "Typed, stepwise agentic information flows for Rust"
 license = "MIT OR Apache-2.0"
@@ -26,7 +26,7 @@ tracing = "0.1"
 indexmap = { version = "2.14.0", features = ["serde"] }
 either = { version = "1.15.0", features = ["serde"] }
 futures = "0.3.32"
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v7", "serde"] }
 
 [dev-dependencies]
 argh = "0.1"
