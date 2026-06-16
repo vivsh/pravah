@@ -7,6 +7,7 @@ use crate::{
         ClientFactory, Flow, FlowError, FlowGraph, FlowHistory, FlowStep, NodeId,
         compactor::{DynHistoryCompactor, NoopCompactor},
         inspect::FlowInspector,
+        memory::{DynMemoryFactory, NoopMemoryFactory},
         state::{AgentContinuation, Callable, FlowState},
         store::{DynHistoryStore, NoopHistoryStore},
     },
@@ -106,6 +107,7 @@ pub struct FlowRuntime<I: Flow> {
     callables: Vec<FlowCall>,
     history: FlowHistory,
     factory: Arc<dyn ClientFactory>,
+    memory: Arc<dyn DynMemoryFactory>,
     compactor: Box<dyn DynHistoryCompactor>,
     store: Box<dyn DynHistoryStore>,
     _marker: std::marker::PhantomData<I>,
@@ -152,6 +154,7 @@ impl<I: Flow> FlowRuntime<I> {
             callables,
             history,
             factory: Arc::new(DefaultClientFactory),
+            memory: Arc::new(NoopMemoryFactory),
             compactor: Box::new(NoopCompactor),
             store: Box::new(NoopHistoryStore),
             _marker: std::marker::PhantomData,
@@ -221,6 +224,20 @@ impl<I: Flow> FlowRuntime<I> {
     /// Replaces the default [`ClientFactory`].
     pub fn with_factory(mut self, factory: impl ClientFactory + 'static) -> Self {
         self.factory = Arc::new(factory);
+        self
+    }
+
+    /// Sets a [`MemoryFactory`](crate::flows::memory::MemoryFactory) for dynamic context injection.
+    ///
+    /// The factory is called once per agent invocation (result cached for the
+    /// lifetime of the invocation) to retrieve memories or other dynamic content
+    /// that is prepended to the agent's system prompt between the static preamble
+    /// and the input-schema hint.
+    pub fn with_memory(
+        mut self,
+        memory: impl crate::flows::memory::MemoryFactory + Send + Sync + 'static,
+    ) -> Self {
+        self.memory = Arc::new(memory);
         self
     }
 
@@ -301,6 +318,7 @@ impl<I: Flow> FlowRuntime<I> {
     /// Fails with [`FlowError::ResumeRequired`] if the flow is already suspended.
     pub async fn next(&mut self, ctx: Context) -> Result<FlowStep<I::Output>, FlowError> {
         let factory = Arc::clone(&self.factory);
+        let memory = Arc::clone(&self.memory);
         let callable_index = self
             .state
             .callable_index()
@@ -323,7 +341,7 @@ impl<I: Flow> FlowRuntime<I> {
         );
         let out = graph
             .0
-            .next(factory.as_ref(), ctx, &mut self.history, &mut self.state)
+            .next(factory.as_ref(), memory.as_ref(), ctx, &mut self.history, &mut self.state)
             .await?;
         self.run_compaction_and_flush().await;
         let step = lift_step(out)?;
@@ -415,6 +433,7 @@ impl<I: Flow> FlowRuntime<I> {
         }
         let resumption = serde_json::to_value(value).map_err(FlowError::Serialize)?;
         let factory = Arc::clone(&self.factory);
+        let memory = Arc::clone(&self.memory);
         let callable_index = self
             .state
             .callable_index()
@@ -433,6 +452,7 @@ impl<I: Flow> FlowRuntime<I> {
             .0
             .resume(
                 factory.as_ref(),
+                memory.as_ref(),
                 ctx,
                 &mut self.history,
                 resumption,
@@ -487,6 +507,7 @@ impl<I: Flow> FlowRuntime<I> {
             history,
             callables,
             factory: Arc::new(DefaultClientFactory),
+            memory: Arc::new(NoopMemoryFactory),
             compactor: Box::new(NoopCompactor),
             store: Box::new(NoopHistoryStore),
             _marker: std::marker::PhantomData,

@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 
 use super::super::tools::ToolDefinition;
 use super::{
-    Attachment, Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmUrl, Message,
-    Provider, Role, ThinkingLevel, TokenUsage, ToolCall, ToolChoice, configured_base_url,
-    decode_output_text, required_api_key, validate_tools,
+    Attachment, CacheControl, Client, ClientError, ClientOptions, ClientOutput, ClientResponse,
+    LlmUrl, Message, Provider, Role, ThinkingLevel, TokenUsage, ToolCall, ToolChoice,
+    configured_base_url, decode_output_text, required_api_key, validate_tools,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
@@ -165,8 +165,33 @@ fn build_payload(
             system.push(msg.content.clone());
         }
     }
+    if options.wants_json_output() {
+        let schema_hint = options
+            .output_schema
+            .as_ref()
+            .map(|schema| format!("\n\nReturn only valid JSON matching this JSON Schema: {schema}"))
+            .unwrap_or_else(|| "\n\nReturn only valid JSON.".to_string());
+        // Append schema hint to last system block (or create one).
+        if let Some(last) = system.last_mut() {
+            last.push_str(&schema_hint);
+        } else {
+            system.push(schema_hint.trim_start_matches('\n').to_string());
+        }
+    }
     if !system.is_empty() {
-        payload["system"] = Value::String(system.join("\n\n"));
+        if let Some(cache) = &options.cache {
+            let cache_control = match cache {
+                CacheControl::Ephemeral5m => json!({"type": "ephemeral"}),
+                CacheControl::Ephemeral1h => json!({"type": "ephemeral", "ttl": "1h"}),
+            };
+            payload["system"] = json!([{
+                "type": "text",
+                "text": system.join("\n\n"),
+                "cache_control": cache_control,
+            }]);
+        } else {
+            payload["system"] = Value::String(system.join("\n\n"));
+        }
     }
 
     if tools_enabled {
@@ -174,18 +199,6 @@ fn build_payload(
         if options.tool_choice == ToolChoice::Required {
             payload["tool_choice"] = json!({ "type": "any" });
         }
-    }
-    if options.wants_json_output() {
-        let schema_hint = options
-            .output_schema
-            .as_ref()
-            .map(|schema| format!("\n\nReturn only valid JSON matching this JSON Schema: {schema}"))
-            .unwrap_or_else(|| "\n\nReturn only valid JSON.".to_string());
-        payload["system"] = Value::String(format!(
-            "{}{}",
-            payload["system"].as_str().unwrap_or(""),
-            schema_hint
-        ));
     }
 
     payload
@@ -587,5 +600,48 @@ mod tests {
             ClientOutput::Output(Value::String(text)) => assert_eq!(text, "plain text"),
             _ => panic!("expected string output"),
         }
+    }
+
+    /// With cache=5m, system is an array with a cache_control block.
+    #[test]
+    fn payload_with_cache_5m_uses_ephemeral_cache_control() {
+        let mut options = ClientOptions::default().with_preamble("Be concise.");
+        options.cache = Some(CacheControl::Ephemeral5m);
+        let payload = build_payload("claude", &options, &[Message::user("hi")], false);
+        let system = payload["system"].as_array().expect("system should be an array with cache");
+        assert_eq!(system[0]["type"], "text");
+        assert_eq!(system[0]["text"], "Be concise.");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert!(system[0]["cache_control"].get("ttl").is_none());
+    }
+
+    /// With cache=1h, system includes ttl field.
+    #[test]
+    fn payload_with_cache_1h_includes_ttl() {
+        let mut options = ClientOptions::default().with_preamble("Be concise.");
+        options.cache = Some(CacheControl::Ephemeral1h);
+        let payload = build_payload("claude", &options, &[Message::user("hi")], false);
+        let system = payload["system"].as_array().expect("system should be an array with cache");
+        assert_eq!(system[0]["cache_control"]["ttl"], "1h");
+    }
+
+    /// Without cache, system remains a plain string.
+    #[test]
+    fn payload_without_cache_system_is_string() {
+        let options = ClientOptions::default().with_preamble("Be concise.");
+        let payload = build_payload("claude", &options, &[Message::user("hi")], false);
+        assert!(payload["system"].is_string());
+    }
+
+    /// cache=5m + json output: schema hint is included in the cached system text.
+    #[test]
+    fn payload_cache_with_json_output_includes_schema_hint() {
+        let mut options = ClientOptions::default()
+            .with_preamble("Be concise.")
+            .with_response_format(crate::clients::ResponseFormat::Json);
+        options.cache = Some(CacheControl::Ephemeral5m);
+        let payload = build_payload("claude", &options, &[Message::user("hi")], false);
+        let system = payload["system"].as_array().expect("system should be an array with cache");
+        assert!(system[0]["text"].as_str().unwrap().contains("Return only valid JSON."));
     }
 }

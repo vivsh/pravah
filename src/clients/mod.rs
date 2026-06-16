@@ -38,7 +38,7 @@ pub(crate) mod schema;
 pub mod url;
 
 pub use crate::tools::ToolDefinition;
-pub use url::{LlmUrl, ThinkingLevel};
+pub use url::{CacheControl, LlmUrl, ThinkingLevel};
 
 /// Role of a message in provider-facing history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -436,6 +436,9 @@ pub struct ClientOptions {
     pub response_format: ResponseFormat,
     /// Sampling temperature.
     pub temperature: Option<f32>,
+    /// Prompt caching policy. `None` means no explicit cache control.
+    /// Currently only used by Anthropic; other providers cache automatically.
+    pub cache: Option<CacheControl>,
     /// Name of the output type expected from this agent run.
     /// Used by clients that need to inject an exit tool.
     pub(crate) output_type_name: String,
@@ -533,6 +536,9 @@ impl ClientOptions {
         }
         if url.thinking.is_some() {
             self.thinking = url.thinking.clone();
+        }
+        if url.cache.is_some() {
+            self.cache = url.cache.clone();
         }
         match url.provider {
             Provider::Gemini => gemini::new_client(&url, self),

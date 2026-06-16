@@ -19,7 +19,7 @@ use crate::flows::errors::{BuildError, FlowError};
 use crate::flows::validation::validate_nodes;
 use crate::{
     clients::Message,
-    commons::{Agent, make_agent_environment, make_agent_message},
+    commons::{Agent, make_agent_message},
     context::Context,
     tools::base::pascal_to_snake,
     tools::{SuspendedValue, Tool, ToolError, ToolOutput},
@@ -96,7 +96,6 @@ impl FlowBuilder {
             tools: Vec::new(),
             make_message: make_agent_message::<A>,
             preamble: config.preamble,
-            make_environment: make_agent_environment::<A>,
             input_schema,
             model: config.model_url,
             exit: output_id,

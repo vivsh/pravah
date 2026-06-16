@@ -64,6 +64,10 @@ pub(crate) struct AgentState {
     pub session_id: String,
     /// Original input value, retained for use in `environment(&self)` at dispatch time.
     pub input: serde_json::Value,
+    /// Effective preamble computed on the first dispatch and reused for all subsequent
+    /// turns within the same invocation, preserving a stable KV-cache prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_preamble: Option<String>,
     pub continuation: AgentContinuation,
 }
 
@@ -246,6 +250,7 @@ impl FlowState {
                 frame.agent_states.insert(node_id, AgentState {
                     session_id,
                     input,
+                    cached_preamble: None,
                     continuation: AgentContinuation::Dispatch,
                 });
                 true

@@ -6,7 +6,6 @@ use super::runtime::FlowCall;
 use super::state::{AgentContinuation, FlowState, Frame};
 use crate::clients::Message;
 use crate::commons::Agent;
-use crate::context::Context;
 use crate::flows::NodeId;
 use crate::tools::ToolDefinition;
 
@@ -161,14 +160,18 @@ impl<'a> FlowInspector<'a> {
     /// The preamble reflects the fully assembled system prompt — static base,
     /// runtime environment from `ctx`, and input-schema hint — exactly as it
     /// would be sent to the LLM. Returns `None` when `T` is not registered.
-    pub fn agent_view<T: Agent>(&self, ctx: &Context) -> Option<AgentView> {
+    ///
+    /// Note: the preamble shown here reflects the static content only. Memory
+    /// injected at runtime via [`MemoryFactory`](crate::flows::memory::MemoryFactory)
+    /// is not included because retrieval is async and input-dependent.
+    pub fn agent_view<T: Agent>(&self) -> Option<AgentView> {
         let key = T::node_id();
         for callable in self.callables {
             let graph = &callable.0;
             if let Some(node_id) = graph.interner.intern_get(&key) {
                 if let Some(FlowNode::Agent(info)) = graph.nodes.get(&node_id) {
                     return Some(AgentView {
-                        preamble: info.effective_preamble(&serde_json::Value::Null, ctx),
+                        preamble: info.effective_preamble(None),
                         tools: info.tools.iter().map(|t| t.definition.clone()).collect(),
                     });
                 }

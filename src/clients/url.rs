@@ -48,6 +48,18 @@ impl std::fmt::Display for ThinkingLevel {
     }
 }
 
+/// Prompt caching policy for providers that require explicit opt-in.
+///
+/// Currently only used by Anthropic. Other providers handle caching
+/// automatically and ignore this setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheControl {
+    /// Ephemeral 5-minute cache (default Anthropic TTL).
+    Ephemeral5m,
+    /// Ephemeral 1-hour cache (billed at 2× base input token price).
+    Ephemeral1h,
+}
+
 /// Parsed model URL.
 ///
 /// Format: `provider[+transport]://[authority][/prefix/]model[?params]`
@@ -72,6 +84,8 @@ pub struct LlmUrl {
     pub temperature: Option<f32>,
     /// Reasoning depth. `None` means use the provider default.
     pub thinking: Option<ThinkingLevel>,
+    /// Prompt caching policy. `None` means no explicit cache control.
+    pub cache: Option<CacheControl>,
 }
 
 impl LlmUrl {
@@ -133,7 +147,7 @@ impl LlmUrl {
             None
         };
 
-        let (temperature, thinking, api_key) = parse_query_str(query_str, s)?;
+        let (temperature, thinking, api_key, cache) = parse_query_str(query_str, s)?;
 
         Ok(LlmUrl {
             provider,
@@ -142,6 +156,7 @@ impl LlmUrl {
             base_url,
             temperature,
             thinking,
+            cache,
         })
     }
 }
@@ -265,14 +280,15 @@ fn parse_host_port(authority: &str, original: &str) -> Result<(String, Option<u1
 fn parse_query_str(
     query_str: Option<&str>,
     original: &str,
-) -> Result<(Option<f32>, Option<ThinkingLevel>, Option<String>), ClientError> {
+) -> Result<(Option<f32>, Option<ThinkingLevel>, Option<String>, Option<CacheControl>), ClientError> {
     let Some(query) = query_str else {
-        return Ok((None, None, None));
+        return Ok((None, None, None, None));
     };
 
     let mut temperature: Option<f32> = None;
     let mut thinking: Option<ThinkingLevel> = None;
     let mut api_key: Option<String> = None;
+    let mut cache: Option<CacheControl> = None;
     let mut seen: HashSet<String> = HashSet::new();
 
     for pair in query.split('&').filter(|p| !p.is_empty()) {
@@ -324,15 +340,26 @@ fn parse_query_str(
                 })?;
                 api_key = Some(resolved);
             }
+            "cache" => {
+                cache = Some(match value {
+                    "5m" => CacheControl::Ephemeral5m,
+                    "1h" => CacheControl::Ephemeral1h,
+                    other => {
+                        return Err(ClientError::InvalidUrl(format!(
+                            "cache must be 5m or 1h in '{original}', got '{other}'"
+                        )));
+                    }
+                });
+            }
             other => {
                 return Err(ClientError::InvalidUrl(format!(
-                    "unknown query parameter '{other}' in '{original}'; supported: temperature, thinking, api_key_env"
+                    "unknown query parameter '{other}' in '{original}'; supported: temperature, thinking, api_key_env, cache"
                 )));
             }
         }
     }
 
-    Ok((temperature, thinking, api_key))
+    Ok((temperature, thinking, api_key, cache))
 }
 
 #[cfg(test)]
@@ -485,5 +512,35 @@ mod tests {
             LlmUrl::parse("openai:///gpt-4o?api_key_env=__PRAVAH_MISSING_ENV__"),
             Err(ClientError::InvalidUrl(_))
         ));
+    }
+
+    /// cache=5m parses to Ephemeral5m.
+    #[test]
+    fn parse_cache_5m() {
+        let url = LlmUrl::parse("anthropic:///claude-sonnet-4-5?cache=5m").unwrap();
+        assert_eq!(url.cache, Some(CacheControl::Ephemeral5m));
+    }
+
+    /// cache=1h parses to Ephemeral1h.
+    #[test]
+    fn parse_cache_1h() {
+        let url = LlmUrl::parse("anthropic:///claude-sonnet-4-5?cache=1h").unwrap();
+        assert_eq!(url.cache, Some(CacheControl::Ephemeral1h));
+    }
+
+    /// Unknown cache value is rejected.
+    #[test]
+    fn reject_unknown_cache_value() {
+        assert!(matches!(
+            LlmUrl::parse("anthropic:///claude-sonnet-4-5?cache=30s"),
+            Err(ClientError::InvalidUrl(_))
+        ));
+    }
+
+    /// Absent cache param leaves cache as None.
+    #[test]
+    fn no_cache_param_is_none() {
+        let url = LlmUrl::parse("anthropic:///claude-sonnet-4-5").unwrap();
+        assert_eq!(url.cache, None);
     }
 }

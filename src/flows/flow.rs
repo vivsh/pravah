@@ -6,6 +6,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::builder::FlowBuilder;
+use super::memory::DynMemoryFactory;
+use super::memory::MemoryQuery;
 use super::node_api::Node;
 use super::compactor::count_complete_turns;
 use super::history::FlowHistory;
@@ -419,22 +421,24 @@ impl FlowGraph {
     pub(crate) async fn next(
         &self,
         factory: &dyn ClientFactory,
+        memory: &dyn DynMemoryFactory,
         ctx: Context,
         history: &mut FlowHistory,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
-        self.step(factory, ctx, history, None, states).await
+        self.step(factory, memory, ctx, history, None, states).await
     }
 
     pub(crate) async fn resume(
         &self,
         factory: &dyn ClientFactory,
+        memory: &dyn DynMemoryFactory,
         ctx: Context,
         history: &mut FlowHistory,
         resumption: Value,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
-        self.step(factory, ctx, history, Some(resumption), states)
+        self.step(factory, memory, ctx, history, Some(resumption), states)
             .await
     }
 
@@ -442,6 +446,7 @@ impl FlowGraph {
         node: &AgentInfo,
         flow: &FlowGraph,
         factory: &dyn ClientFactory,
+        memory: &dyn DynMemoryFactory,
         ctx: Context,
         history: &mut FlowHistory,
         states: &mut FlowState,
@@ -471,8 +476,26 @@ impl FlowGraph {
                 ..
             }) => {
                 let session_id = session_id.clone();
-                let input = input.clone();
-                Self::dispatch_agent(node, flow, factory, ctx, history, states, &session_id, &input).await
+                let preamble = match states.get_agent_state(node.id).and_then(|s| s.cached_preamble.clone()) {
+                    Some(cached) => cached,
+                    None => {
+                        let agent_name = flow.interner.name_of(node.id);
+                        let env = memory.retrieve_dyn(&MemoryQuery {
+                            agent_name,
+                            input,
+                            ctx: &ctx,
+                        }).await.map_err(|e| FlowError::MemoryError {
+                            agent: agent_name.to_string(),
+                            reason: e.to_string(),
+                        })?;
+                        let computed = node.effective_preamble(env);
+                        if let Some(s) = states.get_agent_state_mut(node.id) {
+                            s.cached_preamble = Some(computed.clone());
+                        }
+                        computed
+                    }
+                };
+                Self::dispatch_agent(node, flow, factory, ctx, history, states, &session_id, &preamble).await
             }
 
             Some(AgentState {
@@ -631,7 +654,7 @@ impl FlowGraph {
         history: &mut FlowHistory,
         states: &mut FlowState,
         session_id: &str,
-        input: &serde_json::Value,
+        preamble: &str,
     ) -> Result<FlowStep, FlowError> {
         let agent_name = flow.interner.name_of(node.id).to_string();
 
@@ -657,7 +680,7 @@ impl FlowGraph {
             .with_tool_choice(tool_choice)
             .with_name(agent_name.clone())
             .with_output_schema(node.output_schema.clone())
-            .with_preamble(node.effective_preamble(input, &ctx));
+            .with_preamble(preamble.to_owned());
 
         let client = factory.create(&node.model, options).map_err(|e| {
             tracing::error!(agent = %agent_name, error = %e, "LLM client creation failed");
@@ -819,6 +842,7 @@ impl FlowGraph {
     async fn step_inner(
         &self,
         factory: &dyn ClientFactory,
+        memory: &dyn DynMemoryFactory,
         ctx: Context,
         history: &mut FlowHistory,
         states: &mut FlowState,
@@ -841,7 +865,7 @@ impl FlowGraph {
             match current_node {
                 FlowNode::Agent(agent) => {
                     tracing::debug!(node = %node_name, kind = "agent", "dispatching node");
-                    return Self::handle_agent(agent, self, factory, ctx, history, states).await;
+                    return Self::handle_agent(agent, self, factory, memory, ctx, history, states).await;
                 }
                 FlowNode::Either(either) => {
                     tracing::debug!(node = %node_name, kind = "either", "dispatching node");
@@ -914,6 +938,7 @@ impl FlowGraph {
     async fn step(
         &self,
         factory: &dyn ClientFactory,
+        memory: &dyn DynMemoryFactory,
         ctx: Context,
         history: &mut FlowHistory,
         mut resumption: Option<Value>,
@@ -934,7 +959,7 @@ impl FlowGraph {
                 });
             }
         }
-        let result = self.step_inner(factory, ctx, history, states).await?;
+        let result = self.step_inner(factory, memory, ctx, history, states).await?;
         match result {
             FlowStep::Continue => {
                 if let Some(v) = states.call_exit() {

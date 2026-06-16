@@ -3,6 +3,7 @@ mod builder;
 mod flow;
 #[cfg(test)]
 mod flow_tests;
+pub mod memory;
 mod nodes;
 pub mod node_api;
 pub mod compactor;
@@ -35,6 +36,7 @@ pub use errors::{AgentError, BuildError, FlowError};
 pub use flow::{Flow, FlowGraph, FlowStep};
 pub use history::{FlowHistory, HistoryEntry};
 pub use interner::NodeId;
+pub use memory::{MemoryFactory, MemoryQuery, MemoryResult, NoopMemoryFactory};
 pub use nary::{MergeInputs, SplitOutputs};
 pub use runtime::{FlowRuntime, FlowSnapshot, LimitKind, RunLimits, RunOutcome};
 pub use store::{HistoryStore, NoopHistoryStore};

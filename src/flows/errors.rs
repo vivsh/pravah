@@ -49,6 +49,10 @@ pub enum FlowError {
     /// An agent or tool produced an unrecoverable error.
     #[error(transparent)]
     Agent(#[from] AgentError),
+
+    /// A [`MemoryFactory`](crate::flows::MemoryFactory) returned an error during retrieval.
+    #[error("memory retrieval failed for agent '{agent}': {reason}")]
+    MemoryError { agent: String, reason: String },
 }
 
 /// Errors raised while building or validating a flow graph.
