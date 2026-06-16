@@ -458,19 +458,21 @@ impl FlowGraph {
                     ))
                 })?;
                 let agent_name = flow.interner.name_of(node.id);
-                let message = (node.make_message)(input, &ctx)?;
+                let message = (node.make_message)(input.clone(), &ctx)?;
                 history.push(&session_id, agent_name, message);
-                states.init_agent_state(node.id, session_id.clone());
+                states.init_agent_state(node.id, session_id.clone(), input);
                 Ok(FlowStep::Continue)
             }
 
             Some(AgentState {
                 ref session_id,
+                ref input,
                 continuation: AgentContinuation::Dispatch,
                 ..
             }) => {
                 let session_id = session_id.clone();
-                Self::dispatch_agent(node, flow, factory, ctx, history, states, &session_id).await
+                let input = input.clone();
+                Self::dispatch_agent(node, flow, factory, ctx, history, states, &session_id, &input).await
             }
 
             Some(AgentState {
@@ -629,6 +631,7 @@ impl FlowGraph {
         history: &mut FlowHistory,
         states: &mut FlowState,
         session_id: &str,
+        input: &serde_json::Value,
     ) -> Result<FlowStep, FlowError> {
         let agent_name = flow.interner.name_of(node.id).to_string();
 
@@ -646,7 +649,6 @@ impl FlowGraph {
             "LLM dispatch"
         );
 
-        let has_prior_history = !history.session_entries(session_id).is_empty();
         let mut options = ClientOptions::default();
         options.output_type_name = node.output_type_name.clone();
         let options = options
@@ -654,12 +656,8 @@ impl FlowGraph {
             .with_tools(defs)
             .with_tool_choice(tool_choice)
             .with_name(agent_name.clone())
-            .with_output_schema(node.output_schema.clone());
-        let options = if has_prior_history {
-            options
-        } else {
-            options.with_preamble(node.effective_preamble(&ctx))
-        };
+            .with_output_schema(node.output_schema.clone())
+            .with_preamble(node.effective_preamble(input, &ctx));
 
         let client = factory.create(&node.model, options).map_err(|e| {
             tracing::error!(agent = %agent_name, error = %e, "LLM client creation failed");

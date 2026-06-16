@@ -50,7 +50,7 @@ pub(crate) struct AgentInfo {
     pub(crate) tools: Vec<ToolInfo>,
     pub(crate) make_message: fn(Value, &Context) -> Result<Message, FlowError>,
     pub(crate) preamble: String,
-    pub(crate) make_environment: fn(&Context) -> Option<String>,
+    pub(crate) make_environment: fn(&Value, &Context) -> Option<String>,
     pub(crate) input_schema: Value,
     pub(crate) model: String,
     pub(crate) exit: NodeId,
@@ -155,12 +155,12 @@ pub(crate) enum FlowNode {
 impl AgentInfo {
     /// Returns the full system-prompt text sent to the LLM on the first turn:
     /// static preamble + optional runtime environment + input-schema hint.
-    pub(crate) fn effective_preamble(&self, ctx: &Context) -> String {
+    pub(crate) fn effective_preamble(&self, input: &Value, ctx: &Context) -> String {
         let hint = format!(
             "The user message is JSON. Interpret it using this JSON Schema: {}",
             self.input_schema
         );
-        let env = (self.make_environment)(ctx);
+        let env = (self.make_environment)(input, ctx);
         match (self.preamble.is_empty(), env) {
             (true, None)     => hint,
             (false, None)    => format!("{}\n\n{}", self.preamble, hint),

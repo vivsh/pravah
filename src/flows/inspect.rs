@@ -168,7 +168,7 @@ impl<'a> FlowInspector<'a> {
             if let Some(node_id) = graph.interner.intern_get(&key) {
                 if let Some(FlowNode::Agent(info)) = graph.nodes.get(&node_id) {
                     return Some(AgentView {
-                        preamble: info.effective_preamble(ctx),
+                        preamble: info.effective_preamble(&serde_json::Value::Null, ctx),
                         tools: info.tools.iter().map(|t| t.definition.clone()).collect(),
                     });
                 }

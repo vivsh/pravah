@@ -62,6 +62,8 @@ pub(crate) struct EachState {
 pub(crate) struct AgentState {
     /// Session ID used for LLM history.
     pub session_id: String,
+    /// Original input value, retained for use in `environment(&self)` at dispatch time.
+    pub input: serde_json::Value,
     pub continuation: AgentContinuation,
 }
 
@@ -238,11 +240,12 @@ impl FlowState {
     }
 
     /// Inserts a fresh `Dispatch` agent state for `node_id` with the given session.
-    pub(crate) fn init_agent_state(&mut self, node_id: NodeId, session_id: String) -> bool {
+    pub(crate) fn init_agent_state(&mut self, node_id: NodeId, session_id: String, input: serde_json::Value) -> bool {
         match self.top_mut() {
             Some(frame) => {
                 frame.agent_states.insert(node_id, AgentState {
                     session_id,
+                    input,
                     continuation: AgentContinuation::Dispatch,
                 });
                 true
