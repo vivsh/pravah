@@ -82,7 +82,7 @@ That keeps routing deterministic and resumption unambiguous.
 
 ```toml
 [dependencies]
-pravah = "0.4.2"
+pravah = "0.4.5"
 ```
 
 Configure provider credentials with the environment variables documented in

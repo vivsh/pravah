@@ -36,7 +36,7 @@ pub use errors::{AgentError, BuildError, FlowError};
 pub use flow::{Flow, FlowGraph, FlowStep};
 pub use history::{FlowHistory, HistoryEntry};
 pub use interner::NodeId;
-pub use memory::{MemoryFactory, MemoryQuery, MemoryResult, NoopMemoryFactory};
+pub use memory::{AgentMemory, MemoryFactory, MemoryQuery, MemoryResult, MemoryRegistry, NoopMemoryFactory};
 pub use nary::{MergeInputs, SplitOutputs};
 pub use runtime::{FlowRuntime, FlowSnapshot, LimitKind, RunLimits, RunOutcome};
 pub use store::{HistoryStore, NoopHistoryStore};

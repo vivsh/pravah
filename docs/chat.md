@@ -57,6 +57,7 @@ if let Some(usage) = t1.usage {
 | `.session_id(id)`    | Override the auto-generated UUID (useful for durable storage) |
 | `.with_compactor(c)` | Attach a history compactor (e.g. `SlidingWindowCompactor`)    |
 | `.with_store(s)`     | Attach a history store for persistence                        |
+| `.with_memory(f)`    | Attach a memory factory for per-turn dynamic context          |
 
 `.preamble` and `.environment` compose: the final system prompt is
 `{preamble}\n\n{environment}` when both are set.
@@ -149,6 +150,39 @@ let mut chat: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
 The store receives the full history after every `send` or `send_message` call.
 If the flush fails, the error is returned as `ChatError::Store`; in-memory
 history is already updated at that point.
+
+## Memory Injection
+
+Attach a [`MemoryFactory`](https://docs.rs/pravah) to inject dynamic context
+into the system prompt before each turn. The retrieved text is prepended as a
+transient system message; it is never stored in history and does not affect
+compaction or snapshots.
+
+```rust
+use pravah::flows::memory::{MemoryFactory, MemoryQuery, MemoryResult};
+
+struct UserProfile { store: ProfileStore }
+
+impl MemoryFactory for UserProfile {
+    async fn retrieve(&self, query: &MemoryQuery<'_>) -> MemoryResult {
+        let user_id = query.input["user_id"].as_str().ok_or("missing user_id")?;
+        let profile = self.store.get(user_id).await?;
+        Ok(Some(format!("User profile: {profile}")))
+    }
+}
+
+let mut chat: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
+    .preamble("You are a personalised assistant.")
+    .with_memory(UserProfile { store })
+    .build()?;
+```
+
+`MemoryQuery::agent_name` is always `"chat"` for `Chat` sessions.
+`MemoryQuery::input` contains the serialized input value — a plain JSON string
+for `Chat<String, _>` and a JSON object for typed inputs.
+
+For per-agent routing across multiple agents, use [`MemoryRegistry`](https://docs.rs/pravah)
+with [`FlowRuntime::with_memory`](flows.md).
 
 ## Model URLs
 

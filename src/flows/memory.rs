@@ -1,8 +1,11 @@
+use std::collections::HashMap;
 use std::future::Future;
+use std::marker::PhantomData;
 
 use futures::future::BoxFuture;
 use serde_json::Value;
 
+use crate::commons::Agent;
 use crate::context::Context;
 
 /// Convenience alias for the return type of [`MemoryFactory::retrieve`].
@@ -82,5 +85,131 @@ where
 {
     fn retrieve_dyn<'a>(&'a self, query: &'a MemoryQuery<'a>) -> BoxFuture<'a, MemoryResult> {
         Box::pin(self.retrieve(query))
+    }
+}
+
+/// Typed per-agent memory retrieval.
+///
+/// Implement this for a specific agent type `A` to receive the deserialized
+/// input struct rather than raw JSON. Register with [`MemoryRegistry::for_agent`].
+pub trait AgentMemory<A: Agent> {
+    /// Retrieve context for one invocation of agent `A`.
+    ///
+    /// `input` is the deserialized agent input. Return `Ok(None)` when nothing
+    /// is relevant; return `Err(...)` to halt the flow with
+    /// [`FlowError::MemoryError`](crate::flows::FlowError).
+    fn retrieve(&self, input: &A, ctx: &Context) -> impl Future<Output = MemoryResult> + Send;
+}
+
+struct AgentMemoryShim<A, F> {
+    factory: F,
+    _marker: PhantomData<fn() -> A>,
+}
+
+impl<A, F> MemoryFactory for AgentMemoryShim<A, F>
+where
+    A: Agent,
+    F: AgentMemory<A> + Send + Sync + 'static,
+{
+    async fn retrieve(&self, query: &MemoryQuery<'_>) -> MemoryResult {
+        let input: A = match serde_json::from_value(query.input.clone()) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        self.factory.retrieve(&input, query.ctx).await
+    }
+}
+
+/// Dispatch table that routes memory retrieval to per-agent stores.
+///
+/// Build with [`MemoryRegistry::new`], register typed stores with
+/// [`for_agent`](MemoryRegistry::for_agent), and optionally set a
+/// [`with_fallback`](MemoryRegistry::with_fallback) for agents without a
+/// dedicated entry.
+///
+/// `MemoryRegistry` implements [`MemoryFactory`], so pass it directly to
+/// [`FlowRuntime::with_memory`](crate::flows::FlowRuntime::with_memory).
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use pravah::flows::memory::{AgentMemory, MemoryRegistry, MemoryResult};
+/// use pravah::context::Context;
+/// # use schemars::JsonSchema;
+/// # use serde::{Deserialize, Serialize};
+/// # use pravah::commons::{Agent, AgentConfig};
+/// # #[derive(Serialize, Deserialize, JsonSchema)]
+/// # struct Search { query: String }
+/// # impl Agent for Search {
+/// #     type Output = Search;
+/// #     fn configure() -> AgentConfig { AgentConfig::new("", "openai:///gpt-4o") }
+/// # }
+/// # struct VectorDB;
+/// impl AgentMemory<Search> for VectorDB {
+///     async fn retrieve(&self, input: &Search, _ctx: &Context) -> MemoryResult {
+///         Ok(Some(format!("results for: {}", input.query)))
+///     }
+/// }
+///
+/// let registry = MemoryRegistry::new()
+///     .for_agent::<Search, _>(VectorDB);
+/// ```
+pub struct MemoryRegistry {
+    entries: HashMap<String, Box<dyn DynMemoryFactory>>,
+    fallback: Option<Box<dyn DynMemoryFactory>>,
+}
+
+impl Default for MemoryRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MemoryRegistry {
+    /// Creates an empty registry with no registered agents and no fallback.
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            fallback: None,
+        }
+    }
+
+    /// Registers a typed memory store for agent `A`.
+    ///
+    /// When agent `A` is dispatched, `factory.retrieve(&input, ctx)` is called
+    /// with the deserialized input struct. Overwrites any previously registered
+    /// factory for the same agent.
+    pub fn for_agent<A, F>(mut self, factory: F) -> Self
+    where
+        A: Agent,
+        F: AgentMemory<A> + Send + Sync + 'static,
+    {
+        let shim = AgentMemoryShim { factory, _marker: PhantomData };
+        self.entries.insert(A::node_id(), Box::new(shim));
+        self
+    }
+
+    /// Sets a fallback factory for agents without a registered entry.
+    ///
+    /// The fallback receives the untyped [`MemoryQuery`] (including
+    /// `agent_name`) so it can apply its own routing logic if needed.
+    pub fn with_fallback<F>(mut self, fallback: F) -> Self
+    where
+        F: MemoryFactory + Send + Sync + 'static,
+    {
+        self.fallback = Some(Box::new(fallback));
+        self
+    }
+}
+
+impl MemoryFactory for MemoryRegistry {
+    async fn retrieve(&self, query: &MemoryQuery<'_>) -> MemoryResult {
+        if let Some(entry) = self.entries.get(query.agent_name) {
+            return entry.retrieve_dyn(query).await;
+        }
+        if let Some(fallback) = &self.fallback {
+            return fallback.retrieve_dyn(query).await;
+        }
+        Ok(None)
     }
 }

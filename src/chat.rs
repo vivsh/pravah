@@ -13,6 +13,7 @@ use crate::clients::{
 };
 use crate::context::Context;
 use crate::flows::compactor::{DynHistoryCompactor, HistoryCompactor, NoopCompactor};
+use crate::flows::memory::{DynMemoryFactory, MemoryFactory, MemoryQuery, NoopMemoryFactory};
 use crate::flows::store::{DynHistoryStore, HistoryStore, NoopHistoryStore};
 use crate::flows::{FlowHistory, HistoryEntry};
 
@@ -64,6 +65,9 @@ pub enum ChatError {
     /// may be behind. There are no rollback semantics.
     #[error("history store flush failed: {0}")]
     Store(Box<dyn std::error::Error + Send + Sync>),
+    /// Memory retrieval failed before dispatch.
+    #[error("memory retrieval failed: {0}")]
+    Memory(Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Provider-agnostic wire format for chat input/output.
@@ -221,6 +225,7 @@ where
     session_id: Option<String>,
     compactor: Box<dyn DynHistoryCompactor>,
     store: Box<dyn DynHistoryStore>,
+    memory: Box<dyn DynMemoryFactory>,
     _types: PhantomData<(Input, Output)>,
 }
 
@@ -264,6 +269,15 @@ impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
         self
     }
 
+    /// Attaches a memory factory for per-turn dynamic context injection.
+    ///
+    /// Called once per `send`/`send_message` call; the result is prepended to
+    /// the outgoing messages as a system prompt but is never stored in history.
+    pub fn with_memory(mut self, memory: impl MemoryFactory + Send + Sync + 'static) -> Self {
+        self.memory = Box::new(memory);
+        self
+    }
+
     /// Builds the session, connecting to the provider specified by `url`.
     pub fn build(mut self) -> Result<Chat<Input, Output>, ChatError> {
         if let Some(env) = self.environment {
@@ -282,6 +296,7 @@ impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
             history: FlowHistory::new(),
             compactor: self.compactor,
             store: self.store,
+            memory: self.memory,
             _types: PhantomData,
         })
     }
@@ -310,6 +325,7 @@ where
     history: FlowHistory,
     compactor: Box<dyn DynHistoryCompactor>,
     store: Box<dyn DynHistoryStore>,
+    memory: Box<dyn DynMemoryFactory>,
     _types: PhantomData<(Input, Output)>,
 }
 
@@ -323,6 +339,7 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
             session_id: None,
             compactor: Box::new(NoopCompactor),
             store: Box::new(NoopHistoryStore),
+            memory: Box::new(NoopMemoryFactory),
             _types: PhantomData,
         }
     }
@@ -342,6 +359,7 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
             history: snap.history,
             compactor: Box::new(NoopCompactor),
             store: Box::new(NoopHistoryStore),
+            memory: Box::new(NoopMemoryFactory),
             _types: PhantomData,
         })
     }
@@ -355,6 +373,12 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
     /// Replaces the history store. Useful after [`from_snapshot`](Self::from_snapshot).
     pub fn with_store(mut self, store: impl HistoryStore + 'static) -> Self {
         self.store = Box::new(store);
+        self
+    }
+
+    /// Replaces the memory factory. Useful after [`from_snapshot`](Self::from_snapshot).
+    pub fn with_memory(mut self, memory: impl MemoryFactory + Send + Sync + 'static) -> Self {
+        self.memory = Box::new(memory);
         self
     }
 
@@ -385,8 +409,11 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
         ctx: Context,
         input: impl Into<Input>,
     ) -> Result<ChatTurn<Output>, ChatError> {
-        let msg = Message::user(input.into().encode_input()?);
-        let turn = self.dispatch(&ctx, &msg).await?;
+        let input = input.into();
+        let input_value = serde_json::to_value(&input).unwrap_or(Value::Null);
+        let env = self.retrieve_memory(&ctx, &input_value).await?;
+        let msg = Message::user(input.encode_input()?);
+        let turn = self.dispatch(&ctx, &msg, env).await?;
         let reply = build_reply(&turn.reply_content, turn.usage);
         self.history.push(&self.session_id, CHAT_AGENT_ID, msg);
         self.history.push(&self.session_id, CHAT_AGENT_ID, reply);
@@ -394,12 +421,23 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
         Ok(turn.into_turn())
     }
 
+    async fn retrieve_memory(&self, ctx: &Context, input: &Value) -> Result<Option<String>, ChatError> {
+        self.memory
+            .retrieve_dyn(&MemoryQuery { agent_name: CHAT_AGENT_ID, input, ctx })
+            .await
+            .map_err(ChatError::Memory)
+    }
+
     async fn dispatch(
         &self,
         ctx: &Context,
         msg: &Message,
+        env: Option<String>,
     ) -> Result<DispatchTurn<Output>, ChatError> {
         let mut msgs = self.history.for_session(&self.session_id);
+        if let Some(text) = env {
+            msgs.insert(0, Message { role: Role::System, content: text, attachments: Vec::new(), usage: None });
+        }
         msgs.push(msg.clone());
         let materialized = materialize_messages(&msgs, ctx).await?;
         let resp = self.client.execute(&materialized).await?;
@@ -451,7 +489,9 @@ impl<Output: ChatType> Chat<String, Output> {
         if !matches!(msg.role, Role::User) {
             return Err(ChatError::NonUserMessage);
         }
-        let turn = self.dispatch(&ctx, &msg).await?;
+        let input_value = Value::String(msg.content.clone());
+        let env = self.retrieve_memory(&ctx, &input_value).await?;
+        let turn = self.dispatch(&ctx, &msg, env).await?;
         let reply = build_reply(&turn.reply_content, turn.usage);
         self.history.push(&self.session_id, CHAT_AGENT_ID, msg);
         self.history.push(&self.session_id, CHAT_AGENT_ID, reply);
