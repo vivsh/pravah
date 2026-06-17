@@ -28,13 +28,20 @@ struct ScriptedClient {
     inner: Arc<Mutex<ScriptedInner>>,
     model_url: String,
     url: LlmUrl,
+    options: ClientOptions,
 }
 
 impl ScriptedClient {
     fn new(inner: Arc<Mutex<ScriptedInner>>, model_url: String) -> Self {
-        let url = LlmUrl::parse(&model_url)
-            .unwrap_or_else(|_| LlmUrl::parse("openai:///test-model").expect("fallback URL is valid"));
-        Self { inner, model_url, url }
+        let url = LlmUrl::parse(&model_url).unwrap_or_else(|_| {
+            LlmUrl::parse("openai:///test-model").expect("fallback URL is valid")
+        });
+        Self {
+            inner,
+            model_url,
+            url,
+            options: ClientOptions::default(),
+        }
     }
 }
 
@@ -44,13 +51,20 @@ impl Client for ScriptedClient {
         &self.url
     }
 
+    fn options(&self) -> &ClientOptions {
+        &self.options
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.calls.push((self.model_url.clone(), messages.to_vec()));
         guard
-            .responses
-            .pop_front()
-            .unwrap_or_else(|| Err(ClientError::Llm("ScriptedClient: response queue exhausted".into())))
+            .calls
+            .push((self.model_url.clone(), messages.to_vec()));
+        guard.responses.pop_front().unwrap_or_else(|| {
+            Err(ClientError::Llm(
+                "ScriptedClient: response queue exhausted".into(),
+            ))
+        })
     }
 }
 
@@ -174,11 +188,7 @@ pub fn tool_call_response_with_thought(thought: String, calls: Vec<ToolCall>) ->
 }
 
 /// Builds a [`ToolCall`] for scripted test responses.
-pub fn mock_tool_call(
-    id: impl Into<String>,
-    name: impl Into<String>,
-    args: Value,
-) -> ToolCall {
+pub fn mock_tool_call(id: impl Into<String>, name: impl Into<String>, args: Value) -> ToolCall {
     ToolCall {
         id: id.into(),
         name: name.into(),

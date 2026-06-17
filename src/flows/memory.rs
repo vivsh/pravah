@@ -184,7 +184,10 @@ impl MemoryRegistry {
         A: Agent,
         F: AgentMemory<A> + Send + Sync + 'static,
     {
-        let shim = AgentMemoryShim { factory, _marker: PhantomData };
+        let shim = AgentMemoryShim {
+            factory,
+            _marker: PhantomData,
+        };
         self.entries.insert(A::node_id(), Box::new(shim));
         self
     }

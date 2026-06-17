@@ -38,6 +38,10 @@ impl Client for OpenAiClient {
         &self.url
     }
 
+    fn options(&self) -> &ClientOptions {
+        &self.options
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         validate_history(messages)?;
         validate_tools(Provider::OpenAi, &self.options.tools)?;
@@ -259,10 +263,7 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
-fn map_response(
-    response: Value,
-    wants_json_output: bool,
-) -> Result<ClientResponse, ClientError> {
+fn map_response(response: Value, wants_json_output: bool) -> Result<ClientResponse, ClientError> {
     let usage = response.get("usage").map(usage_from_value);
     let provider_model = response
         .get("model")
@@ -348,10 +349,9 @@ fn collect_text(response: &Value) -> Option<String> {
             if matches!(
                 content.get("type").and_then(Value::as_str),
                 Some("output_text" | "text")
-            ) {
-                if let Some(text) = content.get("text").and_then(Value::as_str) {
-                    out.push_str(text);
-                }
+            ) && let Some(text) = content.get("text").and_then(Value::as_str)
+            {
+                out.push_str(text);
             }
         }
     }
@@ -443,8 +443,7 @@ mod tests {
     fn payload_with_json_response_and_no_output_schema_uses_json_object_mode() {
         let payload = build_payload(
             "custom-model",
-            &ClientOptions::default()
-                .with_response_format(crate::clients::ResponseFormat::Json),
+            &ClientOptions::default().with_response_format(crate::clients::ResponseFormat::Json),
             &[Message::user("hi")],
             false,
         );
@@ -550,7 +549,10 @@ mod tests {
 
         let payload = build_payload("custom-model", &options, &[Message::user("hi")], true);
 
-        assert!(payload.get("text").is_some(), "text format should be set alongside tools");
+        assert!(
+            payload.get("text").is_some(),
+            "text format should be set alongside tools"
+        );
         assert_eq!(payload["tools"][0]["name"], "submit");
         assert_eq!(payload["tool_choice"], "required");
     }

@@ -5,7 +5,6 @@ use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ResearchQuery {
     query: String,
@@ -15,7 +14,6 @@ struct ResearchQuery {
 struct ResearchResult {
     findings: String,
 }
-
 
 impl Agent for ResearchQuery {
     type Output = ResearchResult;
@@ -37,7 +35,6 @@ impl Flow for ResearchQuery {
     }
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct BlogRequest {
     topic: String,
@@ -49,7 +46,6 @@ struct FinalArticle {
     title: String,
     body: String,
 }
-
 
 impl Agent for ResearchResult {
     type Output = FinalArticle;
@@ -63,25 +59,19 @@ impl Agent for ResearchResult {
     }
 }
 
-
 async fn derive_query(req: BlogRequest, _ctx: Context) -> Result<ResearchQuery, FlowError> {
     Ok(ResearchQuery {
         query: format!("{} (for {})", req.topic, req.audience),
     })
 }
 
-
 impl Flow for BlogRequest {
     type Output = FinalArticle;
 
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root
-            .work(derive_query)
-            .flow()
-            .agent()
+        root.work(derive_query).flow().agent()
     }
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

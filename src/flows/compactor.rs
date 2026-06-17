@@ -96,11 +96,11 @@ pub(crate) fn count_complete_turns(entries: &[&HistoryEntry]) -> usize {
                 let call_ids: std::collections::HashSet<&str> =
                     calls.iter().map(|c| c.id.as_str()).collect();
                 let mut found_ids = std::collections::HashSet::new();
-                for j in (i + 1)..entries.len() {
-                    if let Role::Tool { call_id } = &entries[j].message.role {
-                        if call_ids.contains(call_id.as_str()) {
-                            found_ids.insert(call_id.as_str());
-                        }
+                for entry in entries.iter().skip(i + 1) {
+                    if let Role::Tool { call_id } = &entry.message.role
+                        && call_ids.contains(call_id.as_str())
+                    {
+                        found_ids.insert(call_id.as_str());
                     }
                 }
                 if found_ids.len() == call_ids.len() {
@@ -134,11 +134,11 @@ fn first_complete_turn_indices(
                     if already_evicted.contains(&j) {
                         continue;
                     }
-                    if let Role::Tool { call_id } = &e2.message.role {
-                        if call_ids.contains(call_id.as_str()) {
-                            found_ids.insert(call_id.as_str());
-                            found.push(j);
-                        }
+                    if let Role::Tool { call_id } = &e2.message.role
+                        && call_ids.contains(call_id.as_str())
+                    {
+                        found_ids.insert(call_id.as_str());
+                        found.push(j);
                     }
                 }
                 if found_ids.len() == call_ids.len() {
@@ -156,7 +156,7 @@ fn first_complete_turn_indices(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::{ToolCall};
+    use crate::clients::ToolCall;
     use crate::flows::history::FlowHistory;
 
     fn dummy_call(id: &str) -> ToolCall {
@@ -211,7 +211,9 @@ mod tests {
         push_tool(&mut h, "s1", "2");
         let owned: Vec<_> = h.session_entries("s1").into_iter().cloned().collect();
         let refs: Vec<_> = owned.iter().collect();
-        let compactor = SlidingWindowCompactor { max_turns_per_session: 1 };
+        let compactor = SlidingWindowCompactor {
+            max_turns_per_session: 1,
+        };
         let result = futures::executor::block_on(compactor.compact("s1", &refs));
         assert_eq!(result.evict_indices, vec![0, 1]);
     }
@@ -224,7 +226,9 @@ mod tests {
         push_tool(&mut h, "s1", "a"); // only one of two results
         let owned: Vec<_> = h.session_entries("s1").into_iter().cloned().collect();
         let refs: Vec<_> = owned.iter().collect();
-        let compactor = SlidingWindowCompactor { max_turns_per_session: 0 };
+        let compactor = SlidingWindowCompactor {
+            max_turns_per_session: 0,
+        };
         let result = futures::executor::block_on(compactor.compact("s1", &refs));
         assert!(result.evict_indices.is_empty());
     }
@@ -237,7 +241,9 @@ mod tests {
         push_assistant(&mut h, "s1");
         let owned: Vec<_> = h.session_entries("s1").into_iter().cloned().collect();
         let refs: Vec<_> = owned.iter().collect();
-        let compactor = SlidingWindowCompactor { max_turns_per_session: 1 };
+        let compactor = SlidingWindowCompactor {
+            max_turns_per_session: 1,
+        };
         let result = futures::executor::block_on(compactor.compact("s1", &refs));
         assert_eq!(result.evict_indices, vec![0]);
     }
@@ -254,7 +260,9 @@ mod tests {
         push_tool(&mut h, "s1", "3");
         let owned: Vec<_> = h.session_entries("s1").into_iter().cloned().collect();
         let refs: Vec<_> = owned.iter().collect();
-        let compactor = SlidingWindowCompactor { max_turns_per_session: 1 };
+        let compactor = SlidingWindowCompactor {
+            max_turns_per_session: 1,
+        };
         let result = futures::executor::block_on(compactor.compact("s1", &refs));
         // Only first s1 turn evicted
         assert_eq!(result.evict_indices, vec![0, 1]);

@@ -16,10 +16,39 @@ use crate::{
     tools::{SuspendedValue, ToolDefinition, ToolError},
 };
 
+pub(crate) type ToolMessageFn =
+    Box<dyn Fn(Value) -> Result<Message, ToolMessageError> + Send + Sync>;
+pub(crate) type EitherFn = Box<dyn Fn(&Value) -> Result<(NodeId, Value), FlowError> + Send + Sync>;
+pub(crate) type ForkFn = Box<dyn Fn(&Value) -> Result<Vec<StateNode>, FlowError> + Send + Sync>;
+pub(crate) type JoinFn = Arc<dyn Fn(&[Value]) -> Result<StateNode, FlowError> + Send + Sync>;
+pub(crate) type WorkFn =
+    Box<dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, FlowError>> + Send + Sync>;
+pub(crate) type ToolWorkFn =
+    Box<dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, ToolError>> + Send + Sync>;
+pub(crate) type MapFn = Box<dyn Fn(&Value) -> Result<Value, FlowError> + Send + Sync>;
+pub(crate) type SuspendDeserializeFn =
+    Box<dyn Fn(Value) -> Result<SuspendedValue, serde_json::Error> + Send + Sync>;
+
+pub(crate) enum ToolMessageError {
+    Recoverable(ToolError),
+    FatalOutput {
+        expected: String,
+        reason: String,
+        raw: String,
+    },
+}
+
+impl From<ToolError> for ToolMessageError {
+    fn from(error: ToolError) -> Self {
+        Self::Recoverable(error)
+    }
+}
+
 /// Builds a [`ToolDefinition`] for type `T` using its JSON Schema.
 pub(crate) fn build_tool_definition<T: JsonSchema>() -> Result<ToolDefinition, String> {
-    let raw = serde_json::to_value(schemars::r#gen::SchemaGenerator::default().root_schema_for::<T>())
-        .map_err(|e| format!("schema serialization failed: {e}"))?;
+    let raw =
+        serde_json::to_value(schemars::r#gen::SchemaGenerator::default().root_schema_for::<T>())
+            .map_err(|e| format!("schema serialization failed: {e}"))?;
     let description = raw
         .get("description")
         .and_then(|v| v.as_str())
@@ -42,7 +71,7 @@ pub(crate) struct StateNode {
 pub(crate) struct ToolInfo {
     pub(crate) definition: ToolDefinition,
     pub(crate) exit_id: NodeId,
-    pub(crate) to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync>,
+    pub(crate) to_message: ToolMessageFn,
 }
 
 pub(crate) struct AgentInfo {
@@ -66,26 +95,25 @@ pub(crate) struct EitherInfo {
     pub(crate) entry: NodeId,
     pub(crate) left_name: NodeId,
     pub(crate) right_name: NodeId,
-    pub(crate) func: Box<dyn Fn(&Value) -> Result<(NodeId, Value), FlowError> + Send + Sync>,
+    pub(crate) func: EitherFn,
 }
 
 pub(crate) struct ForkInfo {
     pub(crate) name: NodeId,
     pub(crate) children: Vec<NodeId>,
-    pub(crate) func: Box<dyn Fn(&Value) -> Result<Vec<StateNode>, FlowError> + Send + Sync>,
+    pub(crate) func: ForkFn,
 }
 
 pub(crate) struct JoinInfo {
     pub(crate) parents: Vec<NodeId>,
     pub(crate) target: NodeId,
-    pub(crate) func: Arc<dyn Fn(&[Value]) -> Result<StateNode, FlowError> + Send + Sync>,
+    pub(crate) func: JoinFn,
 }
 
 pub(crate) struct WorkInfo {
     pub(crate) name: NodeId,
     pub(crate) exit_name: NodeId,
-    pub(crate) func:
-        Box<dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, FlowError>> + Send + Sync>,
+    pub(crate) func: WorkFn,
 }
 
 /// A tool-aware work node whose implementation returns [`ToolError`] directly.
@@ -96,21 +124,20 @@ pub(crate) struct ToolWorkInfo {
     pub(crate) exit_name: NodeId,
     pub(crate) agent_id: NodeId,
     pub(crate) tool_name: String,
-    pub(crate) func:
-        Box<dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, ToolError>> + Send + Sync>,
+    pub(crate) func: ToolWorkFn,
 }
 
 pub(crate) struct MapInfo {
     pub(crate) name: NodeId,
     pub(crate) exit_name: NodeId,
-    pub(crate) func: Box<dyn Fn(&Value) -> Result<Value, FlowError> + Send + Sync>,
+    pub(crate) func: MapFn,
 }
 
 pub(crate) struct SuspendInfo {
     pub(crate) entry: NodeId,
     pub(crate) exit: NodeId,
     pub(crate) output_type: String,
-    pub(crate) deserialize: Box<dyn Fn(Value) -> Result<SuspendedValue, serde_json::Error> + Send + Sync>,
+    pub(crate) deserialize: SuspendDeserializeFn,
 }
 
 /// Builds a typed [`StateNode`] from a value.
@@ -163,9 +190,9 @@ impl AgentInfo {
             self.input_schema
         );
         match (self.preamble.is_empty(), env) {
-            (true, None)     => hint,
-            (false, None)    => format!("{}\n\n{}", self.preamble, hint),
-            (true, Some(e))  => format!("{e}\n\n{hint}"),
+            (true, None) => hint,
+            (false, None) => format!("{}\n\n{}", self.preamble, hint),
+            (true, Some(e)) => format!("{e}\n\n{hint}"),
             (false, Some(e)) => format!("{}\n\n{e}\n\n{hint}", self.preamble),
         }
     }

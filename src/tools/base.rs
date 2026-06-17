@@ -120,7 +120,10 @@ pub trait Tool {
     }
 
     /// Executes the tool with `input` in the given execution context.
-    fn call(input: Self::Input, ctx: Context) -> impl Future<Output = Result<Self::Output, ToolError>> + Send;
+    fn call(
+        input: Self::Input,
+        ctx: Context,
+    ) -> impl Future<Output = Result<Self::Output, ToolError>> + Send;
 }
 
 /// Type-erased input captured from a suspend tool call.
@@ -161,8 +164,6 @@ pub struct ToolDefinition {
     pub parameters: Value,
 }
 
-
-
 /// Converts a PascalCase (or camelCase) identifier to snake_case.
 /// Handles acronym runs: `HTTPRequest` → `http_request`.
 pub(crate) fn pascal_to_snake(s: &str) -> String {
@@ -174,7 +175,7 @@ pub(crate) fn pascal_to_snake(s: &str) -> String {
             let next = chars.get(i + 1).copied();
             if prev.is_lowercase()
                 || prev.is_ascii_digit()
-                || (prev.is_uppercase() && next.map_or(false, |n| n.is_lowercase()))
+                || (prev.is_uppercase() && next.is_some_and(|n| n.is_lowercase()))
             {
                 out.push('_');
             }
@@ -190,7 +191,9 @@ impl Context {
         if self.commands().iter().any(|c| c == cmd) {
             Ok(())
         } else {
-            Err(ToolError::Security(format!("command '{cmd}' is not in the allowed list")))
+            Err(ToolError::Security(format!(
+                "command '{cmd}' is not in the allowed list"
+            )))
         }
     }
 
@@ -204,11 +207,15 @@ impl Context {
             normalize_path(&working_dir.join(path))
         };
         if !requested.starts_with(&working_dir) {
-            return Err(ToolError::Security(format!("path '{raw}' escapes the working directory")));
+            return Err(ToolError::Security(format!(
+                "path '{raw}' escapes the working directory"
+            )));
         }
         let canonical_root = canonical_working_dir(&working_dir)?;
         let Ok(relative) = requested.strip_prefix(&working_dir) else {
-            return Err(ToolError::Security(format!("path '{raw}' escapes the working directory")));
+            return Err(ToolError::Security(format!(
+                "path '{raw}' escapes the working directory"
+            )));
         };
         resolve_within_root(raw, &canonical_root, relative)
     }
@@ -237,7 +244,9 @@ fn resolve_within_root(raw: &str, root: &Path, relative: &Path) -> Result<PathBu
                     Ok(meta) if meta.file_type().is_symlink() => {
                         let canonical = std::fs::canonicalize(&resolved)?;
                         if !canonical.starts_with(root) {
-                            return Err(ToolError::Security(format!("path '{raw}' escapes the working directory")));
+                            return Err(ToolError::Security(format!(
+                                "path '{raw}' escapes the working directory"
+                            )));
                         }
                         resolved = canonical;
                     }
@@ -250,12 +259,16 @@ fn resolve_within_root(raw: &str, root: &Path, relative: &Path) -> Result<PathBu
                 resolved = root.to_path_buf();
             }
             Component::Prefix(_) => {
-                return Err(ToolError::Security(format!("path '{raw}' escapes the working directory")));
+                return Err(ToolError::Security(format!(
+                    "path '{raw}' escapes the working directory"
+                )));
             }
         }
 
         if !resolved.starts_with(root) {
-            return Err(ToolError::Security(format!("path '{raw}' escapes the working directory")));
+            return Err(ToolError::Security(format!(
+                "path '{raw}' escapes the working directory"
+            )));
         }
     }
 
@@ -292,4 +305,3 @@ mod tests {
         assert_eq!(pascal_to_snake("Broken2"), "broken2");
     }
 }
-

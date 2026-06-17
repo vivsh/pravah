@@ -26,12 +26,11 @@ fn collect_defs(schema: &Value) -> Map<String, Value> {
 fn inline_refs(value: Value, defs: &Map<String, Value>) -> Value {
     match value {
         Value::Object(mut map) => {
-            if let Some(Value::String(ref_str)) = map.get("$ref").cloned() {
-                if let Some(name) = ref_name(&ref_str) {
-                    if let Some(target) = defs.get(name) {
-                        return inline_refs(target.clone(), defs);
-                    }
-                }
+            if let Some(Value::String(ref_str)) = map.get("$ref").cloned()
+                && let Some(name) = ref_name(&ref_str)
+                && let Some(target) = defs.get(name)
+            {
+                return inline_refs(target.clone(), defs);
             }
             let entries: Vec<(String, Value)> = map
                 .iter_mut()
@@ -46,7 +45,7 @@ fn inline_refs(value: Value, defs: &Map<String, Value>) -> Value {
 
 /// Extracts the definition name from a `$ref` path.
 fn ref_name(r: &str) -> Option<&str> {
-    r.split('/').last()
+    r.split('/').next_back()
 }
 
 /// Removes unsupported keywords and normalizes nullable types.

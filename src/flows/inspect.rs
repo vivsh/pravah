@@ -148,7 +148,7 @@ impl<'a> FlowInspector<'a> {
     /// the next engine step will call the LLM. It is safe to call
     /// [`FlowRuntime::inject_message`](crate::flows::FlowRuntime::inject_message) only when this returns `true`.
     pub fn is_agent_dispatch_ready(&self) -> bool {
-        self.top_frame().map_or(false, |f| {
+        self.top_frame().is_some_and(|f| {
             f.agent_phases
                 .iter()
                 .any(|ap| matches!(ap.phase, PhaseKind::Dispatch))
@@ -168,13 +168,13 @@ impl<'a> FlowInspector<'a> {
         let key = T::node_id();
         for callable in self.callables {
             let graph = &callable.0;
-            if let Some(node_id) = graph.interner.intern_get(&key) {
-                if let Some(FlowNode::Agent(info)) = graph.nodes.get(&node_id) {
-                    return Some(AgentView {
-                        preamble: info.effective_preamble(None),
-                        tools: info.tools.iter().map(|t| t.definition.clone()).collect(),
-                    });
-                }
+            if let Some(node_id) = graph.interner.intern_get(&key)
+                && let Some(FlowNode::Agent(info)) = graph.nodes.get(&node_id)
+            {
+                return Some(AgentView {
+                    preamble: info.effective_preamble(None),
+                    tools: info.tools.iter().map(|t| t.definition.clone()).collect(),
+                });
             }
         }
         None
@@ -198,14 +198,15 @@ impl<'a> FlowInspector<'a> {
                 let agent_name = self.name_in_frame(frame, agent_id);
                 let phase = match &agent_state.continuation {
                     AgentContinuation::Dispatch => PhaseKind::Dispatch,
-                    AgentContinuation::PendingTool { active, waiting, .. } => {
+                    AgentContinuation::PendingTool {
+                        active, waiting, ..
+                    } => {
                         let mut active_calls = active
                             .values()
                             .map(|(_, call_name)| call_name.clone())
                             .collect::<Vec<_>>();
                         active_calls.sort();
-                        let waiting_count =
-                            waiting.values().map(|queue| queue.len()).sum();
+                        let waiting_count = waiting.values().map(|queue| queue.len()).sum();
                         PhaseKind::PendingTool {
                             active_calls,
                             waiting_count,
@@ -233,4 +234,3 @@ impl<'a> FlowInspector<'a> {
             .unwrap_or("<unknown>")
     }
 }
-

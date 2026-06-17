@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::clients::{Message, Role};
 use crate::context::Context;
-use crate::flows::{FlowError};
+use crate::flows::FlowError;
 
 /// Runtime settings returned by [`Agent::configure`].
 pub struct AgentConfig {
@@ -83,7 +83,10 @@ pub(crate) fn make_agent_message<A: Agent>(
     if !matches!(message.role, Role::User) {
         return Err(FlowError::Internal {
             handler: "make_agent_message",
-            detail: format!("agent '{}' to_message must return a user message", A::node_id()),
+            detail: format!(
+                "agent '{}' to_message must return a user message",
+                A::node_id()
+            ),
         });
     }
     Ok(message)

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use either::Either;
-use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -11,8 +10,9 @@ use serde_json::Value;
 use super::flow::{Flow, FlowGraph};
 use super::nary::{MergeInputs, SplitOutputs};
 use super::nodes::{
-    AgentInfo, EachInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo, MapInfo, StateNode, SuspendInfo,
-    ToolInfo, ToolWorkInfo, WorkInfo, build_tool_definition, node,
+    AgentInfo, EachInfo, EitherFn, EitherInfo, FlowNode, ForkFn, ForkInfo, JoinFn, JoinInfo, MapFn,
+    MapInfo, SuspendDeserializeFn, SuspendInfo, ToolInfo, ToolMessageError, ToolMessageFn,
+    ToolWorkFn, ToolWorkInfo, WorkFn, WorkInfo, build_tool_definition, node,
 };
 use crate::flows::NodeId;
 use crate::flows::errors::{BuildError, FlowError};
@@ -24,6 +24,56 @@ use crate::{
     tools::base::pascal_to_snake,
     tools::{SuspendedValue, Tool, ToolError, ToolOutput},
 };
+
+const TOOL_OUTPUT_PREVIEW_LIMIT: usize = 512;
+
+fn compact_value_preview(value: &Value) -> String {
+    let raw = value.to_string();
+    let mut preview = raw
+        .chars()
+        .take(TOOL_OUTPUT_PREVIEW_LIMIT)
+        .collect::<String>();
+    if raw.chars().count() > TOOL_OUTPUT_PREVIEW_LIMIT {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn decode_tool_output<O>(value: Value) -> Result<O, ToolMessageError>
+where
+    O: DeserializeOwned + JsonSchema,
+{
+    let expected = O::schema_name();
+    match serde_json::from_value::<O>(value.clone()) {
+        Ok(output) => Ok(output),
+        Err(value_error) => {
+            if let Value::String(text) = &value {
+                match serde_json::from_str::<O>(text) {
+                    Ok(output) => {
+                        tracing::warn!(
+                            expected = %expected,
+                            "recovered double-encoded tool output"
+                        );
+                        Ok(output)
+                    }
+                    Err(string_error) => Err(ToolMessageError::FatalOutput {
+                        expected,
+                        reason: format!(
+                            "{value_error}; double-encoded string decode failed: {string_error}"
+                        ),
+                        raw: compact_value_preview(&value),
+                    }),
+                }
+            } else {
+                Err(ToolMessageError::FatalOutput {
+                    expected,
+                    reason: value_error.to_string(),
+                    raw: compact_value_preview(&value),
+                })
+            }
+        }
+    }
+}
 
 /// Builder for constructing a [`FlowGraph`] by registering nodes in order.
 ///
@@ -122,10 +172,10 @@ impl FlowBuilder {
         I: 'static + DeserializeOwned + JsonSchema + Send,
         O: ToolOutput,
     {
-        let to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync> =
-            Box::new(|value: Value| -> Result<Message, ToolError> {
-                let o: O = serde_json::from_value(value).map_err(ToolError::TypeError)?;
-                o.to_message()
+        let to_message: ToolMessageFn =
+            Box::new(|value: Value| -> Result<Message, ToolMessageError> {
+                let o: O = decode_tool_output(value)?;
+                o.to_message().map_err(ToolMessageError::from)
             });
         self.tool_impl::<A, I, O>(to_message)
     }
@@ -142,10 +192,10 @@ impl FlowBuilder {
         F: Flow,
         F::Output: ToolOutput,
     {
-        let to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync> =
-            Box::new(|value: Value| -> Result<Message, ToolError> {
-                let o: F::Output = serde_json::from_value(value).map_err(ToolError::TypeError)?;
-                o.to_message()
+        let to_message: ToolMessageFn =
+            Box::new(|value: Value| -> Result<Message, ToolMessageError> {
+                let o: F::Output = decode_tool_output(value)?;
+                o.to_message().map_err(ToolMessageError::from)
             });
         self.tool_impl::<A, F, F::Output>(to_message).flow::<F>()
     }
@@ -153,10 +203,10 @@ impl FlowBuilder {
     /// Registers a tool for agent `A` backed by a [`Tool`] impl, wiring the work node automatically.
     pub fn tool<A: Agent, T: Tool>(mut self) -> Self {
         let agent_id = self.flow.interner.intern(&A::node_id());
-        let to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync> =
-            Box::new(|value: Value| -> Result<Message, ToolError> {
-                let o: T::Output = serde_json::from_value(value).map_err(ToolError::TypeError)?;
-                T::to_message(o)
+        let to_message: ToolMessageFn =
+            Box::new(|value: Value| -> Result<Message, ToolMessageError> {
+                let o: T::Output = decode_tool_output(value)?;
+                T::to_message(o).map_err(ToolMessageError::from)
             });
         self.tool_impl::<A, T::Input, T::Output>(to_message)
             .tool_work::<T::Input, T::Output, _, _>(agent_id, |input, ctx| async move {
@@ -177,10 +227,7 @@ impl FlowBuilder {
             .tool_work::<I, O, _, _>(agent_id, func)
     }
 
-    fn tool_impl<A, I, O>(
-        mut self,
-        to_message: Box<dyn Fn(Value) -> Result<Message, ToolError> + Send + Sync>,
-    ) -> Self
+    fn tool_impl<A, I, O>(mut self, to_message: ToolMessageFn) -> Self
     where
         A: Agent,
         I: 'static + DeserializeOwned + JsonSchema + Send,
@@ -192,7 +239,10 @@ impl FlowBuilder {
         let definition = match build_tool_definition::<I>() {
             Ok(d) => d,
             Err(e) => {
-                self.errors.push(format!("tool '{}' schema: {e}", pascal_to_snake(&I::schema_name())));
+                self.errors.push(format!(
+                    "tool '{}' schema: {e}",
+                    pascal_to_snake(&I::schema_name())
+                ));
                 return self;
             }
         };
@@ -246,21 +296,20 @@ impl FlowBuilder {
         }
         let left_name = self.flow.interner.intern(&A::schema_name());
         let right_name = self.flow.interner.intern(&B::schema_name());
-        let shim: Box<dyn Fn(&Value) -> Result<(NodeId, Value), FlowError> + Send + Sync> =
-            Box::new(move |value: &Value| {
-                let typed: From =
-                    serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
-                match func(typed) {
-                    Either::Left(a) => {
-                        let v = serde_json::to_value(&a).map_err(FlowError::Serialize)?;
-                        Ok((left_name, v))
-                    }
-                    Either::Right(b) => {
-                        let v = serde_json::to_value(&b).map_err(FlowError::Serialize)?;
-                        Ok((right_name, v))
-                    }
+        let shim: EitherFn = Box::new(move |value: &Value| {
+            let typed: From =
+                serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
+            match func(typed) {
+                Either::Left(a) => {
+                    let v = serde_json::to_value(&a).map_err(FlowError::Serialize)?;
+                    Ok((left_name, v))
                 }
-            });
+                Either::Right(b) => {
+                    let v = serde_json::to_value(&b).map_err(FlowError::Serialize)?;
+                    Ok((right_name, v))
+                }
+            }
+        });
         self.flow.nodes.insert(
             from_id,
             FlowNode::Either(EitherInfo {
@@ -289,13 +338,12 @@ impl FlowBuilder {
                 .push(format!("fork '{}': duplicate node key", from_id_str));
             return self;
         }
-        let shim: Box<dyn Fn(&Value) -> Result<Vec<StateNode>, FlowError> + Send + Sync> =
-            Box::new(move |value: &Value| {
-                let typed: From =
-                    serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
-                let (a, b) = func(typed);
-                Ok(vec![node(a)?, node(b)?])
-            });
+        let shim: ForkFn = Box::new(move |value: &Value| {
+            let typed: From =
+                serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
+            let (a, b) = func(typed);
+            Ok(vec![node(a)?, node(b)?])
+        });
         let a_child = self.flow.interner.intern(&A::schema_name());
         let b_child = self.flow.interner.intern(&B::schema_name());
         self.flow.nodes.insert(
@@ -329,14 +377,11 @@ impl FlowBuilder {
             }
         }
         let target_id = self.flow.interner.intern(&Out::schema_name());
-        let shim: Arc<dyn Fn(&[Value]) -> Result<StateNode, FlowError> + Send + Sync> =
-            Arc::new(move |inputs: &[Value]| {
-                let a: A =
-                    serde_json::from_value(inputs[0].clone()).map_err(FlowError::Deserialize)?;
-                let b: B =
-                    serde_json::from_value(inputs[1].clone()).map_err(FlowError::Deserialize)?;
-                node(func(a, b))
-            });
+        let shim: JoinFn = Arc::new(move |inputs: &[Value]| {
+            let a: A = serde_json::from_value(inputs[0].clone()).map_err(FlowError::Deserialize)?;
+            let b: B = serde_json::from_value(inputs[1].clone()).map_err(FlowError::Deserialize)?;
+            node(func(a, b))
+        });
         self.flow.nodes.insert(
             a_id,
             FlowNode::Join(JoinInfo {
@@ -374,12 +419,11 @@ impl FlowBuilder {
             .into_iter()
             .map(|s| self.flow.interner.intern(&s))
             .collect();
-        let shim: Box<dyn Fn(&Value) -> Result<Vec<StateNode>, FlowError> + Send + Sync> =
-            Box::new(move |value: &Value| {
-                let typed: From =
-                    serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
-                func(typed).into_nodes()
-            });
+        let shim: ForkFn = Box::new(move |value: &Value| {
+            let typed: From =
+                serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
+            func(typed).into_nodes()
+        });
         self.flow.nodes.insert(
             from_id,
             FlowNode::Fork(ForkInfo {
@@ -411,11 +455,10 @@ impl FlowBuilder {
             }
         }
         let target_id = self.flow.interner.intern(&Out::schema_name());
-        let shim: Arc<dyn Fn(&[Value]) -> Result<StateNode, FlowError> + Send + Sync> =
-            Arc::new(move |inputs: &[Value]| {
-                let typed = In::from_values(inputs)?;
-                node(func(typed))
-            });
+        let shim: JoinFn = Arc::new(move |inputs: &[Value]| {
+            let typed = In::from_values(inputs)?;
+            node(func(typed))
+        });
         for &pid in &parent_ids {
             self.flow.nodes.insert(
                 pid,
@@ -471,7 +514,8 @@ impl FlowBuilder {
         let input_id = self.flow.interner.intern(&input_str);
 
         if self.flow.nodes.contains_key(&input_id) {
-            self.errors.push(format!("each '{}': duplicate node key", input_str));
+            self.errors
+                .push(format!("each '{}': duplicate node key", input_str));
             return self;
         }
 
@@ -517,9 +561,7 @@ impl FlowBuilder {
             return self;
         }
         let exit_id = self.flow.interner.intern(&Out::schema_name());
-        let shim: Box<
-            dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, FlowError>> + Send + Sync,
-        > = Box::new(move |value: &Value, ctx: Context| {
+        let shim: WorkFn = Box::new(move |value: &Value, ctx: Context| {
             let typed: From = match serde_json::from_value(value.clone()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -562,9 +604,7 @@ impl FlowBuilder {
             return self;
         }
         let exit_id = self.flow.interner.intern(&Out::schema_name());
-        let shim: Box<
-            dyn Fn(&Value, Context) -> BoxFuture<'static, Result<Value, ToolError>> + Send + Sync,
-        > = Box::new(move |value: &Value, ctx: Context| {
+        let shim: ToolWorkFn = Box::new(move |value: &Value, ctx: Context| {
             let typed: From = match serde_json::from_value(value.clone()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -606,13 +646,12 @@ impl FlowBuilder {
             return self;
         }
         let exit_id = self.flow.interner.intern(&Out::schema_name());
-        let shim: Box<dyn Fn(&Value) -> Result<Value, FlowError> + Send + Sync> =
-            Box::new(move |value: &Value| {
-                let typed: From =
-                    serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
-                let out = func(typed);
-                serde_json::to_value(&out).map_err(FlowError::Serialize)
-            });
+        let shim: MapFn = Box::new(move |value: &Value| {
+            let typed: From =
+                serde_json::from_value(value.clone()).map_err(FlowError::Deserialize)?;
+            let out = func(typed);
+            serde_json::to_value(&out).map_err(FlowError::Serialize)
+        });
         self.flow.nodes.insert(
             from_id,
             FlowNode::Map(MapInfo {
@@ -640,9 +679,8 @@ impl FlowBuilder {
             return self;
         }
         let output_type = exit_str.to_string();
-        let deserialize: Box<
-            dyn Fn(Value) -> Result<SuspendedValue, serde_json::Error> + Send + Sync,
-        > = Box::new(|v| serde_json::from_value::<I>(v).map(SuspendedValue::new));
+        let deserialize: SuspendDeserializeFn =
+            Box::new(|v| serde_json::from_value::<I>(v).map(SuspendedValue::new));
         self.flow.nodes.insert(
             entry,
             FlowNode::Suspend(SuspendInfo {

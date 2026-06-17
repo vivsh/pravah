@@ -5,18 +5,64 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::flow::{
-    maybe_inject_turn_budget_message,
-};
+use super::flow::maybe_inject_turn_budget_message;
 use super::nodes::{AgentInfo, ToolInfo};
-use super::{Flow, FlowError, Node};
+use super::{Flow, FlowError, FlowStep, Node};
 use crate::clients::{
-    Attachment, Client, ClientError, ClientFactory, ClientOptions, ClientOutput,
-    ClientResponse, LlmUrl, Message, Role, ToolCall,
+    Attachment, Client, ClientError, ClientFactory, ClientOptions, ClientOutput, ClientResponse,
+    LlmUrl, Message, Role, ToolCall,
 };
 use crate::commons::{Agent, AgentConfig};
 use crate::context::Context;
+use crate::flows::FlowRuntime;
+use crate::testing::{ScriptedFactory, mock_tool_call};
 use crate::tools::ToolOutput;
+
+#[derive(Debug)]
+struct TestHistoryError(&'static str);
+
+impl std::fmt::Display for TestHistoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for TestHistoryError {}
+
+struct FailingStore;
+
+impl crate::flows::store::HistoryStore for FailingStore {
+    type Error = TestHistoryError;
+
+    async fn flush(
+        &self,
+        _history: &mut crate::flows::history::FlowHistory,
+    ) -> Result<(), Self::Error> {
+        Err(TestHistoryError("flush failed"))
+    }
+
+    async fn load(
+        &self,
+        _session_ids: &[&str],
+    ) -> Result<Vec<crate::flows::history::HistoryEntry>, Self::Error> {
+        Ok(vec![])
+    }
+}
+
+struct InvalidCompactor;
+
+impl crate::flows::compactor::HistoryCompactor for InvalidCompactor {
+    async fn compact(
+        &self,
+        _session_id: &str,
+        _entries: &[&crate::flows::history::HistoryEntry],
+    ) -> crate::flows::compactor::CompactionResult {
+        crate::flows::compactor::CompactionResult {
+            evict_indices: vec![usize::MAX],
+            summary: None,
+        }
+    }
+}
 
 #[derive(Clone)]
 enum ResponseMode {
@@ -34,13 +80,25 @@ struct CapturingClient {
     mode: ResponseMode,
     url: LlmUrl,
     exit_tool_name: Option<String>,
+    client_options: ClientOptions,
 }
 
 impl CapturingClient {
     fn for_url(mode: ResponseMode, model_url: &str) -> Self {
-        let url = LlmUrl::parse(model_url)
-            .unwrap_or_else(|_| LlmUrl::parse("openai:///test-model").expect("fallback URL is valid"));
-        Self { mode, url, exit_tool_name: None }
+        let url = LlmUrl::parse(model_url).unwrap_or_else(|_| {
+            LlmUrl::parse("openai:///test-model").expect("fallback URL is valid")
+        });
+        Self {
+            mode,
+            url,
+            exit_tool_name: None,
+            client_options: ClientOptions::default(),
+        }
+    }
+
+    fn with_options(mut self, opts: ClientOptions) -> Self {
+        self.client_options = opts;
+        self
     }
 }
 
@@ -66,12 +124,15 @@ impl Client for CapturingClient {
         &self.url
     }
 
+    fn options(&self) -> &ClientOptions {
+        &self.client_options
+    }
+
     async fn execute(&self, _messages: &[Message]) -> Result<ClientResponse, ClientError> {
         let response = match &self.mode {
-            ResponseMode::Output(value) => ClientResponse::new(
-                self.provider(),
-                ClientOutput::Output(value.clone()),
-            ),
+            ResponseMode::Output(value) => {
+                ClientResponse::new(self.provider(), ClientOutput::Output(value.clone()))
+            }
             ResponseMode::ToolCalls(calls) => ClientResponse::new(
                 self.provider(),
                 ClientOutput::ToolCalls {
@@ -80,12 +141,14 @@ impl Client for CapturingClient {
                 },
             ),
         };
-        if let Some(ref name) = self.exit_tool_name {
-            if let ClientOutput::ToolCalls { calls, .. } = &response.output {
-                if let Some(args) = crate::clients::extract_exit_tool_call(calls, name) {
-                    return Ok(ClientResponse::new(self.provider(), ClientOutput::Output(args)));
-                }
-            }
+        if let Some(ref name) = self.exit_tool_name
+            && let ClientOutput::ToolCalls { calls, .. } = &response.output
+            && let Some(args) = crate::clients::extract_exit_tool_call(calls, name)
+        {
+            return Ok(ClientResponse::new(
+                self.provider(),
+                ClientOutput::Output(args),
+            ));
         }
         Ok(response)
     }
@@ -101,8 +164,9 @@ impl ClientFactory for CapturingFactory {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(options.clone());
-        let url = LlmUrl::parse(model_url)
-            .unwrap_or_else(|_| LlmUrl::parse("openai:///test-model").expect("fallback URL is valid"));
+        let url = LlmUrl::parse(model_url).unwrap_or_else(|_| {
+            LlmUrl::parse("openai:///test-model").expect("fallback URL is valid")
+        });
         let exit_tool_name = if url.needs_exit_tool() && !options.output_type_name.is_empty() {
             Some(options.output_type_name.clone())
         } else {
@@ -112,6 +176,7 @@ impl ClientFactory for CapturingFactory {
             mode: self.mode.clone(),
             url,
             exit_tool_name,
+            client_options: options,
         }))
     }
 }
@@ -249,6 +314,153 @@ impl Flow for ToolAgentInput {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "explorer_agent")]
+struct ExplorerInput {
+    question: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct ExplorerOutput {
+    answer: String,
+}
+
+impl ToolOutput for ExplorerOutput {}
+
+impl Agent for ExplorerInput {
+    type Output = ExplorerOutput;
+
+    fn configure() -> AgentConfig {
+        AgentConfig::new("Explore and answer.", "test://child")
+    }
+}
+
+impl Flow for ExplorerInput {
+    type Output = ExplorerOutput;
+
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+struct ParentToolFlowInput {
+    request: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct ParentToolFlowOutput {
+    final_answer: String,
+}
+
+impl Agent for ParentToolFlowInput {
+    type Output = ParentToolFlowOutput;
+
+    fn configure() -> AgentConfig {
+        AgentConfig::new("Use the explorer tool.", "test://parent")
+    }
+}
+
+impl Flow for ParentToolFlowInput {
+    type Output = ParentToolFlowOutput;
+
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.agent_with(|toolbox| toolbox.tool_flow::<ExplorerInput>())
+    }
+}
+
+async fn run_test_flow_to_done<I: Flow>(
+    mut runtime: FlowRuntime<I>,
+) -> Result<I::Output, FlowError> {
+    for _ in 0..80 {
+        match runtime.next(Context::default()).await? {
+            FlowStep::Continue => {}
+            FlowStep::Done(output) => return Ok(output),
+            FlowStep::Suspend(_) => {
+                return Err(FlowError::Internal {
+                    handler: "run_test_flow_to_done",
+                    detail: "unexpected suspension".into(),
+                });
+            }
+        }
+    }
+    Err(FlowError::Internal {
+        handler: "run_test_flow_to_done",
+        detail: "flow did not finish within 80 steps".into(),
+    })
+}
+
+async fn run_test_flow_to_err<I: Flow>(runtime: FlowRuntime<I>) -> FlowError {
+    match run_test_flow_to_done(runtime).await {
+        Ok(_) => panic!("flow should fail"),
+        Err(err) => err,
+    }
+}
+
+#[tokio::test]
+async fn tool_flow_recovers_double_encoded_output_string() {
+    let factory = ScriptedFactory::new()
+        .then_tool_calls(vec![mock_tool_call(
+            "c1",
+            "explorer_agent",
+            json!({ "question": "where is it?" }),
+        )])
+        .then_output(Value::String(r#"{"answer":"found"}"#.into()))
+        .then_output(json!({ "final_answer": "done" }));
+    let spy = factory.clone();
+    let runtime = FlowRuntime::new(ParentToolFlowInput {
+        request: "look".into(),
+    })
+    .expect("runtime should build")
+    .with_factory(factory);
+
+    let output = run_test_flow_to_done(runtime)
+        .await
+        .expect("double-encoded child output should be recovered");
+
+    assert_eq!(output.final_answer, "done");
+    let calls = spy.calls();
+    assert_eq!(calls.len(), 3);
+    let parent_after_tool = &calls[2].1;
+    assert!(parent_after_tool.iter().any(|message| {
+        matches!(&message.role, Role::Tool { call_id } if call_id == "c1")
+            && message.content == r#"{"answer":"found"}"#
+    }));
+}
+
+#[tokio::test]
+async fn tool_flow_rejects_malformed_double_encoded_output_string() {
+    let factory = ScriptedFactory::new()
+        .then_tool_calls(vec![mock_tool_call(
+            "c1",
+            "explorer_agent",
+            json!({ "question": "where is it?" }),
+        )])
+        .then_output(Value::String(r#"{"missing":"answer"}"#.into()));
+    let runtime = FlowRuntime::new(ParentToolFlowInput {
+        request: "look".into(),
+    })
+    .expect("runtime should build")
+    .with_factory(factory);
+
+    let err = run_test_flow_to_err(runtime).await;
+
+    match err {
+        FlowError::ToolOutput {
+            tool,
+            expected,
+            reason,
+            raw,
+        } => {
+            assert_eq!(tool, "explorer_agent");
+            assert_eq!(expected, "ExplorerOutput");
+            assert!(reason.contains("missing field"));
+            assert!(raw.contains("missing"));
+        }
+        other => panic!("expected ToolOutput error, got {other}"),
+    }
+}
+
 /// Agents without tools stay in structured-output mode.
 #[tokio::test]
 async fn schema_and_tools_dispatch_without_tools_uses_structured_output() {
@@ -276,6 +488,121 @@ async fn schema_and_tools_dispatch_without_tools_uses_structured_output() {
     let expected = serde_json::to_value(schemars::schema_for!(PlainAgentOutput))
         .expect("output schema should serialize");
     assert_eq!(options.output_schema.as_ref(), Some(&expected));
+}
+
+/// `run_until` reports max-turn exhaustion through `RunOutcome`, matching other limits.
+#[tokio::test]
+async fn run_until_max_turns_returns_limit_outcome() {
+    use crate::flows::runtime::{FlowRuntime, LimitKind, RunLimits, RunOutcome};
+
+    let mut runtime = FlowRuntime::new(PlainAgentInput {
+        topic: "rust".into(),
+    })
+    .expect("runtime should build");
+    let outcome = runtime
+        .run_until(Context::default(), RunLimits::new().max_turns(0))
+        .await
+        .expect("max_turns should be a normal run outcome");
+
+    assert!(matches!(
+        outcome,
+        RunOutcome::LimitExceeded(LimitKind::MaxTurns)
+    ));
+}
+
+/// Store flush failures from `next` are surfaced as flow history errors.
+#[tokio::test]
+async fn next_propagates_history_store_errors() {
+    use crate::flows::runtime::FlowRuntime;
+
+    let mut runtime = FlowRuntime::new(PlainAgentInput {
+        topic: "rust".into(),
+    })
+    .expect("runtime should build")
+    .with_store(FailingStore);
+    let err = match runtime.next(Context::default()).await {
+        Ok(_) => panic!("flush failure should propagate"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(
+        err,
+        FlowError::History {
+            operation: "flush",
+            ..
+        }
+    ));
+}
+
+/// Invalid compaction decisions from `next` are surfaced as flow history errors.
+#[tokio::test]
+async fn next_propagates_compaction_errors() {
+    use crate::flows::runtime::FlowRuntime;
+
+    let mut runtime = FlowRuntime::new(PlainAgentInput {
+        topic: "rust".into(),
+    })
+    .expect("runtime should build")
+    .with_compactor(InvalidCompactor);
+    let err = match runtime.next(Context::default()).await {
+        Ok(_) => panic!("invalid compaction index should propagate"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(
+        err,
+        FlowError::History {
+            operation: "compaction",
+            ..
+        }
+    ));
+}
+
+/// Store flush failures from `resume` are surfaced as flow history errors.
+#[tokio::test]
+async fn resume_propagates_history_store_errors() {
+    use crate::flows::runtime::FlowRuntime;
+    use crate::flows::{FlowStep, HumanInput, HumanOutput};
+
+    let mut runtime = FlowRuntime::new(HumanInput {
+        prompt: "Need approval".into(),
+        choices: vec![],
+        allow_other: true,
+    })
+    .expect("runtime should build");
+
+    assert!(matches!(
+        runtime.next(Context::default()).await.unwrap(),
+        FlowStep::Continue
+    ));
+    assert!(matches!(
+        runtime.next(Context::default()).await.unwrap(),
+        FlowStep::Continue
+    ));
+    assert!(matches!(
+        runtime.next(Context::default()).await.unwrap(),
+        FlowStep::Suspend(_)
+    ));
+
+    runtime = runtime.with_store(FailingStore);
+    let err = runtime
+        .resume(
+            Context::default(),
+            HumanOutput {
+                choice: None,
+                text: Some("yes".into()),
+            },
+        )
+        .await
+        .expect_err("flush failure should propagate");
+
+    assert!(matches!(
+        err,
+        FlowError::History {
+            operation: "flush",
+            ..
+        }
+    ));
 }
 
 /// Agent entry uses `to_message` to populate the first user turn.
@@ -333,11 +660,7 @@ async fn schema_and_tools_dispatch_with_tools_includes_lookup() {
     assert_eq!(captured.len(), 1);
     let options = &captured[0];
     assert_eq!(options.tool_choice, crate::clients::ToolChoice::Auto);
-    assert_eq!(
-        options.tools.len(),
-        1,
-        "should have lookup tool"
-    );
+    assert_eq!(options.tools.len(), 1, "should have lookup tool");
 
     let lookup = options
         .tools
@@ -351,9 +674,14 @@ async fn schema_and_tools_dispatch_with_tools_includes_lookup() {
 /// imperative text for Ollama/OpenAI model URLs.
 #[test]
 fn default_turn_budget_message_is_provider_specific() {
-    let anthropic = CapturingClient::for_url(ResponseMode::Output(json!({})), "anthropic:///claude-opus-4");
-    let gemini = CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro");
-    let ollama = CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///qwen3-coder:30b");
+    let anthropic = CapturingClient::for_url(
+        ResponseMode::Output(json!({})),
+        "anthropic:///claude-opus-4",
+    );
+    let gemini =
+        CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro");
+    let ollama =
+        CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///qwen3-coder:30b");
     let openai = CapturingClient::for_url(ResponseMode::Output(json!({})), "openai:///gpt-4o");
 
     let anthropic_msg = anthropic.default_turn_budget_message(None);
@@ -361,24 +689,55 @@ fn default_turn_budget_message_is_provider_specific() {
     let ollama_msg = ollama.default_turn_budget_message(None);
     let openai_msg = openai.default_turn_budget_message(None);
 
-    assert!(anthropic_msg.contains("<system-reminder>"), "anthropic should use XML");
-    assert!(gemini_msg.contains("<system-reminder>"), "gemini should use XML");
+    assert!(
+        anthropic_msg.contains("<system-reminder>"),
+        "anthropic should use XML"
+    );
+    assert!(
+        gemini_msg.contains("<system-reminder>"),
+        "gemini should use XML"
+    );
     assert!(!ollama_msg.contains('<'), "ollama should use plain text");
     assert!(!openai_msg.contains('<'), "openai should use plain text");
 
-    assert!(!anthropic_msg.contains("<tool>"), "should not name a specific tool");
-    assert!(anthropic_msg.contains("output format"), "should defer to the output format constraint");
-    assert!(!ollama_msg.contains("call the `"), "should not name a specific tool");
-    assert!(ollama_msg.contains("output format"), "should defer to the output format constraint");
+    assert!(
+        !anthropic_msg.contains("<tool>"),
+        "should not name a specific tool"
+    );
+    assert!(
+        anthropic_msg.contains("output format"),
+        "should defer to the output format constraint"
+    );
+    assert!(
+        !ollama_msg.contains("call the `"),
+        "should not name a specific tool"
+    );
+    assert!(
+        ollama_msg.contains("output format"),
+        "should defer to the output format constraint"
+    );
 
-    let gemini_exit = CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro");
+    let gemini_exit =
+        CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro");
     let openai_exit = CapturingClient::for_url(ResponseMode::Output(json!({})), "openai:///gpt-4o");
     let exit_msg_gemini = gemini_exit.default_turn_budget_message(Some("MyOutput"));
     let exit_msg_openai = openai_exit.default_turn_budget_message(Some("MyOutput"));
-    assert!(exit_msg_gemini.contains("MyOutput"), "exit tool reminder should name the tool");
-    assert!(exit_msg_gemini.contains("<system-reminder>"), "gemini exit reminder should use XML");
-    assert!(exit_msg_openai.contains("MyOutput"), "exit tool reminder should name the tool");
-    assert!(!exit_msg_openai.contains('<'), "openai exit reminder should use plain text");
+    assert!(
+        exit_msg_gemini.contains("MyOutput"),
+        "exit tool reminder should name the tool"
+    );
+    assert!(
+        exit_msg_gemini.contains("<system-reminder>"),
+        "gemini exit reminder should use XML"
+    );
+    assert!(
+        exit_msg_openai.contains("MyOutput"),
+        "exit tool reminder should name the tool"
+    );
+    assert!(
+        !exit_msg_openai.contains('<'),
+        "openai exit reminder should use plain text"
+    );
 }
 
 /// Custom `turn_budget_message` is wrapped in XML for Anthropic/Gemini and
@@ -386,16 +745,24 @@ fn default_turn_budget_message_is_provider_specific() {
 #[test]
 fn wrap_for_provider_wraps_xml_providers_only() {
     let raw = "you must stop now";
-    let anthropic = CapturingClient::for_url(ResponseMode::Output(json!({})), "anthropic:///claude-opus-4");
-    let gemini = CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro");
+    let anthropic = CapturingClient::for_url(
+        ResponseMode::Output(json!({})),
+        "anthropic:///claude-opus-4",
+    );
+    let gemini =
+        CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro");
     let openai = CapturingClient::for_url(ResponseMode::Output(json!({})), "openai:///gpt-4o");
     let ollama = CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///qwen3:8b");
     assert!(
-        anthropic.wrap_system_reminder(raw).contains("<system-reminder>"),
+        anthropic
+            .wrap_system_reminder(raw)
+            .contains("<system-reminder>"),
         "anthropic should be wrapped"
     );
     assert!(
-        gemini.wrap_system_reminder(raw).contains("<system-reminder>"),
+        gemini
+            .wrap_system_reminder(raw)
+            .contains("<system-reminder>"),
         "gemini should be wrapped"
     );
     assert_eq!(
@@ -456,31 +823,50 @@ fn maybe_inject_injects_on_final_turn_only() {
     let mut history = FlowHistory::new();
     history.push(session_id, "test_agent", Message::assistant("thinking..."));
 
-    let client = CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///qwen3:8b");
+    let opts = ClientOptions {
+        turn_budget: Some(2),
+        tools: node.tools.iter().map(|t| t.definition.clone()).collect(),
+        ..ClientOptions::default()
+    };
+    let client = CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///qwen3:8b")
+        .with_options(opts);
     let mut msgs_first: Vec<Message> = vec![Message::user("start")];
-    maybe_inject_turn_budget_message(&node, &client, "test_agent", session_id, &history, &mut msgs_first);
+    maybe_inject_turn_budget_message(
+        &client,
+        "test_agent",
+        session_id,
+        &history,
+        &mut msgs_first,
+        0,
+    );
     assert_eq!(msgs_first.len(), 2, "reminder should be a new message");
-    assert_eq!(msgs_first[0].content, "start", "original content must be preserved");
-    assert!(matches!(msgs_first[1].role, Role::User), "reminder should be a user message");
+    assert_eq!(
+        msgs_first[0].content, "start",
+        "original content must be preserved"
+    );
     assert!(
-        msgs_first[1].content.contains("FINAL TURN") || msgs_first[1].content.contains("TURN LIMIT"),
+        matches!(msgs_first[1].role, Role::User),
+        "reminder should be a user message"
+    );
+    assert!(
+        msgs_first[1].content.contains("FINAL TURN")
+            || msgs_first[1].content.contains("TURN LIMIT"),
         "reminder should signal final turn"
     );
 
     let history_empty = FlowHistory::new();
     let mut msgs_early: Vec<Message> = vec![Message::user("start")];
     maybe_inject_turn_budget_message(
-        &node,
         &client,
         "test_agent",
         session_id,
         &history_empty,
         &mut msgs_early,
+        0,
     );
     assert_eq!(msgs_early.len(), 1, "no injection when turns remain");
     assert_eq!(
-        msgs_early[0].content,
-        "start",
+        msgs_early[0].content, "start",
         "content must be unmodified when no injection"
     );
 }
@@ -552,14 +938,41 @@ fn maybe_inject_preserves_tool_payloads() {
         Message::tool_output("call-1".into(), r#"{"result":"ok"}"#),
     );
 
-    let client = CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro");
+    let opts = ClientOptions {
+        turn_budget: Some(2),
+        tools: node.tools.iter().map(|t| t.definition.clone()).collect(),
+        ..ClientOptions::default()
+    };
+    let client =
+        CapturingClient::for_url(ResponseMode::Output(json!({})), "gemini:///gemini-2.5-pro")
+            .with_options(opts);
     let mut session_msgs = history.for_session(session_id);
-    maybe_inject_turn_budget_message(&node, &client, "test_agent", session_id, &history, &mut session_msgs);
+    maybe_inject_turn_budget_message(
+        &client,
+        "test_agent",
+        session_id,
+        &history,
+        &mut session_msgs,
+        0,
+    );
 
-    assert_eq!(session_msgs.len(), 3, "reminder should be appended after the tool result");
-    assert!(matches!(session_msgs[1].role, Role::Tool { .. }), "tool message must stay a tool result");
-    assert_eq!(session_msgs[1].content, r#"{"result":"ok"}"#, "tool payload must be unchanged");
-    assert!(matches!(session_msgs[2].role, Role::User), "reminder should be appended as a user message");
+    assert_eq!(
+        session_msgs.len(),
+        3,
+        "reminder should be appended after the tool result"
+    );
+    assert!(
+        matches!(session_msgs[1].role, Role::Tool { .. }),
+        "tool message must stay a tool result"
+    );
+    assert_eq!(
+        session_msgs[1].content, r#"{"result":"ok"}"#,
+        "tool payload must be unchanged"
+    );
+    assert!(
+        matches!(session_msgs[2].role, Role::User),
+        "reminder should be appended as a user message"
+    );
     assert!(
         session_msgs[2].content.contains("<system-reminder>"),
         "gemini reminders should keep XML wrapping"
@@ -584,7 +997,10 @@ async fn exit_tool_injects_submit_tool_in_options() {
     .with_factory(factory.clone());
 
     runtime.next(Context::default()).await.expect("init step");
-    runtime.next(Context::default()).await.expect("dispatch step");
+    runtime
+        .next(Context::default())
+        .await
+        .expect("dispatch step");
 
     let captured = factory.captured();
     assert_eq!(captured.len(), 1);
@@ -609,37 +1025,113 @@ async fn exit_tool_injects_submit_tool_in_options() {
 #[test]
 fn maybe_inject_fires_for_exit_tool_agent_without_real_tools() {
     use crate::flows::history::FlowHistory;
-    use crate::flows::interner::Interner;
-    use std::collections::HashMap;
 
     let session_id = "s1";
-    let mut interner = Interner::new();
-    let agent_id = interner.intern("agent");
-    let exit_id = interner.intern("ExitOutput");
-
-    let node = AgentInfo {
-        id: agent_id,
-        tools: vec![],
-        make_message: |_, _| Ok(Message::user("hi")),
-        preamble: "".into(),
-        input_schema: serde_json::json!({}),
-        model: "ollama:///test".into(),
-        exit: exit_id,
-        output_schema: serde_json::json!({}),
-        tool_lookup: HashMap::new(),
-        keep_alive: false,
+    let opts = ClientOptions {
         turn_budget: Some(1),
-        turn_budget_message: None,
         output_type_name: "ExitOutput".into(),
+        ..ClientOptions::default()
     };
-
-    let client = CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///test");
+    let client = CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///test")
+        .with_options(opts);
     let history = FlowHistory::new();
     let mut msgs: Vec<Message> = vec![Message::user("start")];
-    maybe_inject_turn_budget_message(&node, &client, "agent", session_id, &history, &mut msgs);
-    assert_eq!(msgs.len(), 2, "reminder should be injected for exit-tool agent with no real tools");
-    assert!(msgs[1].content.contains("ExitOutput"), "reminder should name the exit tool");
+    maybe_inject_turn_budget_message(&client, "agent", session_id, &history, &mut msgs, 0);
+    assert_eq!(
+        msgs.len(),
+        2,
+        "reminder should be injected for exit-tool agent with no real tools"
+    );
+    assert!(
+        msgs[1].content.contains("ExitOutput"),
+        "reminder should name the exit tool"
+    );
 }
+
+// ── last_step_was_effect tests ─────────────────────────────────────────────────
+
+/// The first `next()` for an agent flow initialises agent state (None arm) — no
+/// LLM call, so the flag should be `false`.
+#[tokio::test]
+async fn last_step_was_effect_false_on_state_init() {
+    let factory = CapturingFactory::new(ResponseMode::Output(json!({ "answer": "hi" })));
+    let mut runtime = crate::flows::runtime::FlowRuntime::new(PlainAgentInput {
+        topic: "rust".into(),
+    })
+    .expect("runtime should build")
+    .with_factory(factory);
+
+    // first step: agent None arm — push initial user message, no LLM call
+    runtime
+        .next(Context::default())
+        .await
+        .expect("state-init step");
+    assert!(
+        !runtime.last_step_was_effect(),
+        "state-init is not an effect"
+    );
+}
+
+/// The second `next()` fires the LLM dispatch — this IS an effect.
+#[tokio::test]
+async fn last_step_was_effect_true_after_dispatch() {
+    let factory = CapturingFactory::new(ResponseMode::Output(json!({ "answer": "hi" })));
+    let mut runtime = crate::flows::runtime::FlowRuntime::new(PlainAgentInput {
+        topic: "rust".into(),
+    })
+    .expect("runtime should build")
+    .with_factory(factory);
+
+    runtime
+        .next(Context::default())
+        .await
+        .expect("state-init step");
+    runtime
+        .next(Context::default())
+        .await
+        .expect("dispatch step");
+    assert!(
+        runtime.last_step_was_effect(),
+        "LLM dispatch must set the effect flag"
+    );
+}
+
+/// A `work`-node step runs a user closure and must set the flag.
+#[tokio::test]
+async fn last_step_was_effect_true_after_work() {
+    #[derive(Clone, Serialize, Deserialize, JsonSchema)]
+    struct WorkInput {
+        value: i64,
+    }
+
+    #[derive(Clone, Serialize, Deserialize, JsonSchema)]
+    struct WorkOutput {
+        doubled: i64,
+    }
+
+    impl Flow for WorkInput {
+        type Output = WorkOutput;
+
+        fn build(root: Node<Self>) -> Node<Self::Output> {
+            root.work(|input: WorkInput, _ctx: Context| async move {
+                Ok(WorkOutput {
+                    doubled: input.value * 2,
+                })
+            })
+        }
+    }
+
+    let mut runtime = crate::flows::runtime::FlowRuntime::new(WorkInput { value: 3 })
+        .expect("runtime should build");
+
+    // single step runs the work closure directly
+    runtime.next(Context::default()).await.expect("work step");
+    assert!(
+        runtime.last_step_was_effect(),
+        "work step must set the effect flag"
+    );
+}
+
 // ── Each node tests ───────────────────────────────────────────────────────────
 
 /// Simple item type for each-node tests: wraps a single integer.
@@ -659,7 +1151,9 @@ impl Flow for EachItem {
 
     fn build(root: Node<Self>) -> Node<Self::Output> {
         root.work(|item: EachItem, _ctx: Context| async move {
-            Ok(EachItemOutput { doubled: item.value * 2 })
+            Ok(EachItemOutput {
+                doubled: item.value * 2,
+            })
         })
     }
 }
@@ -670,8 +1164,7 @@ impl Flow for Vec<EachItem> {
     type Output = EachFlowOutput;
 
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root
-            .each()
+        root.each()
             .work(|items: Vec<EachItemOutput>, _ctx: Context| async move {
                 Ok(EachFlowOutput { results: items })
             })
@@ -714,8 +1207,7 @@ async fn each_node_runs_sub_flow_for_each_item() {
 async fn each_node_with_empty_vec_returns_empty_result() {
     use crate::flows::runtime::{FlowRuntime, RunLimits};
 
-    let mut runtime = FlowRuntime::new(vec![] as Vec<EachItem>)
-        .expect("runtime should build");
+    let mut runtime = FlowRuntime::new(vec![] as Vec<EachItem>).expect("runtime should build");
 
     let outcome = runtime
         .run_until(Context::default(), RunLimits::default())

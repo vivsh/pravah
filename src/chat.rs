@@ -8,8 +8,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::clients::{
-    Client, ClientError, ClientOptions, ClientOutput, Message, ResponseFormat, Role,
-    TokenUsage, materialize_messages,
+    Client, ClientError, ClientOptions, ClientOutput, Message, ResponseFormat, Role, TokenUsage,
+    materialize_messages,
 };
 use crate::context::Context;
 use crate::flows::compactor::{DynHistoryCompactor, HistoryCompactor, NoopCompactor};
@@ -110,12 +110,12 @@ pub trait ChatType:
         if Self::wire_kind() == ChatWireKind::Text {
             return Ok(None);
         }
-        serde_json::to_value(schemars::schema_for!(Self)).map(Some).map_err(|source| {
-            ChatError::Schema {
+        serde_json::to_value(schemars::schema_for!(Self))
+            .map(Some)
+            .map_err(|source| ChatError::Schema {
                 ty: type_name::<Self>(),
                 source,
-            }
-        })
+            })
     }
 
     /// Serializes the value into the user-visible message content.
@@ -289,7 +289,9 @@ impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
         let options = build_typed_options::<Input, Output>(self.options)?;
         let client = options.clone().create(&self.url)?;
         Ok(Chat {
-            session_id: self.session_id.unwrap_or_else(|| Uuid::now_v7().to_string()),
+            session_id: self
+                .session_id
+                .unwrap_or_else(|| Uuid::now_v7().to_string()),
             url: self.url,
             options,
             client,
@@ -421,9 +423,17 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
         Ok(turn.into_turn())
     }
 
-    async fn retrieve_memory(&self, ctx: &Context, input: &Value) -> Result<Option<String>, ChatError> {
+    async fn retrieve_memory(
+        &self,
+        ctx: &Context,
+        input: &Value,
+    ) -> Result<Option<String>, ChatError> {
         self.memory
-            .retrieve_dyn(&MemoryQuery { agent_name: CHAT_AGENT_ID, input, ctx })
+            .retrieve_dyn(&MemoryQuery {
+                agent_name: CHAT_AGENT_ID,
+                input,
+                ctx,
+            })
             .await
             .map_err(ChatError::Memory)
     }
@@ -436,7 +446,15 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
     ) -> Result<DispatchTurn<Output>, ChatError> {
         let mut msgs = self.history.for_session(&self.session_id);
         if let Some(text) = env {
-            msgs.insert(0, Message { role: Role::System, content: text, attachments: Vec::new(), usage: None });
+            msgs.insert(
+                0,
+                Message {
+                    role: Role::System,
+                    content: text,
+                    attachments: Vec::new(),
+                    usage: None,
+                },
+            );
         }
         msgs.push(msg.clone());
         let materialized = materialize_messages(&msgs, ctx).await?;
@@ -462,7 +480,10 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
             .collect();
         let refs: Vec<&HistoryEntry> = owned.iter().collect();
         let result = self.compactor.compact_dyn(&self.session_id, &refs).await;
-        if let Err(e) = self.history.apply_compaction(&self.session_id, &refs, result) {
+        if let Err(e) = self
+            .history
+            .apply_compaction(&self.session_id, &refs, result)
+        {
             tracing::warn!(
                 session_id = %self.session_id,
                 error = %e,
@@ -609,8 +630,7 @@ mod tests {
     /// JSON output decodes from the provider value into the typed result.
     #[test]
     fn json_output_decodes_from_value() {
-        let output = DraftOutput::decode_output(serde_json::json!({ "answer": "ok" }))
-            .unwrap();
+        let output = DraftOutput::decode_output(serde_json::json!({ "answer": "ok" })).unwrap();
         assert_eq!(
             output,
             DraftOutput {

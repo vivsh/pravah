@@ -3,8 +3,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::context::Context;
-use crate::flows::{Flow, Node};
 use crate::flows::errors::FlowError;
+use crate::flows::{Flow, Node};
 use crate::tools::ToolOutput;
 
 /// One option shown to the human.
@@ -94,17 +94,13 @@ impl Flow for HumanInput {
     type Output = HumanOutput;
 
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root
-            .work(try_cli_input)
+        root.work(try_cli_input)
             .either(route_decision)
             .branch(|done| done, |pending| pending.suspend::<HumanOutput>())
     }
 }
 
-async fn try_cli_input(
-    input: HumanInput,
-    ctx: Context,
-) -> Result<HumanInputDecision, FlowError> {
+async fn try_cli_input(input: HumanInput, ctx: Context) -> Result<HumanInputDecision, FlowError> {
     if ctx.require::<CliMode>().is_ok() {
         let out = read_stdin(input).await?;
         Ok(HumanInputDecision::Done(out))
@@ -153,22 +149,28 @@ fn print_prompt(input: &HumanInput) {
     use std::io::Write;
     println!("\n{}", input.prompt);
     for (i, choice) in input.choices.iter().enumerate() {
-        let icon = choice.icon.as_deref().map(|s| format!("{s} ")).unwrap_or_default();
+        let icon = choice
+            .icon
+            .as_deref()
+            .map(|s| format!("{s} "))
+            .unwrap_or_default();
         println!("  {}. {}{}", i + 1, icon, choice.label);
         if let Some(desc) = &choice.description {
             println!("     {desc}");
         }
     }
-    if input.allow_other || input.choices.is_empty() {
-        if !input.choices.is_empty() {
-            println!("  (or type a custom answer)");
-        }
+    if (input.allow_other || input.choices.is_empty()) && !input.choices.is_empty() {
+        println!("  (or type a custom answer)");
     }
     print!("> ");
     let _ = std::io::stdout().flush();
 }
 
-fn parse_response(line: &str, choices_len: usize, allow_other: bool) -> Result<HumanOutput, FlowError> {
+fn parse_response(
+    line: &str,
+    choices_len: usize,
+    allow_other: bool,
+) -> Result<HumanOutput, FlowError> {
     if line.is_empty() {
         return Err(FlowError::Internal {
             handler: "human_input",
@@ -176,15 +178,25 @@ fn parse_response(line: &str, choices_len: usize, allow_other: bool) -> Result<H
         });
     }
     if choices_len == 0 {
-        return Ok(HumanOutput { choice: None, text: Some(line.to_owned()) });
+        return Ok(HumanOutput {
+            choice: None,
+            text: Some(line.to_owned()),
+        });
     }
-    if let Ok(n) = line.parse::<usize>() {
-        if n >= 1 && n <= choices_len {
-            return Ok(HumanOutput { choice: Some(n - 1), text: None });
-        }
+    if let Ok(n) = line.parse::<usize>()
+        && n >= 1
+        && n <= choices_len
+    {
+        return Ok(HumanOutput {
+            choice: Some(n - 1),
+            text: None,
+        });
     }
     if allow_other {
-        return Ok(HumanOutput { choice: None, text: Some(line.to_owned()) });
+        return Ok(HumanOutput {
+            choice: None,
+            text: Some(line.to_owned()),
+        });
     }
     Err(FlowError::Internal {
         handler: "human_input",

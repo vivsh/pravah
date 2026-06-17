@@ -5,8 +5,8 @@ pub mod client;
 pub mod store;
 
 pub use client::{
-    mock_tool_call, output_response, tool_call_response, tool_call_response_with_thought,
-    ScriptedFactory,
+    ScriptedFactory, mock_tool_call, output_response, tool_call_response,
+    tool_call_response_with_thought,
 };
 pub use store::CapturingHistoryStore;
 

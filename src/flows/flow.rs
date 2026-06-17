@@ -6,24 +6,26 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::builder::FlowBuilder;
+use super::compactor::count_complete_turns;
+use super::history::FlowHistory;
 use super::memory::DynMemoryFactory;
 use super::memory::MemoryQuery;
 use super::node_api::Node;
-use super::compactor::count_complete_turns;
-use super::history::FlowHistory;
 use super::nodes::{
     AgentInfo, EachInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo, MapInfo, SuspendInfo,
-    ToolWorkInfo, WorkInfo,
+    ToolMessageError, ToolWorkInfo, WorkInfo,
 };
 use crate::flows::NodeId;
 use crate::flows::errors::{AgentError, BuildError, FlowError};
 use crate::flows::interner::Interner;
-use crate::flows::state::{AgentContinuation, AgentState, Callable, EachState, FlowState, WaitingCall};
+use crate::flows::state::{
+    AgentContinuation, AgentState, Callable, EachState, FlowState, WaitingCall,
+};
 use crate::flows::validation::validate;
 use crate::{
     clients::{
-        Client, ClientFactory, ClientOptions, ClientOutput, Message, Role,
-        ToolChoice, materialize_messages,
+        Client, ClientFactory, ClientOptions, ClientOutput, Message, Role, ToolChoice,
+        materialize_messages,
     },
     context::Context,
     tools::{SuspendedValue, ToolDefinition},
@@ -99,6 +101,22 @@ pub struct FlowGraph {
     pub(crate) callable_index: usize,
 }
 
+struct PendingToolState {
+    session_id: String,
+    active: HashMap<NodeId, (String, String)>,
+    waiting: HashMap<NodeId, VecDeque<WaitingCall>>,
+    error_exits: HashSet<String>,
+}
+
+struct DispatchContext<'a> {
+    factory: &'a dyn ClientFactory,
+    ctx: Context,
+    history: &'a mut FlowHistory,
+    states: &'a mut FlowState,
+    session_id: &'a str,
+    preamble: &'a str,
+}
+
 impl FlowGraph {
     pub(crate) fn new() -> Self {
         Self {
@@ -145,7 +163,7 @@ impl FlowGraph {
                 node.name.0
             ))
         })?;
-        match (node.func)(&state, ctx).await {
+        match (node.func)(state, ctx).await {
             Ok(value) => {
                 if !states.set_state(node.exit_name, value, Some(node.name)) {
                     return Err(FlowError::Internal {
@@ -153,6 +171,7 @@ impl FlowGraph {
                         detail: "frame stack empty on set_state".into(),
                     });
                 }
+                states.last_step_was_effect = true;
             }
             Err(e) if !e.is_fatal() => {
                 tracing::warn!(
@@ -167,6 +186,7 @@ impl FlowGraph {
                         detail: "frame stack empty on set_state".into(),
                     });
                 }
+                states.last_step_was_effect = true;
                 if !states.add_tool_error_exit(node.agent_id, node.exit_name) {
                     return Err(FlowError::Internal {
                         handler: "handle_tool_work",
@@ -174,10 +194,12 @@ impl FlowGraph {
                     });
                 }
             }
-            Err(e) => return Err(FlowError::Internal {
-                handler: "handle_tool_work",
-                detail: e.to_string(),
-            }),
+            Err(e) => {
+                return Err(FlowError::Internal {
+                    handler: "handle_tool_work",
+                    detail: e.to_string(),
+                });
+            }
         }
         Ok(())
     }
@@ -193,13 +215,14 @@ impl FlowGraph {
                 node.name.0
             ))
         })?;
-        let output = (node.func)(&state, ctx).await?;
+        let output = (node.func)(state, ctx).await?;
         if !states.set_state(node.exit_name, output, Some(node.name)) {
             return Err(FlowError::Internal {
                 handler: "handle_work",
                 detail: "frame stack empty on set_state".into(),
             });
         }
+        states.last_step_was_effect = true;
         Ok(())
     }
 
@@ -274,7 +297,7 @@ impl FlowGraph {
                 either.entry.0
             ))
         })?;
-        let (out_id, out_val) = (either.func)(&state)?;
+        let (out_id, out_val) = (either.func)(state)?;
         if !states.set_state(out_id, out_val, Some(either.entry)) {
             return Err(FlowError::Internal {
                 handler: "handle_either",
@@ -291,7 +314,7 @@ impl FlowGraph {
                 node.name.0
             ))
         })?;
-        let output = (node.func)(&state)?;
+        let output = (node.func)(state)?;
         if !states.set_state(node.exit_name, output, Some(node.name)) {
             return Err(FlowError::Internal {
                 handler: "handle_map",
@@ -320,14 +343,18 @@ impl FlowGraph {
         };
 
         if states.each_queue_has(info.id) {
-            let result = states.take_state(info.id).ok_or_else(|| FlowError::Internal {
-                handler: "handle_each",
-                detail: "feedback slot empty on subsequent visit".into(),
-            })?;
-            let queue = states.each_queue_get_mut(info.id).ok_or_else(|| FlowError::Internal {
-                handler: "handle_each",
-                detail: "each queue missing after has() returned true".into(),
-            })?;
+            let result = states
+                .take_state(info.id)
+                .ok_or_else(|| FlowError::Internal {
+                    handler: "handle_each",
+                    detail: "feedback slot empty on subsequent visit".into(),
+                })?;
+            let queue = states
+                .each_queue_get_mut(info.id)
+                .ok_or_else(|| FlowError::Internal {
+                    handler: "handle_each",
+                    detail: "each queue missing after has() returned true".into(),
+                })?;
             queue.results.push(result);
 
             if let Some(next_item) = queue.remaining.pop_front() {
@@ -339,10 +366,13 @@ impl FlowGraph {
                 }
                 states.call_enter(callable);
             } else {
-                let each_state = states.each_queue_remove(info.id).ok_or_else(|| FlowError::Internal {
-                    handler: "handle_each",
-                    detail: "queue vanished before results could be collected".into(),
-                })?;
+                let each_state =
+                    states
+                        .each_queue_remove(info.id)
+                        .ok_or_else(|| FlowError::Internal {
+                            handler: "handle_each",
+                            detail: "queue vanished before results could be collected".into(),
+                        })?;
                 if !states.set_state(info.exit, Value::Array(each_state.results), None) {
                     return Err(FlowError::Internal {
                         handler: "handle_each",
@@ -353,10 +383,12 @@ impl FlowGraph {
             return Ok(FlowStep::Continue);
         }
 
-        let vec_value = states.take_state(info.id).ok_or_else(|| FlowError::Internal {
-            handler: "handle_each",
-            detail: "input slot missing on first visit".into(),
-        })?;
+        let vec_value = states
+            .take_state(info.id)
+            .ok_or_else(|| FlowError::Internal {
+                handler: "handle_each",
+                detail: "input slot missing on first visit".into(),
+            })?;
         let items: Vec<Value> = vec_value
             .as_array()
             .ok_or_else(|| FlowError::Internal {
@@ -382,7 +414,13 @@ impl FlowGraph {
                 detail: "deque was empty despite non-empty items check".into(),
             });
         };
-        states.each_queue_init(info.id, EachState { remaining, results: Vec::new() });
+        states.each_queue_init(
+            info.id,
+            EachState {
+                remaining,
+                results: Vec::new(),
+            },
+        );
         if !states.set_state(info.id, first, None) {
             return Err(FlowError::Internal {
                 handler: "handle_each",
@@ -465,7 +503,8 @@ impl FlowGraph {
                 let agent_name = flow.interner.name_of(node.id);
                 let message = (node.make_message)(input.clone(), &ctx)?;
                 history.push(&session_id, agent_name, message);
-                states.init_agent_state(node.id, session_id.clone(), input);
+                let turn_offset = count_complete_turns(&history.session_entries(&session_id));
+                states.init_agent_state(node.id, session_id.clone(), input, turn_offset);
                 Ok(FlowStep::Continue)
             }
 
@@ -476,18 +515,24 @@ impl FlowGraph {
                 ..
             }) => {
                 let session_id = session_id.clone();
-                let preamble = match states.get_agent_state(node.id).and_then(|s| s.cached_preamble.clone()) {
+                let preamble = match states
+                    .get_agent_state(node.id)
+                    .and_then(|s| s.cached_preamble.clone())
+                {
                     Some(cached) => cached,
                     None => {
                         let agent_name = flow.interner.name_of(node.id);
-                        let env = memory.retrieve_dyn(&MemoryQuery {
-                            agent_name,
-                            input,
-                            ctx: &ctx,
-                        }).await.map_err(|e| FlowError::MemoryError {
-                            agent: agent_name.to_string(),
-                            reason: e.to_string(),
-                        })?;
+                        let env = memory
+                            .retrieve_dyn(&MemoryQuery {
+                                agent_name,
+                                input,
+                                ctx: &ctx,
+                            })
+                            .await
+                            .map_err(|e| FlowError::MemoryError {
+                                agent: agent_name.to_string(),
+                                reason: e.to_string(),
+                            })?;
                         let computed = node.effective_preamble(env);
                         if let Some(s) = states.get_agent_state_mut(node.id) {
                             s.cached_preamble = Some(computed.clone());
@@ -495,7 +540,19 @@ impl FlowGraph {
                         computed
                     }
                 };
-                Self::dispatch_agent(node, flow, factory, ctx, history, states, &session_id, &preamble).await
+                Self::dispatch_agent(
+                    node,
+                    flow,
+                    DispatchContext {
+                        factory,
+                        ctx,
+                        history,
+                        states,
+                        session_id: &session_id,
+                        preamble: &preamble,
+                    },
+                )
+                .await
             }
 
             Some(AgentState {
@@ -513,7 +570,16 @@ impl FlowGraph {
                 let waiting = waiting.clone();
                 let error_exits = error_exits.clone();
                 Self::handle_pending_tools(
-                    node, flow, history, states, session_id, active, waiting, error_exits,
+                    node,
+                    flow,
+                    history,
+                    states,
+                    PendingToolState {
+                        session_id,
+                        active,
+                        waiting,
+                        error_exits,
+                    },
                 )
             }
         }
@@ -524,11 +590,14 @@ impl FlowGraph {
         flow: &FlowGraph,
         history: &mut FlowHistory,
         states: &mut FlowState,
-        session_id: String,
-        mut active: HashMap<NodeId, (String, String)>,
-        mut waiting: HashMap<NodeId, VecDeque<WaitingCall>>,
-        mut error_exits: HashSet<String>,
+        pending: PendingToolState,
     ) -> Result<FlowStep, FlowError> {
+        let PendingToolState {
+            session_id,
+            mut active,
+            mut waiting,
+            mut error_exits,
+        } = pending;
         let agent_name = flow.interner.name_of(node.id);
         let mut completions: Vec<(NodeId, String)> = Vec::new();
         for (&exit_id, (call_id, _)) in &active {
@@ -558,7 +627,7 @@ impl FlowGraph {
             } else {
                 match (tool_info.to_message)(value) {
                     Ok(m) => m,
-                    Err(e) if !e.is_fatal() => {
+                    Err(ToolMessageError::Recoverable(e)) if !e.is_fatal() => {
                         tracing::warn!(
                             agent = %agent_name,
                             call_id = %call_id,
@@ -568,26 +637,40 @@ impl FlowGraph {
                         );
                         e.into_error_message(&tool_info.definition.name)
                     }
-                    Err(e) => return Err(FlowError::Internal {
-                        handler: "handle_pending_tools",
-                        detail: e.to_string(),
-                    }),
+                    Err(ToolMessageError::Recoverable(e)) => {
+                        return Err(FlowError::Internal {
+                            handler: "handle_pending_tools",
+                            detail: e.to_string(),
+                        });
+                    }
+                    Err(ToolMessageError::FatalOutput {
+                        expected,
+                        reason,
+                        raw,
+                    }) => {
+                        return Err(FlowError::ToolOutput {
+                            tool: tool_info.definition.name.clone(),
+                            expected,
+                            reason,
+                            raw,
+                        });
+                    }
                 }
             };
             msg.role = Role::Tool { call_id };
             history.push(&session_id, agent_name, msg);
 
             active.remove(&exit_id);
-            if let Some(queue) = waiting.get_mut(&exit_id) {
-                if let Some(next) = queue.pop_front() {
-                    if !states.set_state(next.entry_id, next.args, None) {
-                        return Err(FlowError::Internal {
-                            handler: "handle_pending_tools",
-                            detail: "PendingTool promote: frame stack empty".into(),
-                        });
-                    }
-                    active.insert(exit_id, (next.call_id, next.call_name));
+            if let Some(queue) = waiting.get_mut(&exit_id)
+                && let Some(next) = queue.pop_front()
+            {
+                if !states.set_state(next.entry_id, next.args, None) {
+                    return Err(FlowError::Internal {
+                        handler: "handle_pending_tools",
+                        detail: "PendingTool promote: frame stack empty".into(),
+                    });
                 }
+                active.insert(exit_id, (next.call_id, next.call_name));
             }
             waiting.retain(|_, q| !q.is_empty());
         }
@@ -603,7 +686,11 @@ impl FlowGraph {
             s.continuation = if active.is_empty() {
                 AgentContinuation::Dispatch
             } else {
-                AgentContinuation::PendingTool { active, waiting, error_exits }
+                AgentContinuation::PendingTool {
+                    active,
+                    waiting,
+                    error_exits,
+                }
             };
         }
         states.reinsert_state(node.id);
@@ -612,26 +699,28 @@ impl FlowGraph {
 }
 
 pub(crate) fn maybe_inject_turn_budget_message(
-    node: &AgentInfo,
     client: &dyn Client,
     agent_name: &str,
     session_id: &str,
     history: &FlowHistory,
     session_msgs: &mut Vec<Message>,
+    turn_offset: usize,
 ) {
-    if node.tools.is_empty() && !client.uses_exit_tool() {
+    let options = client.options();
+    if options.tools.is_empty() && !client.uses_exit_tool() {
         return;
     }
-    let Some(budget) = node.turn_budget else {
+    let Some(budget) = options.turn_budget else {
         return;
     };
     let completed = count_complete_turns(&history.session_entries(session_id));
-    if completed + 1 < budget as usize {
+    let turns_this_invocation = completed.saturating_sub(turn_offset);
+    if turns_this_invocation + 1 < budget as usize {
         return;
     }
-    let exit_tool_name = (client.uses_exit_tool() && !node.output_type_name.is_empty())
-        .then_some(node.output_type_name.as_str());
-    let text = node
+    let exit_tool_name = (client.uses_exit_tool() && !options.output_type_name.is_empty())
+        .then_some(options.output_type_name.as_str());
+    let text = options
         .turn_budget_message
         .as_deref()
         .map(|msg| client.wrap_system_reminder(msg))
@@ -639,6 +728,7 @@ pub(crate) fn maybe_inject_turn_budget_message(
     tracing::warn!(
         agent = %agent_name,
         completed_turns = completed,
+        turns_this_invocation,
         budget = budget,
         "turn budget reached; injecting last-turn reminder"
     );
@@ -649,13 +739,16 @@ impl FlowGraph {
     async fn dispatch_agent(
         node: &AgentInfo,
         flow: &FlowGraph,
-        factory: &dyn ClientFactory,
-        ctx: Context,
-        history: &mut FlowHistory,
-        states: &mut FlowState,
-        session_id: &str,
-        preamble: &str,
+        dispatch: DispatchContext<'_>,
     ) -> Result<FlowStep, FlowError> {
+        let DispatchContext {
+            factory,
+            ctx,
+            history,
+            states,
+            session_id,
+            preamble,
+        } = dispatch;
         let agent_name = flow.interner.name_of(node.id).to_string();
 
         let defs: Vec<ToolDefinition> = node.tools.iter().map(|t| t.definition.clone()).collect();
@@ -672,15 +765,18 @@ impl FlowGraph {
             "LLM dispatch"
         );
 
-        let mut options = ClientOptions::default();
-        options.output_type_name = node.output_type_name.clone();
-        let options = options
-            .with_input_schema(node.input_schema.clone())
-            .with_tools(defs)
-            .with_tool_choice(tool_choice)
-            .with_name(agent_name.clone())
-            .with_output_schema(node.output_schema.clone())
-            .with_preamble(preamble.to_owned());
+        let options = ClientOptions {
+            output_type_name: node.output_type_name.clone(),
+            turn_budget: node.turn_budget,
+            turn_budget_message: node.turn_budget_message.clone(),
+            ..ClientOptions::default()
+        }
+        .with_input_schema(node.input_schema.clone())
+        .with_tools(defs)
+        .with_tool_choice(tool_choice)
+        .with_name(agent_name.clone())
+        .with_output_schema(node.output_schema.clone())
+        .with_preamble(preamble.to_owned());
 
         let client = factory.create(&node.model, options).map_err(|e| {
             tracing::error!(agent = %agent_name, error = %e, "LLM client creation failed");
@@ -708,7 +804,18 @@ impl FlowGraph {
                 }
             })?;
 
-        maybe_inject_turn_budget_message(node, &*client, &agent_name, session_id, history, &mut session_msgs);
+        let turn_offset = states
+            .get_agent_state(node.id)
+            .map(|s| s.turn_offset)
+            .unwrap_or(0);
+        maybe_inject_turn_budget_message(
+            &*client,
+            &agent_name,
+            session_id,
+            history,
+            &mut session_msgs,
+            turn_offset,
+        );
 
         tracing::debug!(
             agent = %agent_name,
@@ -746,6 +853,7 @@ impl FlowGraph {
                 };
                 history.push(session_id, &agent_name, msg);
 
+                states.last_step_was_effect = true;
                 states.remove_agent_state(node.id);
                 if !states.set_state(node.exit, val, Some(node.id)) {
                     return Err(FlowError::Internal {
@@ -768,6 +876,7 @@ impl FlowGraph {
                     usage,
                 };
                 history.push(session_id, &agent_name, atc_msg);
+                states.last_step_was_effect = true;
 
                 let mut seen_call_ids = HashSet::new();
                 let mut active: HashMap<NodeId, (String, String)> =
@@ -801,27 +910,37 @@ impl FlowGraph {
                         continue;
                     };
 
-                    if active.contains_key(&exit_id) {
-                        waiting.entry(exit_id).or_default().push_back(WaitingCall {
-                            call_id: call.id,
-                            args: call.args,
-                            call_name: call.name,
-                            entry_id,
-                        });
-                    } else {
-                        if !states.set_state(entry_id, call.args, None) {
-                            return Err(FlowError::Internal {
-                                handler: "dispatch_agent",
-                                detail: "ToolCalls: frame stack empty on set_state".into(),
+                    match active.entry(exit_id) {
+                        std::collections::hash_map::Entry::Occupied(_) => {
+                            waiting.entry(exit_id).or_default().push_back(WaitingCall {
+                                call_id: call.id,
+                                args: call.args,
+                                call_name: call.name,
+                                entry_id,
                             });
                         }
-                        active.insert(exit_id, (call.id, call.name));
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            let call_id = call.id;
+                            let call_name = call.name;
+                            let args = call.args;
+                            if !states.set_state(entry_id, args, None) {
+                                return Err(FlowError::Internal {
+                                    handler: "dispatch_agent",
+                                    detail: "ToolCalls: frame stack empty on set_state".into(),
+                                });
+                            }
+                            entry.insert((call_id, call_name));
+                        }
                     }
                 }
 
                 let needs_pending = !active.is_empty();
                 let continuation = if needs_pending {
-                    AgentContinuation::PendingTool { active, waiting, error_exits: HashSet::new() }
+                    AgentContinuation::PendingTool {
+                        active,
+                        waiting,
+                        error_exits: HashSet::new(),
+                    }
                 } else {
                     AgentContinuation::Dispatch
                 };
@@ -847,6 +966,7 @@ impl FlowGraph {
         history: &mut FlowHistory,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
+        states.last_step_was_effect = false;
         let total_states = states.len();
         for state_index in 0..total_states {
             let current_node_id = states
@@ -865,7 +985,8 @@ impl FlowGraph {
             match current_node {
                 FlowNode::Agent(agent) => {
                     tracing::debug!(node = %node_name, kind = "agent", "dispatching node");
-                    return Self::handle_agent(agent, self, factory, memory, ctx, history, states).await;
+                    return Self::handle_agent(agent, self, factory, memory, ctx, history, states)
+                        .await;
                 }
                 FlowNode::Either(either) => {
                     tracing::debug!(node = %node_name, kind = "either", "dispatching node");
@@ -932,7 +1053,21 @@ impl FlowGraph {
             }
         }
 
-        Ok(FlowStep::Continue)
+        if states.current_exit_ready() {
+            return Ok(FlowStep::Continue);
+        }
+
+        let waiting = states
+            .state_ids()
+            .into_iter()
+            .map(|id| self.interner.name_of(id).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(FlowError::Deadlock(if waiting.is_empty() {
+            "<empty>".to_string()
+        } else {
+            waiting
+        }))
     }
 
     async fn step(
@@ -951,15 +1086,17 @@ impl FlowGraph {
             }
             _ => {}
         }
-        if let Some(resumption) = resumption.take() {
-            if !states.resume(resumption) {
-                return Err(FlowError::Internal {
-                    handler: "step",
-                    detail: "no active suspension or empty frame stack".into(),
-                });
-            }
+        if let Some(resumption) = resumption.take()
+            && !states.resume(resumption)
+        {
+            return Err(FlowError::Internal {
+                handler: "step",
+                detail: "no active suspension or empty frame stack".into(),
+            });
         }
-        let result = self.step_inner(factory, memory, ctx, history, states).await?;
+        let result = self
+            .step_inner(factory, memory, ctx, history, states)
+            .await?;
         match result {
             FlowStep::Continue => {
                 if let Some(v) = states.call_exit() {

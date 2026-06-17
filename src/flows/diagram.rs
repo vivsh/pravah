@@ -125,9 +125,9 @@ impl FlowGraphDiagram {
             let safe_id = mermaid_id(&node.id);
             let decl = match node.kind {
                 DiagramNodeKind::Agent
-                    | DiagramNodeKind::Work
-                    | DiagramNodeKind::ToolWork
-                    | DiagramNodeKind::Map => {
+                | DiagramNodeKind::Work
+                | DiagramNodeKind::ToolWork
+                | DiagramNodeKind::Map => {
                     format!(
                         "    {}[\"{} ({})\"]",
                         safe_id,
@@ -144,11 +144,7 @@ impl FlowGraphDiagram {
                     )
                 }
                 DiagramNodeKind::Suspend => {
-                    format!(
-                        "    {}{{{{\"{}  (suspend)\"}}}}",
-                        safe_id,
-                        node.id
-                    )
+                    format!("    {}{{{{\"{}  (suspend)\"}}}}", safe_id, node.id)
                 }
                 DiagramNodeKind::Join => {
                     format!("    {}([\"{}  (join)\"])", safe_id, node.id)
@@ -158,9 +154,11 @@ impl FlowGraphDiagram {
                 }
                 DiagramNodeKind::Flow => {
                     format!("    {}[\"\\[{} (flow)\\]\"]", safe_id, node.id)
-                }                DiagramNodeKind::Each => {
-                    format!("    {}[\"\\[{} (each)\\]\"]" , safe_id, node.id)
-                }            };
+                }
+                DiagramNodeKind::Each => {
+                    format!("    {}[\"\\[{} (each)\\]\"]", safe_id, node.id)
+                }
+            };
             out.push_str(&decl);
             out.push('\n');
         }
@@ -191,9 +189,9 @@ impl FlowGraphDiagram {
             let safe_id = dot_id(&node.id);
             let attrs = match node.kind {
                 DiagramNodeKind::Agent
-                    | DiagramNodeKind::Work
-                    | DiagramNodeKind::ToolWork
-                    | DiagramNodeKind::Map => format!(
+                | DiagramNodeKind::Work
+                | DiagramNodeKind::ToolWork
+                | DiagramNodeKind::Map => format!(
                     "label=\"{}\\n({})\" shape=box style=rounded",
                     node.id,
                     node.kind.label_suffix()
@@ -436,7 +434,7 @@ fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
     let descs: Vec<NodeDesc> = graph
         .nodes
         .iter()
-        .filter_map(|(key, node)| {
+        .map(|(key, node)| {
             let key_str = graph.interner.name_of(*key).to_string();
             let (kind, succs): (DiagramNodeKind, Vec<(String, &'static str)>) = match node {
                 FlowNode::Agent(info) => (
@@ -449,7 +447,10 @@ fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
                 ),
                 FlowNode::ToolWork(info) => (
                     DiagramNodeKind::ToolWork,
-                    vec![(graph.interner.name_of(info.exit_name).to_string(), "tool_work")],
+                    vec![(
+                        graph.interner.name_of(info.exit_name).to_string(),
+                        "tool_work",
+                    )],
                 ),
                 FlowNode::Map(info) => (
                     DiagramNodeKind::Map,
@@ -474,12 +475,14 @@ fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
                     DiagramNodeKind::Either,
                     vec![
                         (graph.interner.name_of(info.left_name).to_string(), "either"),
-                        (graph.interner.name_of(info.right_name).to_string(), "either"),
+                        (
+                            graph.interner.name_of(info.right_name).to_string(),
+                            "either",
+                        ),
                     ],
                 ),
                 FlowNode::Flow(inner) => {
-                    let exit = inner
-                        .exit;
+                    let exit = inner.exit;
                     let exit_str = inner.interner.name_of(exit).to_string();
                     (DiagramNodeKind::Flow, vec![(exit_str, "flow")])
                 }
@@ -488,11 +491,11 @@ fn diagram_from_graph(graph: &FlowGraph) -> FlowGraphDiagram {
                     (DiagramNodeKind::Each, vec![(exit_str, "each")])
                 }
             };
-            Some(NodeDesc {
+            NodeDesc {
                 id: key_str,
                 kind,
                 succs,
-            })
+            }
         })
         .collect();
     let entry_str = graph.interner.name_of(graph.entry).to_string();

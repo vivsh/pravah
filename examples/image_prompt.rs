@@ -12,7 +12,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-
 #[derive(Debug, Error)]
 enum ExampleError {
     #[error("{0}")]
@@ -30,7 +29,6 @@ enum ExampleError {
     #[error(transparent)]
     Flow(#[from] FlowError),
 }
-
 
 #[derive(Debug, PartialEq, Eq)]
 struct CliArgs {
@@ -55,7 +53,6 @@ struct ImagePromptArgs {
     prompt: Vec<String>,
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct VisionPrompt {
     prompt: String,
@@ -69,7 +66,6 @@ struct VisionResult {
     visible_text: Vec<String>,
     confidence: String,
 }
-
 
 impl Agent for VisionPrompt {
     type Output = VisionResult;
@@ -99,7 +95,6 @@ impl Agent for VisionPrompt {
     }
 }
 
-
 impl Flow for VisionPrompt {
     type Output = VisionResult;
 
@@ -107,7 +102,6 @@ impl Flow for VisionPrompt {
         root.agent()
     }
 }
-
 
 fn parse_args() -> Result<CliArgs, ExampleError> {
     match parse_raw_args(env::args().skip(1)) {
@@ -122,15 +116,15 @@ fn parse_args() -> Result<CliArgs, ExampleError> {
     }
 }
 
-
+#[cfg(test)]
 fn parse_args_from<I>(args: I) -> Result<CliArgs, ExampleError>
 where
     I: IntoIterator<Item = String>,
 {
-    let parsed = parse_raw_args(args).map_err(|early_exit| ExampleError::Args(early_exit.output))?;
+    let parsed =
+        parse_raw_args(args).map_err(|early_exit| ExampleError::Args(early_exit.output))?;
     validate_args(parsed)
 }
-
 
 fn parse_raw_args<I>(args: I) -> Result<ImagePromptArgs, argh::EarlyExit>
 where
@@ -141,7 +135,6 @@ where
     ImagePromptArgs::from_args(&["image_prompt"], &refs)
 }
 
-
 fn normalize_args(args: Vec<String>) -> Vec<String> {
     args.into_iter()
         .map(|arg| match arg.as_str() {
@@ -151,7 +144,6 @@ fn normalize_args(args: Vec<String>) -> Vec<String> {
         })
         .collect()
 }
-
 
 fn validate_args(args: ImagePromptArgs) -> Result<CliArgs, ExampleError> {
     let prompt = args.prompt.join(" ");
@@ -181,7 +173,6 @@ fn validate_args(args: ImagePromptArgs) -> Result<CliArgs, ExampleError> {
     })
 }
 
-
 fn infer_image_mime(path: &Path) -> Option<String> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     let mime_type = match extension.as_str() {
@@ -199,7 +190,6 @@ fn infer_image_mime(path: &Path) -> Option<String> {
     };
     Some(mime_type.to_string())
 }
-
 
 fn prepare_runtime(args: CliArgs) -> Result<(VisionPrompt, Context), ExampleError> {
     let image_path = std::fs::canonicalize(&args.image_path)?;
@@ -225,7 +215,6 @@ fn prepare_runtime(args: CliArgs) -> Result<(VisionPrompt, Context), ExampleErro
     Ok((input, ctx))
 }
 
-
 #[tokio::main]
 async fn main() -> Result<(), ExampleError> {
     dotenvy::dotenv().ok();
@@ -250,17 +239,18 @@ async fn main() -> Result<(), ExampleError> {
                 }
                 break;
             }
-            FlowStep::Suspend(_) => return Err(FlowError::Internal {
-                handler: "image_prompt_example",
-                detail: "unexpected suspension in a single-agent example".into(),
+            FlowStep::Suspend(_) => {
+                return Err(FlowError::Internal {
+                    handler: "image_prompt_example",
+                    detail: "unexpected suspension in a single-agent example".into(),
+                }
+                .into());
             }
-            .into()),
         }
     }
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -323,8 +313,7 @@ mod tests {
         })
         .expect("runtime preparation should succeed");
 
-        let canonical_dir = std::fs::canonicalize(dir.path())
-            .expect("tempdir should canonicalize");
+        let canonical_dir = std::fs::canonicalize(dir.path()).expect("tempdir should canonicalize");
         assert_eq!(ctx.working_dir(), canonical_dir);
         assert_eq!(input.image_path, "guru_nanak.png");
     }

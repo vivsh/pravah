@@ -9,7 +9,6 @@ use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ReviewItem {
     text: String,
@@ -35,7 +34,6 @@ struct SentimentReport {
     summary: String,
 }
 
-
 impl Agent for ReviewItem {
     type Output = ReviewSentiment;
 
@@ -58,7 +56,6 @@ impl Flow for ReviewItem {
     }
 }
 
-
 async fn tally(results: Vec<ReviewSentiment>, _ctx: Context) -> Result<SentimentReport, FlowError> {
     let mut positive = 0usize;
     let mut negative = 0usize;
@@ -78,7 +75,12 @@ async fn tally(results: Vec<ReviewSentiment>, _ctx: Context) -> Result<Sentiment
         results.len()
     );
 
-    Ok(SentimentReport { positive, negative, neutral, summary })
+    Ok(SentimentReport {
+        positive,
+        negative,
+        neutral,
+        summary,
+    })
 }
 
 fn unwrap_batch(batch: ReviewBatch) -> Vec<ReviewItem> {
@@ -90,13 +92,9 @@ impl Flow for ReviewBatch {
     type Output = SentimentReport;
 
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root
-            .map(unwrap_batch)
-            .each()
-            .work(tally)
+        root.map(unwrap_batch).each().work(tally)
     }
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -105,11 +103,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let batch = ReviewBatch {
         items: vec![
-            ReviewItem { text: "Absolutely love this product! Best purchase I've made.".into() },
-            ReviewItem { text: "Terrible quality, broke after one use. Very disappointed.".into() },
-            ReviewItem { text: "It's okay, nothing special but does the job.".into() },
-            ReviewItem { text: "Exceeded my expectations in every way, highly recommended!".into() },
-            ReviewItem { text: "Packaging was damaged and customer support was unhelpful.".into() },
+            ReviewItem {
+                text: "Absolutely love this product! Best purchase I've made.".into(),
+            },
+            ReviewItem {
+                text: "Terrible quality, broke after one use. Very disappointed.".into(),
+            },
+            ReviewItem {
+                text: "It's okay, nothing special but does the job.".into(),
+            },
+            ReviewItem {
+                text: "Exceeded my expectations in every way, highly recommended!".into(),
+            },
+            ReviewItem {
+                text: "Packaging was damaged and customer support was unhelpful.".into(),
+            },
         ],
     };
 

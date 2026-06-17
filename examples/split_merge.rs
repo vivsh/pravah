@@ -5,13 +5,11 @@ use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct Proposal {
     title: String,
     description: String,
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct TechTrack {
@@ -27,7 +25,6 @@ struct MktTrack {
 struct RiskTrack {
     description: String,
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct TechAnalysis {
@@ -47,7 +44,6 @@ struct RiskAnalysis {
     mitigation: String,
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct Brief {
     tech: String,
@@ -55,7 +51,6 @@ struct Brief {
     risk: String,
     recommendation: String,
 }
-
 
 impl Agent for TechTrack {
     type Output = TechAnalysis;
@@ -93,12 +88,17 @@ impl Agent for RiskTrack {
     }
 }
 
-
 fn split_proposal(p: Proposal) -> (TechTrack, MktTrack, RiskTrack) {
     (
-        TechTrack { description: p.description.clone() },
-        MktTrack { description: p.description.clone() },
-        RiskTrack { description: p.description },
+        TechTrack {
+            description: p.description.clone(),
+        },
+        MktTrack {
+            description: p.description.clone(),
+        },
+        RiskTrack {
+            description: p.description,
+        },
     )
 }
 
@@ -115,18 +115,15 @@ fn merge_brief((tech, mkt, risk): (TechAnalysis, MktAnalysis, RiskAnalysis)) -> 
     }
 }
 
-
 impl Flow for Proposal {
     type Output = Brief;
 
     fn build(root: Node<Self>) -> Node<Self::Output> {
         let (tech, mkt, risk) = root.split(split_proposal);
 
-        tech.agent()
-            .merge((mkt.agent(), risk.agent()), merge_brief)
+        tech.agent().merge((mkt.agent(), risk.agent()), merge_brief)
     }
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

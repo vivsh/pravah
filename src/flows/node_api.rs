@@ -30,12 +30,18 @@ pub struct Node<O> {
 
 impl<O> Node<O> {
     fn with_arc(builder: Arc<Mutex<FlowBuilder>>) -> Self {
-        Node { builder, _marker: PhantomData }
+        Node {
+            builder,
+            _marker: PhantomData,
+        }
     }
 
     /// Wraps an existing builder into a root node for flow compilation.
     pub(crate) fn from_builder(builder: FlowBuilder) -> Self {
-        Node { builder: Arc::new(Mutex::new(builder)), _marker: PhantomData }
+        Node {
+            builder: Arc::new(Mutex::new(builder)),
+            _marker: PhantomData,
+        }
     }
 
     /// Applies low-level [`FlowBuilder`] operations from this point in the chain.
@@ -171,9 +177,7 @@ impl<O> Node<O> {
     pub fn hold<X>(self, orphan: Node<X>) -> Self {
         if !Arc::ptr_eq(&self.builder, &orphan.builder) {
             drop(orphan);
-            return self.mutate(|b| {
-                b.error("hold: orphan node does not share the same builder")
-            });
+            return self.mutate(|b| b.error("hold: orphan node does not share the same builder"));
         }
         drop(orphan);
         self
@@ -339,10 +343,7 @@ impl<O: Agent> Node<O> {
     }
 
     /// Runs agent `O` and configures its tools within a scoped [`Toolbox`].
-    pub fn agent_with(
-        self,
-        build_tools: impl FnOnce(Toolbox<O>) -> Toolbox<O>,
-    ) -> Node<O::Output> {
+    pub fn agent_with(self, build_tools: impl FnOnce(Toolbox<O>) -> Toolbox<O>) -> Node<O::Output> {
         let builder = self.builder;
         {
             let mut guard = builder.lock().unwrap_or_else(|e| e.into_inner());

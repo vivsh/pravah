@@ -6,7 +6,6 @@ use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-
 fn ctx() -> Context {
     Context::new(FlowConf::default())
 }
@@ -21,7 +20,6 @@ async fn run_to_done<I: Flow>(mut rt: FlowRuntime<I>) -> I::Output {
     }
     panic!("flow did not finish within 100 steps")
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct Num(i64);
@@ -68,9 +66,9 @@ impl Flow for Chain3In {
     fn build(root: Node<Self>) -> Node<Self::Output> {
         root.with_builder(|builder| {
             builder
-            .work(chain3_step1)
-            .work(chain3_step2)
-            .work(chain3_step3)
+                .work(chain3_step1)
+                .work(chain3_step2)
+                .work(chain3_step3)
         })
     }
 }
@@ -80,6 +78,33 @@ async fn test_three_chained_work_nodes() {
     assert_eq!(out.0, 25);
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct DeadlockIn(i64);
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct DeadlockMid(i64);
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct DeadlockOut(i64);
+
+impl Flow for DeadlockIn {
+    type Output = DeadlockOut;
+
+    fn build(root: Node<Self>) -> Node<Self::Output> {
+        root.with_builder(|builder| builder.map(|input: DeadlockIn| DeadlockMid(input.0)))
+    }
+}
+
+/// A terminal non-exit state is reported as a deadlock instead of spinning forever.
+#[tokio::test]
+async fn test_terminal_non_exit_state_deadlocks() {
+    let mut rt = FlowRuntime::new(DeadlockIn(1)).unwrap();
+    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
+
+    let err = rt
+        .next(ctx())
+        .await
+        .expect_err("non-exit terminal state should deadlock");
+    assert!(matches!(err, FlowError::Deadlock(names) if names.contains("DeadlockMid")));
+}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct EitherIn {
@@ -111,9 +136,9 @@ impl Flow for EitherIn {
     fn build(root: Node<Self>) -> Node<Self::Output> {
         root.with_builder(|builder| {
             builder
-            .either(route_even_odd)
-            .work(even_to_out)
-            .work(odd_to_out)
+                .either(route_even_odd)
+                .work(even_to_out)
+                .work(odd_to_out)
         })
     }
 }
@@ -133,7 +158,6 @@ async fn test_either_zero_is_even() {
     let out = run_to_done(FlowRuntime::new(EitherIn { value: 0 }).unwrap()).await;
     assert_eq!(out.0, "even:0");
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct PreRouteIn(i64);
@@ -168,10 +192,10 @@ impl Flow for PreRouteIn {
     fn build(root: Node<Self>) -> Node<Self::Output> {
         root.with_builder(|builder| {
             builder
-            .work(normalize)
-            .either(route_sign)
-            .work(pos_label)
-            .work(neg_label)
+                .work(normalize)
+                .either(route_sign)
+                .work(pos_label)
+                .work(neg_label)
         })
     }
 }
@@ -186,7 +210,6 @@ async fn test_work_then_either_negative() {
     let out = run_to_done(FlowRuntime::new(PreRouteIn(-5)).unwrap()).await;
     assert_eq!(out.0, "neg:-10");
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ForkJoinIn {
@@ -220,7 +243,6 @@ async fn test_fork_join_basic() {
     assert_eq!(out.sum, 5 + 8);
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FWJIn(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -252,10 +274,10 @@ impl Flow for FWJIn {
     fn build(root: Node<Self>) -> Node<Self::Output> {
         root.with_builder(|builder| {
             builder
-            .fork(fwj_split)
-            .work(fwj_left_work)
-            .work(fwj_right_work)
-            .join(fwj_join)
+                .fork(fwj_split)
+                .work(fwj_left_work)
+                .work(fwj_right_work)
+                .join(fwj_join)
         })
     }
 }
@@ -265,15 +287,14 @@ async fn test_fork_work_work_join() {
     assert_eq!(out.0, 105 - 500);
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct WFJWIn(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct WFJWNorm(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct WFJWL(i64);
+struct WfjwL(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct WFJWR(i64);
+struct WfjwR(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct WFJWMid(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -282,10 +303,10 @@ struct WFJWOut(i64);
 async fn wfjw_norm(n: WFJWIn, _c: Context) -> Result<WFJWNorm, FlowError> {
     Ok(WFJWNorm(n.0 + 1))
 }
-fn wfjw_split(n: WFJWNorm) -> (WFJWL, WFJWR) {
-    (WFJWL(n.0 * 2), WFJWR(n.0 * 3))
+fn wfjw_split(n: WFJWNorm) -> (WfjwL, WfjwR) {
+    (WfjwL(n.0 * 2), WfjwR(n.0 * 3))
 }
-fn wfjw_join(l: WFJWL, r: WFJWR) -> WFJWMid {
+fn wfjw_join(l: WfjwL, r: WfjwR) -> WFJWMid {
     WFJWMid(l.0 + r.0)
 }
 async fn wfjw_final(n: WFJWMid, _c: Context) -> Result<WFJWOut, FlowError> {
@@ -297,10 +318,10 @@ impl Flow for WFJWIn {
     fn build(root: Node<Self>) -> Node<Self::Output> {
         root.with_builder(|builder| {
             builder
-            .work(wfjw_norm)
-            .fork(wfjw_split)
-            .join(wfjw_join)
-            .work(wfjw_final)
+                .work(wfjw_norm)
+                .fork(wfjw_split)
+                .join(wfjw_join)
+                .work(wfjw_final)
         })
     }
 }
@@ -309,7 +330,6 @@ async fn test_work_fork_join_work() {
     let out = run_to_done(FlowRuntime::new(WFJWIn(2)).unwrap()).await;
     assert_eq!(out.0, 150);
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct InnerIn(i64);
@@ -342,12 +362,7 @@ async fn outer_post(n: InnerOut, _c: Context) -> Result<OuterOut, FlowError> {
 impl Flow for OuterIn {
     type Output = OuterOut;
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root.with_builder(|builder| {
-            builder
-            .work(outer_prep)
-            .flow::<InnerIn>()
-            .work(outer_post)
-        })
+        root.with_builder(|builder| builder.work(outer_prep).flow::<InnerIn>().work(outer_post))
     }
 }
 /// x=3 → inner gets 8 → doubled to 16 → outer adds 1 → 17.
@@ -356,7 +371,6 @@ async fn test_nested_flow_basic() {
     let out = run_to_done(FlowRuntime::new(OuterIn(3)).unwrap()).await;
     assert_eq!(out.0, 17);
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct L2In(i64);
@@ -389,12 +403,7 @@ async fn l1_post(n: L2Out, _c: Context) -> Result<L1Out, FlowError> {
 impl Flow for L1In {
     type Output = L1Out;
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root.with_builder(|builder| {
-            builder
-            .work(l1_prep)
-            .flow::<L2In>()
-            .work(l1_post)
-        })
+        root.with_builder(|builder| builder.work(l1_prep).flow::<L2In>().work(l1_post))
     }
 }
 
@@ -413,12 +422,7 @@ async fn root_post(n: L1Out, _c: Context) -> Result<RootOut, FlowError> {
 impl Flow for RootIn {
     type Output = RootOut;
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root.with_builder(|builder| {
-            builder
-            .work(root_prep)
-            .flow::<L1In>()
-            .work(root_post)
-        })
+        root.with_builder(|builder| builder.work(root_prep).flow::<L1In>().work(root_post))
     }
 }
 #[tokio::test]
@@ -426,7 +430,6 @@ async fn test_doubly_nested_flow() {
     let out = run_to_done(FlowRuntime::new(RootIn(5)).unwrap()).await;
     assert_eq!(out.0, ((5 + 1) * 2 + 100) - 10);
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct NForkIn(i64);
@@ -459,10 +462,10 @@ impl Flow for NForkIn {
     fn build(root: Node<Self>) -> Node<Self::Output> {
         root.with_builder(|builder| {
             builder
-            .fork(nfork_split)
-            .work(nfork_a_work)
-            .work(nfork_b_work)
-            .join(nfork_join)
+                .fork(nfork_split)
+                .work(nfork_a_work)
+                .work(nfork_b_work)
+                .join(nfork_join)
         })
     }
 }
@@ -482,12 +485,7 @@ async fn nf_post(n: NForkOut, _c: Context) -> Result<NFWrapOut, FlowError> {
 impl Flow for NFWrap {
     type Output = NFWrapOut;
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root.with_builder(|builder| {
-            builder
-            .work(nf_prep)
-            .flow::<NForkIn>()
-            .work(nf_post)
-        })
+        root.with_builder(|builder| builder.work(nf_prep).flow::<NForkIn>().work(nf_post))
     }
 }
 #[tokio::test]
@@ -496,14 +494,16 @@ async fn test_nested_flow_containing_fork_join() {
     assert_eq!(out.0, 1033);
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ErrKindIn(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ErrKindOut(i64);
 
 async fn always_err(_n: ErrKindIn, _c: Context) -> Result<ErrKindOut, FlowError> {
-    Err(FlowError::Internal { handler: "test_suspend", detail: "deliberate failure".into() })
+    Err(FlowError::Internal {
+        handler: "test_suspend",
+        detail: "deliberate failure".into(),
+    })
 }
 
 impl Flow for ErrKindIn {
@@ -523,7 +523,6 @@ async fn test_work_error_is_not_suspend() {
         Ok(_) => panic!("error should not surface as Done/Continue"),
     }
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct SnapIn(i64);
@@ -573,7 +572,6 @@ async fn test_snapshot_after_done_errors_on_next() {
     assert!(rt2.next(ctx()).await.is_err());
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ValIn(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -591,8 +589,6 @@ impl Flow for ValIn {
 async fn test_empty_flow_build_fails() {
     assert!(FlowRuntime::new(ValIn(0)).is_err());
 }
-
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct EFIn(i64);
@@ -620,12 +616,7 @@ async fn ef_neg_work(n: EFNeg, _c: Context) -> Result<EFOut, FlowError> {
 impl Flow for EFIn {
     type Output = EFOut;
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root.with_builder(|builder| {
-            builder
-            .either(ef_route)
-            .work(ef_pos_work)
-            .work(ef_neg_work)
-        })
+        root.with_builder(|builder| builder.either(ef_route).work(ef_pos_work).work(ef_neg_work))
     }
 }
 
@@ -644,12 +635,7 @@ async fn efw_post(n: EFOut, _c: Context) -> Result<EFWrapOut, FlowError> {
 impl Flow for EFWrap {
     type Output = EFWrapOut;
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root.with_builder(|builder| {
-            builder
-            .work(efw_prep)
-            .flow::<EFIn>()
-            .work(efw_post)
-        })
+        root.with_builder(|builder| builder.work(efw_prep).flow::<EFIn>().work(efw_post))
     }
 }
 #[tokio::test]
@@ -663,7 +649,6 @@ async fn test_outer_flow_inner_either_negative() {
     let out = run_to_done(FlowRuntime::new(EFWrap(-7)).unwrap()).await;
     assert_eq!(out.0, "val=-7");
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FEJIn(i64);
@@ -710,12 +695,12 @@ impl Flow for FEJIn {
     fn build(root: Node<Self>) -> Node<Self::Output> {
         root.with_builder(|builder| {
             builder
-            .fork(fej_split)
-            .either(fej_route)
-            .work(fej_la_work)
-            .work(fej_lb_work)
-            .work(fej_right_work)
-            .join(fej_join)
+                .fork(fej_split)
+                .either(fej_route)
+                .work(fej_la_work)
+                .work(fej_lb_work)
+                .work(fej_right_work)
+                .join(fej_join)
         })
     }
 }
@@ -743,7 +728,6 @@ async fn test_step_count_three_work() {
     assert_eq!(continues, 2);
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ErrIn(bool);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -751,7 +735,10 @@ struct ErrOut(i64);
 
 async fn failing_work(n: ErrIn, _c: Context) -> Result<ErrOut, FlowError> {
     if n.0 {
-        Err(FlowError::Internal { handler: "test", detail: "intentional failure".into() })
+        Err(FlowError::Internal {
+            handler: "test",
+            detail: "intentional failure".into(),
+        })
     } else {
         Ok(ErrOut(0))
     }
@@ -791,7 +778,6 @@ async fn test_snapshot_before_fork() {
     assert_eq!(fresh_out.sum, out2.sum);
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ErrRouteIn(i64);
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -818,12 +804,7 @@ async fn err_right(n: ErrRight, _c: Context) -> Result<ErrRouteOut, FlowError> {
 impl Flow for ErrRouteIn {
     type Output = ErrRouteOut;
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root.with_builder(|builder| {
-            builder
-            .either(err_route)
-            .work(err_left)
-            .work(err_right)
-        })
+        root.with_builder(|builder| builder.either(err_route).work(err_left).work(err_right))
     }
 }
 #[tokio::test]
@@ -836,7 +817,6 @@ async fn test_either_routing_success() {
     let out = run_to_done(FlowRuntime::new(ErrRouteIn(5)).unwrap()).await;
     assert_eq!(out.0, 5);
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FJWIn(i64);
@@ -862,12 +842,7 @@ async fn fjw_post(n: FJWJoined, _c: Context) -> Result<FJWOut, FlowError> {
 impl Flow for FJWIn {
     type Output = FJWOut;
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root.with_builder(|builder| {
-            builder
-            .fork(fjw_split)
-            .join(fjw_join)
-            .work(fjw_post)
-        })
+        root.with_builder(|builder| builder.fork(fjw_split).join(fjw_join).work(fjw_post))
     }
 }
 #[tokio::test]
@@ -886,16 +861,25 @@ async fn test_inspector_reports_suspension() {
 
     assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
     assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Continue));
-    assert!(matches!(rt.next(ctx()).await.unwrap(), FlowStep::Suspend(_)));
+    assert!(matches!(
+        rt.next(ctx()).await.unwrap(),
+        FlowStep::Suspend(_)
+    ));
 
     let inspector = rt.inspector();
     assert_eq!(inspector.depth(), 1);
     assert!(inspector.is_suspended());
     assert_eq!(inspector.suspension_type(), Some("HumanOutput"));
 
-    let top = inspector.top_frame().expect("root frame should remain suspended");
+    let top = inspector
+        .top_frame()
+        .expect("root frame should remain suspended");
     assert!(top.agent_phases.is_empty());
-    assert!(top.locals.iter().any(|local| local.name == "PendingHumanInput"));
+    assert!(
+        top.locals
+            .iter()
+            .any(|local| local.name == "PendingHumanInput")
+    );
 }
 #[tokio::test]
 async fn test_snapshot_mid_fork_work_join() {
@@ -918,7 +902,6 @@ async fn test_deep_nested_flow_snapshot_restore() {
     let out = run_to_done(FlowRuntime::<RootIn>::from_snapshot(snap2).unwrap()).await;
     assert_eq!(fresh.0, out.0);
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ForkErrIn(bool);

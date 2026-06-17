@@ -25,7 +25,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_preamble("You are a helpful assistant. Be concise.")
             .create(&llm_url)?;
 
-        let messages = vec![Message::user("What is the capital of France? One sentence.")];
+        let messages = vec![Message::user(
+            "What is the capital of France? One sentence.",
+        )];
         let response = client.execute(&messages).await?;
 
         match response.output {
@@ -59,9 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_input_schema(input_schema)
             .create(&llm_url)?;
 
-        let messages = vec![Message::user(
-            r#"{"topic": "the speed of light"}"#,
-        )];
+        let messages = vec![Message::user(r#"{"topic": "the speed of light"}"#)];
         let response = client.execute(&messages).await?;
 
         match response.output {

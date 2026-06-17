@@ -70,7 +70,7 @@ impl FlowHistory {
                 next_position = entry.position + 1;
             }
             if let Some(u) = entry.message.usage {
-                if last_usage_pos.map_or(true, |p| entry.position > p) {
+                if last_usage_pos.is_none_or(|p| entry.position > p) {
                     last_usage_pos = Some(entry.position);
                     last_usage = Some(u);
                 }
@@ -79,7 +79,13 @@ impl FlowHistory {
             }
         }
 
-        Self { entries, next_position, last_usage, total_input, total_output }
+        Self {
+            entries,
+            next_position,
+            last_usage,
+            total_input,
+            total_output,
+        }
     }
 
     /// Appends a new history entry.
@@ -157,7 +163,7 @@ impl FlowHistory {
                     "compaction index {rel_idx} out of bounds for session '{session_id}'"
                 ))
             })?;
-            if first_position.map_or(true, |p| entry.position < p) {
+            if first_position.is_none_or(|p| entry.position < p) {
                 first_position = Some(entry.position);
             }
             evict_ids.push(entry.id);
@@ -422,4 +428,3 @@ mod tests {
         assert_eq!(h.entries().len(), 2);
     }
 }
-

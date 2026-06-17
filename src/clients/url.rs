@@ -141,7 +141,10 @@ impl LlmUrl {
             if prefix_parts.is_empty() {
                 Some(format!("{transport}://{authority}"))
             } else {
-                Some(format!("{transport}://{authority}/{}", prefix_parts.join("/")))
+                Some(format!(
+                    "{transport}://{authority}/{}",
+                    prefix_parts.join("/")
+                ))
             }
         } else {
             None
@@ -264,7 +267,10 @@ fn parse_host_port(authority: &str, original: &str) -> Result<(String, Option<u1
             Err(_) => {
                 // Colon not followed by a port number — treat whole string as host
                 // (handles hostnames with no port)
-                if port_str.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') {
+                if port_str
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+                {
                     Ok((authority.to_string(), None))
                 } else {
                     Err(ClientError::InvalidUrl(format!(
@@ -277,10 +283,14 @@ fn parse_host_port(authority: &str, original: &str) -> Result<(String, Option<u1
     }
 }
 
-fn parse_query_str(
-    query_str: Option<&str>,
-    original: &str,
-) -> Result<(Option<f32>, Option<ThinkingLevel>, Option<String>, Option<CacheControl>), ClientError> {
+type ParsedQuery = (
+    Option<f32>,
+    Option<ThinkingLevel>,
+    Option<String>,
+    Option<CacheControl>,
+);
+
+fn parse_query_str(query_str: Option<&str>, original: &str) -> Result<ParsedQuery, ClientError> {
     let Some(query) = query_str else {
         return Ok((None, None, None, None));
     };

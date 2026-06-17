@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use super::super::tools::ToolDefinition;
 use super::{
     Attachment, Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest,
-    EmbedResponse, LlmUrl, Message, Provider, Role, ThinkingLevel, TokenUsage, ToolCall, ToolChoice,
-    configured_base_url, decode_output_text, extract_exit_tool_call, inject_exit_tool,
+    EmbedResponse, LlmUrl, Message, Provider, Role, ThinkingLevel, TokenUsage, ToolCall,
+    ToolChoice, configured_base_url, decode_output_text, extract_exit_tool_call, inject_exit_tool,
     optional_api_key, parse_json_output, validate_tools,
 };
 
@@ -44,8 +44,14 @@ impl OllamaClient {
     }
 }
 
-pub fn new_client(url: &LlmUrl, mut options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
-    let exit_tool_name = if url.needs_exit_tool() && !options.output_type_name.is_empty() && !options.tools.is_empty() {
+pub fn new_client(
+    url: &LlmUrl,
+    mut options: ClientOptions,
+) -> Result<Box<dyn Client>, ClientError> {
+    let exit_tool_name = if url.needs_exit_tool()
+        && !options.output_type_name.is_empty()
+        && !options.tools.is_empty()
+    {
         let name = options.output_type_name.clone();
         inject_exit_tool(&mut options);
         Some(name)
@@ -69,6 +75,10 @@ impl Client for OllamaClient {
         &self.url
     }
 
+    fn options(&self) -> &crate::clients::ClientOptions {
+        &self.options
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         validate_history(messages)?;
         validate_tools(Provider::Ollama, &self.options.tools)?;
@@ -82,15 +92,16 @@ impl Client for OllamaClient {
         let response = self.post_json(&endpoint, &payload).await?;
         let result = map_response(response, wants_json_output)?;
 
-        if let Some(ref name) = self.exit_tool_name {
-            if let ClientOutput::ToolCalls { calls, .. } = &result.output {
-                if let Some(args) = extract_exit_tool_call(calls, name) {
-                    return Ok(ClientResponse::new(Provider::Ollama, ClientOutput::Output(args))
-                        .with_usage(result.usage)
-                        .with_provider_model(result.provider_model)
-                        .with_raw_metadata(result.raw_metadata));
-                }
-            }
+        if let Some(ref name) = self.exit_tool_name
+            && let ClientOutput::ToolCalls { calls, .. } = &result.output
+            && let Some(args) = extract_exit_tool_call(calls, name)
+        {
+            return Ok(
+                ClientResponse::new(Provider::Ollama, ClientOutput::Output(args))
+                    .with_usage(result.usage)
+                    .with_provider_model(result.provider_model)
+                    .with_raw_metadata(result.raw_metadata),
+            );
         }
 
         Ok(result)
@@ -152,7 +163,7 @@ fn build_payload(
     let thinking_enabled = options
         .thinking
         .as_ref()
-        .map_or(false, |t| *t != ThinkingLevel::Off);
+        .is_some_and(|t| *t != ThinkingLevel::Off);
     let schema_hint = if options.wants_json_output() {
         options.output_schema.as_ref()
     } else {
@@ -195,7 +206,14 @@ fn build_messages(
     thinking: bool,
     schema_hint: Option<&Value>,
 ) -> Vec<Value> {
-    let mut out = Vec::with_capacity(history.len() + if preamble.is_some() || schema_hint.is_some() { 1 } else { 0 });
+    let mut out = Vec::with_capacity(
+        history.len()
+            + if preamble.is_some() || schema_hint.is_some() {
+                1
+            } else {
+                0
+            },
+    );
     if let Some(system) = combined_system_message(preamble, schema_hint) {
         out.push(json!({ "role": "system", "content": system }));
     }
@@ -252,15 +270,19 @@ fn combined_system_message(preamble: Option<&str>, schema_hint: Option<&Value>) 
     }
 }
 
-fn build_user_message(message: &Message, first_user: &mut bool, model: &str, thinking: bool) -> Value {
+fn build_user_message(
+    message: &Message,
+    first_user: &mut bool,
+    model: &str,
+    thinking: bool,
+) -> Value {
     let content = user_content(message, first_user, model, thinking);
     if message.attachments.is_empty() {
         return json!({ "role": "user", "content": content });
     }
 
-    let mut parts = Vec::with_capacity(
-        message.attachments.len() + if content.is_empty() { 0 } else { 1 },
-    );
+    let mut parts =
+        Vec::with_capacity(message.attachments.len() + if content.is_empty() { 0 } else { 1 });
     parts.extend(message.attachments.iter().filter_map(ollama_image_part));
     if !content.is_empty() {
         parts.push(json!({ "type": "text", "text": content }));
@@ -326,10 +348,7 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
-fn map_response(
-    response: Value,
-    wants_json_output: bool,
-) -> Result<ClientResponse, ClientError> {
+fn map_response(response: Value, wants_json_output: bool) -> Result<ClientResponse, ClientError> {
     let usage = response.get("usage").map(usage_from_value);
     let provider_model = response
         .get("model")
@@ -516,11 +535,18 @@ fn push_json_key(output: &mut String, key: &str) {
 
 fn strip_markdown_json_keys(value: Value) -> Value {
     match value {
-        Value::Array(items) => Value::Array(items.into_iter().map(strip_markdown_json_keys).collect()),
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(strip_markdown_json_keys).collect())
+        }
         Value::Object(entries) => Value::Object(
             entries
                 .into_iter()
-                .map(|(key, value)| (strip_markdown_key(&key).to_owned(), strip_markdown_json_keys(value)))
+                .map(|(key, value)| {
+                    (
+                        strip_markdown_key(&key).to_owned(),
+                        strip_markdown_json_keys(value),
+                    )
+                })
                 .collect(),
         ),
         other => other,
@@ -605,7 +631,11 @@ fn parse_content_tool_calls(content: &str) -> Result<Vec<ToolCall>, ClientError>
         });
         let consumed = tag_start + "<function=".len() + name_end + 1 + body_end;
         let skip = consumed + "</function>".len();
-        remaining = if skip < remaining.len() { &remaining[skip..] } else { "" };
+        remaining = if skip < remaining.len() {
+            &remaining[skip..]
+        } else {
+            ""
+        };
     }
     Ok(calls)
 }
@@ -626,7 +656,11 @@ fn parse_function_params(text: &str) -> Value {
         map.insert(key.to_string(), value);
         let consumed = tag_start + "<parameter=".len() + key_end + 1 + end;
         let skip = consumed + "</parameter>".len();
-        remaining = if skip < remaining.len() { &remaining[skip..] } else { "" };
+        remaining = if skip < remaining.len() {
+            &remaining[skip..]
+        } else {
+            ""
+        };
     }
     Value::Object(map)
 }
@@ -716,7 +750,7 @@ mod tests {
             None,
         );
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1]["role"], "user");    
+        assert_eq!(messages[1]["role"], "user");
         assert_eq!(messages[1]["content"][0]["type"], "image_url");
     }
 
@@ -787,11 +821,16 @@ mod tests {
         assert_eq!(payload["response_format"]["type"], "json_object");
         // schema is injected as a system message, not in response_format
         let system_msgs: Vec<_> = payload["messages"]
-            .as_array().unwrap()
+            .as_array()
+            .unwrap()
             .iter()
             .filter(|m| m["role"] == "system")
             .collect();
-        assert!(system_msgs.iter().any(|m| m["content"].as_str().unwrap_or("").contains("answer")));
+        assert!(
+            system_msgs
+                .iter()
+                .any(|m| m["content"].as_str().unwrap_or("").contains("answer"))
+        );
     }
 
     /// Explicit JSON response mode uses Ollama's json_object response format.
@@ -799,8 +838,7 @@ mod tests {
     fn payload_with_json_response_and_no_output_schema_uses_json_object_mode() {
         let payload = build_payload(
             "custom-local",
-            &ClientOptions::default()
-                .with_response_format(crate::clients::ResponseFormat::Json),
+            &ClientOptions::default().with_response_format(crate::clients::ResponseFormat::Json),
             &[Message::user("hi")],
             false,
         );
@@ -860,7 +898,10 @@ mod tests {
             true,
         );
 
-        assert_eq!(payload["response_format"]["type"], "json_object", "response_format should be set alongside tools");
+        assert_eq!(
+            payload["response_format"]["type"], "json_object",
+            "response_format should be set alongside tools"
+        );
         assert_eq!(payload["tool_choice"], "required");
         assert_eq!(payload["tools"][0]["function"]["name"], "submit");
     }

@@ -38,6 +38,10 @@ impl Client for AnthropicClient {
         &self.url
     }
 
+    fn options(&self) -> &crate::clients::ClientOptions {
+        &self.options
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         validate_history(messages)?;
         validate_tools(Provider::Anthropic, &self.options.tools)?;
@@ -86,7 +90,10 @@ async fn send_messages_request(
         .await
         .map_err(|e| ClientError::Llm(e.to_string()))?;
     if !status.is_success() {
-        return Err(ClientError::Llm(format_anthropic_http_error(status.as_u16(), &body)));
+        return Err(ClientError::Llm(format_anthropic_http_error(
+            status.as_u16(),
+            &body,
+        )));
     }
 
     serde_json::from_str(&body).map_err(|e| ClientError::Deserialize {
@@ -118,9 +125,9 @@ fn format_anthropic_http_error(status: u16, body: &str) -> String {
         .unwrap_or("unknown Anthropic error");
     let error_type = error.get("type").and_then(Value::as_str);
     match error_type {
-        Some(error_type) => format!(
-            "Anthropic API request failed with HTTP {status} ({error_type}): {message}"
-        ),
+        Some(error_type) => {
+            format!("Anthropic API request failed with HTTP {status} ({error_type}): {message}")
+        }
         None => format!("Anthropic API request failed with HTTP {status}: {message}"),
     }
 }
@@ -304,10 +311,7 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
-fn map_response(
-    response: Value,
-    wants_json_output: bool,
-) -> Result<ClientResponse, ClientError> {
+fn map_response(response: Value, wants_json_output: bool) -> Result<ClientResponse, ClientError> {
     let usage = response.get("usage").map(usage_from_value);
     let provider_model = response
         .get("model")
@@ -434,7 +438,9 @@ mod tests {
                         thought_signatures: None,
                     }],
                 },
-                content: "checking".into(),                attachments: Vec::new(),                usage: None,
+                content: "checking".into(),
+                attachments: Vec::new(),
+                usage: None,
             },
             Message::tool_output("toolu_1".into(), r#"{"ok":true}"#),
         ]);
@@ -466,7 +472,10 @@ mod tests {
         ]);
 
         assert_eq!(msgs[1]["content"][0]["type"], "tool_result");
-        assert_eq!(msgs[1]["content"][0]["content"][0]["text"], r#"{"ok":true}"#);
+        assert_eq!(
+            msgs[1]["content"][0]["content"][0]["text"],
+            r#"{"ok":true}"#
+        );
         assert_eq!(msgs[2]["role"], "user");
         assert_eq!(
             msgs[2]["content"],
@@ -534,7 +543,9 @@ mod tests {
             &[Message::user("hi")],
             false,
         );
-        let system = payload["system"].as_str().expect("system prompt should be present");
+        let system = payload["system"]
+            .as_str()
+            .expect("system prompt should be present");
         assert!(system.contains("Return only valid JSON."));
     }
 
@@ -581,9 +592,17 @@ mod tests {
 
         let payload = build_payload("claude", &options, &[Message::user("hi")], true);
 
-        let system = payload["system"].as_str().expect("system should be a string");
-        assert!(system.contains("You are helpful."), "system should contain preamble");
-        assert!(system.contains("JSON Schema"), "system should contain JSON schema hint");
+        let system = payload["system"]
+            .as_str()
+            .expect("system should be a string");
+        assert!(
+            system.contains("You are helpful."),
+            "system should contain preamble"
+        );
+        assert!(
+            system.contains("JSON Schema"),
+            "system should contain JSON schema hint"
+        );
         assert_eq!(payload["tool_choice"]["type"], "any");
         assert_eq!(payload["tools"][0]["name"], "submit");
     }
@@ -608,7 +627,9 @@ mod tests {
         let mut options = ClientOptions::default().with_preamble("Be concise.");
         options.cache = Some(CacheControl::Ephemeral5m);
         let payload = build_payload("claude", &options, &[Message::user("hi")], false);
-        let system = payload["system"].as_array().expect("system should be an array with cache");
+        let system = payload["system"]
+            .as_array()
+            .expect("system should be an array with cache");
         assert_eq!(system[0]["type"], "text");
         assert_eq!(system[0]["text"], "Be concise.");
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
@@ -621,7 +642,9 @@ mod tests {
         let mut options = ClientOptions::default().with_preamble("Be concise.");
         options.cache = Some(CacheControl::Ephemeral1h);
         let payload = build_payload("claude", &options, &[Message::user("hi")], false);
-        let system = payload["system"].as_array().expect("system should be an array with cache");
+        let system = payload["system"]
+            .as_array()
+            .expect("system should be an array with cache");
         assert_eq!(system[0]["cache_control"]["ttl"], "1h");
     }
 
@@ -641,7 +664,14 @@ mod tests {
             .with_response_format(crate::clients::ResponseFormat::Json);
         options.cache = Some(CacheControl::Ephemeral5m);
         let payload = build_payload("claude", &options, &[Message::user("hi")], false);
-        let system = payload["system"].as_array().expect("system should be an array with cache");
-        assert!(system[0]["text"].as_str().unwrap().contains("Return only valid JSON."));
+        let system = payload["system"]
+            .as_array()
+            .expect("system should be an array with cache");
+        assert!(
+            system[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Return only valid JSON.")
+        );
     }
 }

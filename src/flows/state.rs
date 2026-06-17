@@ -68,7 +68,16 @@ pub(crate) struct AgentState {
     /// turns within the same invocation, preserving a stable KV-cache prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_preamble: Option<String>,
+    /// Number of complete LLM turns already in the session history at the moment
+    /// this invocation started. Used to compute turns-since-entry for budget
+    /// enforcement, so keep-alive agents get a fresh budget on each re-entry.
+    #[serde(default, skip_serializing_if = "crate::flows::state::is_zero")]
+    pub turn_offset: usize,
     pub continuation: AgentContinuation,
+}
+
+pub(crate) fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -144,6 +153,11 @@ impl Frame {
 pub struct FlowState {
     frames: Vec<Frame>,
     suspension: Option<Suspension>,
+    /// Set to `true` by `step_inner` when the step performed real I/O or ran a
+    /// user-defined closure (LLM dispatch, `work`, `tool_work`). Reset to `false`
+    /// at the start of every step. Not persisted — always `false` after a restore.
+    #[serde(skip)]
+    pub(crate) last_step_was_effect: bool,
 }
 
 impl FlowState {
@@ -151,6 +165,7 @@ impl FlowState {
         Self {
             frames: Vec::new(),
             suspension: None,
+            last_step_was_effect: false,
         }
     }
 
@@ -217,16 +232,20 @@ impl FlowState {
     }
 
     pub fn suspend(&mut self, src: NodeId, dst: NodeId, output_type: String) {
-        self.suspension = Some(Suspension { src, dst, output_type });
+        self.suspension = Some(Suspension {
+            src,
+            dst,
+            output_type,
+        });
     }
 
     pub fn resume(&mut self, value: Value) -> bool {
-        if let Some(suspension) = self.suspension.take() {
-            if let Some(frame) = self.top_mut() {
-                frame.states.shift_remove(&suspension.src);
-                frame.states.insert(suspension.dst, value);
-                return true;
-            }
+        if let Some(suspension) = self.suspension.take()
+            && let Some(frame) = self.top_mut()
+        {
+            frame.states.shift_remove(&suspension.src);
+            frame.states.insert(suspension.dst, value);
+            return true;
         }
         false
     }
@@ -240,19 +259,34 @@ impl FlowState {
 
     /// Returns a mutable reference to the agent state for `node_id`.
     pub(crate) fn get_agent_state_mut(&mut self, node_id: NodeId) -> Option<&mut AgentState> {
-        self.top_mut().and_then(|f| f.agent_states.get_mut(&node_id))
+        self.top_mut()
+            .and_then(|f| f.agent_states.get_mut(&node_id))
     }
 
     /// Inserts a fresh `Dispatch` agent state for `node_id` with the given session.
-    pub(crate) fn init_agent_state(&mut self, node_id: NodeId, session_id: String, input: serde_json::Value) -> bool {
+    ///
+    /// `turn_offset` is the count of complete turns already in the session at
+    /// the start of this invocation; budget enforcement uses turns-since-entry
+    /// so keep-alive agents get a fresh budget on each re-entry.
+    pub(crate) fn init_agent_state(
+        &mut self,
+        node_id: NodeId,
+        session_id: String,
+        input: serde_json::Value,
+        turn_offset: usize,
+    ) -> bool {
         match self.top_mut() {
             Some(frame) => {
-                frame.agent_states.insert(node_id, AgentState {
-                    session_id,
-                    input,
-                    cached_preamble: None,
-                    continuation: AgentContinuation::Dispatch,
-                });
+                frame.agent_states.insert(
+                    node_id,
+                    AgentState {
+                        session_id,
+                        input,
+                        cached_preamble: None,
+                        turn_offset,
+                        continuation: AgentContinuation::Dispatch,
+                    },
+                );
                 true
             }
             None => false,
@@ -276,7 +310,10 @@ impl FlowState {
     /// Inserts a fresh each-queue for `id`. Returns `false` when the stack is empty.
     pub(crate) fn each_queue_init(&mut self, id: NodeId, state: EachState) -> bool {
         match self.top_mut() {
-            Some(frame) => { frame.each_queues.insert(id, state); true }
+            Some(frame) => {
+                frame.each_queues.insert(id, state);
+                true
+            }
             None => false,
         }
     }
@@ -295,14 +332,12 @@ impl FlowState {
     /// If `keep_alive` is true, the id is minted once and stored in `keep_alive_sessions`
     /// so that repeated loop iterations share the same LLM conversation.
     pub(crate) fn get_or_init_session_id(&mut self, agent_id: NodeId, keep_alive: bool) -> String {
-        if keep_alive {
-            if let Some(frame) = self.top_mut() {
-                return frame
-                    .keep_alive_sessions
-                    .entry(agent_id)
-                    .or_insert_with(|| Uuid::now_v7().to_string())
-                    .clone();
-            }
+        if keep_alive && let Some(frame) = self.top_mut() {
+            return frame
+                .keep_alive_sessions
+                .entry(agent_id)
+                .or_insert_with(|| Uuid::now_v7().to_string())
+                .clone();
         }
         Uuid::now_v7().to_string()
     }
@@ -347,12 +382,12 @@ impl FlowState {
     }
 
     /// Moves a state slot to the end of the top-frame ordering.
-    pub fn reinsert_state(&mut self, id: NodeId)  {
-        if let Some(frame) = self.top_mut() {
-            if let Some(value) = frame.states.shift_remove(&id) {
-                frame.states.insert(id, value);
-            }
-        }        
+    pub fn reinsert_state(&mut self, id: NodeId) {
+        if let Some(frame) = self.top_mut()
+            && let Some(value) = frame.states.shift_remove(&id)
+        {
+            frame.states.insert(id, value);
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -362,6 +397,17 @@ impl FlowState {
     pub fn get_index(&self, i: usize) -> Option<(NodeId, &Value)> {
         self.top()
             .and_then(|f| f.states.get_index(i).map(|(&k, v)| (k, v)))
+    }
+
+    pub(crate) fn current_exit_ready(&self) -> bool {
+        self.top()
+            .is_some_and(|f| f.states.contains_key(&f.callable.exit))
+    }
+
+    pub(crate) fn state_ids(&self) -> Vec<NodeId> {
+        self.top()
+            .map(|f| f.states.keys().copied().collect())
+            .unwrap_or_default()
     }
 
     pub fn callable_index(&self) -> Option<usize> {
@@ -399,14 +445,20 @@ impl FlowState {
     /// Returns `false` if the agent or its active entry is not found.
     pub(crate) fn add_tool_error_exit(&mut self, agent_id: NodeId, exit_id: NodeId) -> bool {
         if let Some(AgentState {
-            continuation: AgentContinuation::PendingTool { active, error_exits, .. },
+            continuation:
+                AgentContinuation::PendingTool {
+                    active,
+                    error_exits,
+                    ..
+                },
             ..
-        }) = self.top_mut().and_then(|f| f.agent_states.get_mut(&agent_id))
+        }) = self
+            .top_mut()
+            .and_then(|f| f.agent_states.get_mut(&agent_id))
+            && let Some((call_id, _)) = active.get(&exit_id)
         {
-            if let Some((call_id, _)) = active.get(&exit_id) {
-                error_exits.insert(call_id.clone());
-                return true;
-            }
+            error_exits.insert(call_id.clone());
+            return true;
         }
         false
     }

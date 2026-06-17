@@ -14,6 +14,10 @@ impl Client for TracingClient {
         self.inner.model_url()
     }
 
+    fn options(&self) -> &crate::clients::ClientOptions {
+        self.inner.options()
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         let provider = self.inner.provider();
         tracing::debug!(
@@ -136,6 +140,12 @@ mod tests {
             &self.url
         }
 
+        fn options(&self) -> &crate::clients::ClientOptions {
+            static OPTS: std::sync::OnceLock<crate::clients::ClientOptions> =
+                std::sync::OnceLock::new();
+            OPTS.get_or_init(crate::clients::ClientOptions::default)
+        }
+
         async fn execute(&self, _messages: &[Message]) -> Result<ClientResponse, ClientError> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             let remaining = self.failures_left.load(Ordering::SeqCst);
@@ -156,8 +166,9 @@ mod tests {
             model_url: &str,
             _options: ClientOptions,
         ) -> Result<Box<dyn Client>, ClientError> {
-            let url = crate::clients::LlmUrl::parse(model_url)
-                .unwrap_or_else(|_| crate::clients::LlmUrl::parse("openai:///test-model").expect("fallback"));
+            let url = crate::clients::LlmUrl::parse(model_url).unwrap_or_else(|_| {
+                crate::clients::LlmUrl::parse("openai:///test-model").expect("fallback")
+            });
             Ok(Box::new(FlakyClient {
                 url,
                 failures_left: Arc::clone(&self.failures_left),
@@ -173,7 +184,10 @@ mod tests {
         let attempts = Arc::clone(&base.attempts);
         let factory = base
             .layer(TracingLayer)
-            .layer(RetryLayer::new(RetryConfig::new(1, Duration::from_millis(1))))
+            .layer(RetryLayer::new(RetryConfig::new(
+                1,
+                Duration::from_millis(1),
+            )))
             .layer(RateLimitLayer::new().with_limit(Provider::OpenAi, RateLimit::new(60_000, 4)));
 
         let client = factory

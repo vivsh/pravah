@@ -7,12 +7,10 @@ use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DebateInput {
     claim: String,
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ProRequest {
@@ -34,7 +32,6 @@ struct ConArguments {
     points: Vec<String>,
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DebateDraft {
     claim: String,
@@ -49,12 +46,10 @@ struct DebateVerdict {
     caveats: Vec<String>,
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DebateReport {
     markdown: String,
 }
-
 
 impl Agent for ProRequest {
     type Output = ProArguments;
@@ -95,18 +90,16 @@ impl Agent for DebateDraft {
     }
 }
 
-
 fn split_claim(input: DebateInput) -> (ProRequest, ConRequest) {
     (
-        ProRequest { claim: input.claim.clone() },
+        ProRequest {
+            claim: input.claim.clone(),
+        },
         ConRequest { claim: input.claim },
     )
 }
 
-fn merge_arguments(
-    pro: ProArguments,
-    con: ConArguments,
-) -> DebateDraft {
+fn merge_arguments(pro: ProArguments, con: ConArguments) -> DebateDraft {
     DebateDraft {
         claim: pro.claim,
         pro_points: pro.points,
@@ -120,7 +113,12 @@ async fn format_verdict(verdict: DebateVerdict, _ctx: Context) -> Result<DebateR
     } else {
         format!(
             "\n\n### Caveats\n{}",
-            verdict.caveats.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n")
+            verdict
+                .caveats
+                .iter()
+                .map(|c| format!("- {c}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     };
     let markdown = format!(
@@ -132,17 +130,13 @@ async fn format_verdict(verdict: DebateVerdict, _ctx: Context) -> Result<DebateR
     Ok(DebateReport { markdown })
 }
 
-
 impl Flow for DebateDraft {
     type Output = DebateReport;
 
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root
-            .agent()
-            .work(format_verdict)
+        root.agent().work(format_verdict)
     }
 }
-
 
 impl Flow for DebateInput {
     type Output = DebateReport;
@@ -155,7 +149,6 @@ impl Flow for DebateInput {
             .flow()
     }
 }
-
 
 fn read_claim() -> String {
     let mut args = std::env::args().skip(1);
@@ -173,7 +166,6 @@ fn read_claim() -> String {
         trimmed
     }
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

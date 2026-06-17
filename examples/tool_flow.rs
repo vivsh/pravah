@@ -18,7 +18,6 @@ use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-
 // ---------------------------------------------------------------------------
 // Inner flow: fact-check a single claim
 // ---------------------------------------------------------------------------
@@ -60,7 +59,6 @@ impl Flow for VerifyClaim {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Outer flow: summarise + fact-check
 // ---------------------------------------------------------------------------
@@ -94,11 +92,9 @@ impl Flow for ArticleRequest {
     type Output = ArticleSummary;
 
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root
-            .agent_with(|toolbox| toolbox.tool_flow::<VerifyClaim>())
+        root.agent_with(|toolbox| toolbox.tool_flow::<VerifyClaim>())
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Main

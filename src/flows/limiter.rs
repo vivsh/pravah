@@ -104,6 +104,10 @@ impl Client for RateLimitingClient {
         self.inner.model_url()
     }
 
+    fn options(&self) -> &crate::clients::ClientOptions {
+        self.inner.options()
+    }
+
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         self.bucket.acquire().await;
         self.inner.execute(messages).await

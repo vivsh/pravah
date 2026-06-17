@@ -42,6 +42,22 @@ pub enum FlowError {
     #[error("limit exceeded: {0}")]
     LimitExceeded(String),
 
+    /// History compaction or persistence failed.
+    #[error("history {operation} failed: {reason}")]
+    History {
+        operation: &'static str,
+        reason: String,
+    },
+
+    /// A flow used as a tool produced output that did not match its declared type.
+    #[error("tool '{tool}' produced invalid output for {expected}: {reason}; raw={raw}")]
+    ToolOutput {
+        tool: String,
+        expected: String,
+        reason: String,
+        raw: String,
+    },
+
     /// Flow graph construction failed.
     #[error(transparent)]
     Build(#[from] BuildError),

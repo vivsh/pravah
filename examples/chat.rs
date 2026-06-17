@@ -16,14 +16,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     println!("--- turn 1 ---");
-    let t1 = session.send(ctx.clone(), "What is ownership in Rust?").await?;
+    let t1 = session
+        .send(ctx.clone(), "What is ownership in Rust?")
+        .await?;
     println!("{}", t1.text());
     if let Some(u) = t1.usage {
         println!("(tokens: in={:?} out={:?})", u.input, u.output);
     }
 
     println!("\n--- turn 2 ---");
-    let t2 = session.send(ctx.clone(), "Give me one short example of the rule you just described.").await?;
+    let t2 = session
+        .send(
+            ctx.clone(),
+            "Give me one short example of the rule you just described.",
+        )
+        .await?;
     println!("{}", t2.text());
 
     // Take a snapshot and restore to a fresh session.
@@ -31,7 +38,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- restored from snapshot ---");
     let mut restored = Chat::from_snapshot(snap)?;
 
-    let t3 = restored.send(ctx.clone(), "Summarise everything we discussed in one sentence.").await?;
+    let t3 = restored
+        .send(
+            ctx.clone(),
+            "Summarise everything we discussed in one sentence.",
+        )
+        .await?;
     println!("{}", t3.text());
 
     println!("\nsession_id: {}", restored.session_id());

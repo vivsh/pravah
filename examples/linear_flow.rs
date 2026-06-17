@@ -5,7 +5,6 @@ use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct SummariseRequest {
     text: String,
@@ -21,7 +20,6 @@ struct Report {
     markdown: String,
 }
 
-
 impl Agent for SummariseRequest {
     type Output = BulletPoints;
 
@@ -34,23 +32,23 @@ impl Agent for SummariseRequest {
     }
 }
 
-
 async fn format_bullets(bullets: BulletPoints, _ctx: Context) -> Result<Report, FlowError> {
-    let markdown = bullets.points.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n");
+    let markdown = bullets
+        .points
+        .iter()
+        .map(|p| format!("- {p}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     Ok(Report { markdown })
 }
-
 
 impl Flow for SummariseRequest {
     type Output = Report;
 
     fn build(root: Node<Self>) -> Node<Self::Output> {
-        root
-            .agent()
-            .work(format_bullets)
+        root.agent().work(format_bullets)
     }
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

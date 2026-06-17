@@ -63,8 +63,7 @@ fn is_retryable(err: &ClientError) -> bool {
 }
 
 fn backoff_delay(config: &RetryConfig, attempt: u32) -> Duration {
-    let secs = config.initial_delay.as_secs_f64()
-        * config.backoff_factor.powi(attempt as i32);
+    let secs = config.initial_delay.as_secs_f64() * config.backoff_factor.powi(attempt as i32);
     Duration::from_secs_f64(secs.min(config.max_delay.as_secs_f64()))
 }
 
@@ -77,6 +76,10 @@ struct RetryingClient {
 impl Client for RetryingClient {
     fn model_url(&self) -> &LlmUrl {
         self.inner.model_url()
+    }
+
+    fn options(&self) -> &crate::clients::ClientOptions {
+        self.inner.options()
     }
 
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {

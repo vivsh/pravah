@@ -1,5 +1,5 @@
-use base64::Engine;
 use async_trait::async_trait;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -14,20 +14,11 @@ use crate::context::Context;
 pub enum Attachment {
     /// Inline binary data (e.g. a screenshot).
     /// `data` must be base64-encoded.
-    Inline {
-        mime_type: String,
-        data: String,
-    },
+    Inline { mime_type: String, data: String },
     /// File path resolved through the current [`Context`].
-    File {
-        mime_type: String,
-        path: String,
-    },
+    File { mime_type: String, path: String },
     /// Reference to a publicly accessible URL.
-    Url {
-        mime_type: String,
-        url: String,
-    },
+    Url { mime_type: String, url: String },
 }
 
 mod anthropic;
@@ -52,14 +43,10 @@ pub enum Role {
     Assistant,
     /// Assistant turn that carries tool calls.
     /// The enclosing [`Message`] keeps any accompanying text in `content`.
-    AssistantToolCalls {
-        calls: Vec<ToolCall>,
-    },
+    AssistantToolCalls { calls: Vec<ToolCall> },
     /// Tool result fed back to the model.
     /// `call_id` must match the originating [`ToolCall`].
-    Tool {
-        call_id: String,
-    },
+    Tool { call_id: String },
 }
 
 /// One history message prepared for provider dispatch.
@@ -168,18 +155,14 @@ async fn materialize_attachment(
     ctx: &Context,
 ) -> Result<Attachment, ClientError> {
     match attachment {
-        Attachment::Inline { mime_type, data } => {
-            Ok(Attachment::Inline {
-                mime_type: mime_type.clone(),
-                data: data.clone(),
-            })
-        }
-        Attachment::Url { mime_type, url } => {
-            Ok(Attachment::Url {
-                mime_type: mime_type.clone(),
-                url: url.clone(),
-            })
-        }
+        Attachment::Inline { mime_type, data } => Ok(Attachment::Inline {
+            mime_type: mime_type.clone(),
+            data: data.clone(),
+        }),
+        Attachment::Url { mime_type, url } => Ok(Attachment::Url {
+            mime_type: mime_type.clone(),
+            url: url.clone(),
+        }),
         Attachment::File { mime_type, path } => {
             let resolved = ctx.resolve(path).map_err(|e| {
                 ClientError::Validation(format!("attachment path '{path}' is invalid: {e}"))
@@ -372,8 +355,6 @@ impl Provider {
     }
 }
 
-
-
 pub(super) fn required_api_key(url: &LlmUrl, default_env: &str) -> Result<String, ClientError> {
     url.api_key
         .clone()
@@ -439,6 +420,13 @@ pub struct ClientOptions {
     /// Prompt caching policy. `None` means no explicit cache control.
     /// Currently only used by Anthropic; other providers cache automatically.
     pub cache: Option<CacheControl>,
+    /// Maximum LLM dispatch turns. When `Some(n)`, a last-turn reminder is
+    /// injected on the final turn. A factory layer may override the value set
+    /// by `AgentConfig` by writing to this field before returning the client.
+    pub turn_budget: Option<u32>,
+    /// Overrides the default last-turn reminder injected when `turn_budget` is
+    /// reached. `None` uses the provider-appropriate default.
+    pub turn_budget_message: Option<String>,
     /// Name of the output type expected from this agent run.
     /// Used by clients that need to inject an exit tool.
     pub(crate) output_type_name: String,
@@ -486,17 +474,14 @@ impl ClientOptions {
             (None, None) => None,
             (Some(preamble), None) => Some(preamble.clone()),
             (None, Some(schema)) => Some(Self::input_schema_hint(schema)),
-            (Some(preamble), Some(schema)) => Some(format!(
-                "{preamble}\n\n{}",
-                Self::input_schema_hint(schema)
-            )),
+            (Some(preamble), Some(schema)) => {
+                Some(format!("{preamble}\n\n{}", Self::input_schema_hint(schema)))
+            }
         }
     }
 
     fn input_schema_hint(schema: &Value) -> String {
-        format!(
-            "The user message is JSON. Interpret it using this JSON Schema: {schema}"
-        )
+        format!("The user message is JSON. Interpret it using this JSON Schema: {schema}")
     }
 
     pub(crate) fn wants_json_output(&self) -> bool {
@@ -605,7 +590,10 @@ pub(crate) fn inject_exit_tool(options: &mut ClientOptions) {
 ///
 /// Returns the call's argument payload when found.
 pub(crate) fn extract_exit_tool_call(calls: &[ToolCall], name: &str) -> Option<Value> {
-    calls.iter().find(|c| c.name == name).map(|c| c.args.clone())
+    calls
+        .iter()
+        .find(|c| c.name == name)
+        .map(|c| c.args.clone())
 }
 
 #[allow(dead_code)]
@@ -619,7 +607,10 @@ pub(super) fn parse_json_output(text: &str) -> Result<Value, ClientError> {
     })
 }
 
-pub(super) fn decode_output_text(text: &str, wants_json_output: bool) -> Result<Value, ClientError> {
+pub(super) fn decode_output_text(
+    text: &str,
+    wants_json_output: bool,
+) -> Result<Value, ClientError> {
     if wants_json_output {
         parse_json_output(text)
     } else {
@@ -676,6 +667,13 @@ pub struct EmbedResponse {
 pub trait Client: Send + Sync {
     /// The parsed model URL used to construct this client.
     fn model_url(&self) -> &LlmUrl;
+
+    /// The options this client was constructed with.
+    ///
+    /// Factory layers may override fields such as `turn_budget` or
+    /// `turn_budget_message` on the `ClientOptions` passed to `create`, and
+    /// the runtime reads them back through this accessor.
+    fn options(&self) -> &ClientOptions;
 
     /// The provider backing this client instance.
     fn provider(&self) -> Provider {
@@ -742,7 +740,6 @@ pub trait Client: Send + Sync {
             capability: "embeddings".into(),
         })
     }
-
 }
 
 /// Creates a [`Client`] from a model URL and call-time options.
@@ -820,6 +817,11 @@ mod tests {
             &self.url
         }
 
+        fn options(&self) -> &ClientOptions {
+            static OPTS: std::sync::OnceLock<ClientOptions> = std::sync::OnceLock::new();
+            OPTS.get_or_init(ClientOptions::default)
+        }
+
         async fn execute(&self, _messages: &[Message]) -> Result<ClientResponse, ClientError> {
             Ok(ClientResponse::new(
                 Provider::OpenAi,
@@ -883,10 +885,7 @@ mod tests {
     #[test]
     fn parse_query_api_key_env() {
         let expected = std::env::var("PATH").expect("PATH should be set during tests");
-        let url = LlmUrl::parse(
-            "anthropic:///claude-haiku-4-5?api_key_env=PATH",
-        )
-        .unwrap();
+        let url = LlmUrl::parse("anthropic:///claude-haiku-4-5?api_key_env=PATH").unwrap();
         assert_eq!(url.provider, Provider::Anthropic);
         assert_eq!(url.api_key.as_deref(), Some(expected.as_str()));
     }
@@ -982,25 +981,31 @@ mod tests {
     #[test]
     fn wants_json_output_uses_explicit_response_format() {
         assert!(!ClientOptions::default().wants_json_output());
-        assert!(ClientOptions::default()
-            .with_response_format(ResponseFormat::Json)
-            .wants_json_output());
+        assert!(
+            ClientOptions::default()
+                .with_response_format(ResponseFormat::Json)
+                .wants_json_output()
+        );
     }
 
     /// Input schema alone does not force JSON response mode.
     #[test]
     fn input_schema_does_not_force_json_output() {
-        assert!(!ClientOptions::default()
-            .with_input_schema(serde_json::json!({ "type": "object" }))
-            .wants_json_output());
+        assert!(
+            !ClientOptions::default()
+                .with_input_schema(serde_json::json!({ "type": "object" }))
+                .wants_json_output()
+        );
     }
 
     /// Output schema opts the client into JSON response mode.
     #[test]
     fn output_schema_enables_json_output() {
-        assert!(ClientOptions::default()
-            .with_output_schema(serde_json::json!({ "type": "object" }))
-            .wants_json_output());
+        assert!(
+            ClientOptions::default()
+                .with_output_schema(serde_json::json!({ "type": "object" }))
+                .wants_json_output()
+        );
     }
 
     #[test]

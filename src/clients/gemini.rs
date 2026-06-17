@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use gemini_rust::{
     Blob, Content, FileData as GeminiFileData, FunctionCall as GeminiFunctionCall,
-    FunctionCallingMode, FunctionDeclaration, FunctionResponse as GeminiFunctionResponse,
-    Gemini, GenerationResponse, Message as GeminiMessage, Part, Role as GeminiRole, TaskType,
+    FunctionCallingMode, FunctionDeclaration, FunctionResponse as GeminiFunctionResponse, Gemini,
+    GenerationResponse, Message as GeminiMessage, Part, Role as GeminiRole, TaskType,
     Tool as GeminiTool, client::Model as GeminiModel,
 };
 use serde_json::Value;
@@ -11,8 +11,8 @@ use super::super::tools::ToolDefinition;
 use super::schema;
 use super::{
     Attachment, Client, ClientError, ClientOptions, ClientOutput, ClientResponse, EmbedRequest,
-    EmbedResponse, EmbedTaskType, LlmUrl, Message, Provider, Role, ThinkingLevel,
-    TokenUsage, ToolCall, ToolChoice, decode_output_text, extract_exit_tool_call, inject_exit_tool,
+    EmbedResponse, EmbedTaskType, LlmUrl, Message, Provider, Role, ThinkingLevel, TokenUsage,
+    ToolCall, ToolChoice, decode_output_text, extract_exit_tool_call, inject_exit_tool,
     validate_tools,
 };
 
@@ -327,16 +327,14 @@ impl GeminiClient {
             builder = builder.with_system_prompt(p);
         }
         builder = builder.with_messages(messages);
-        if tools_enabled {
-            if let Some(tool_spec) = build_tools_spec(&self.options.tools)? {
-                let mode = match self.options.tool_choice {
-                    ToolChoice::Required => FunctionCallingMode::Any,
-                    _ => FunctionCallingMode::Auto,
-                };
-                builder = builder
-                    .with_tool(tool_spec)
-                    .with_function_calling_mode(mode);
-            }
+        if tools_enabled && let Some(tool_spec) = build_tools_spec(&self.options.tools)? {
+            let mode = match self.options.tool_choice {
+                ToolChoice::Required => FunctionCallingMode::Any,
+                _ => FunctionCallingMode::Auto,
+            };
+            builder = builder
+                .with_tool(tool_spec)
+                .with_function_calling_mode(mode);
         }
         if wants_json_output {
             builder = builder.with_response_mime_type("application/json");
@@ -355,6 +353,10 @@ impl GeminiClient {
 impl Client for GeminiClient {
     fn model_url(&self) -> &LlmUrl {
         &self.url
+    }
+
+    fn options(&self) -> &crate::clients::ClientOptions {
+        &self.options
     }
 
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
@@ -376,19 +378,25 @@ impl Client for GeminiClient {
         let response_schema = response_schema(&self.options);
         let gemini_messages = build_gemini_messages(messages);
         let result = self
-            .call_api(gemini_messages, tools_enabled, wants_json_output, response_schema)
+            .call_api(
+                gemini_messages,
+                tools_enabled,
+                wants_json_output,
+                response_schema,
+            )
             .await
             .and_then(|r| map_response(r, wants_json_output))?;
 
-        if let Some(ref name) = self.exit_tool_name {
-            if let ClientOutput::ToolCalls { calls, .. } = &result.output {
-                if let Some(args) = extract_exit_tool_call(calls, name) {
-                    return Ok(ClientResponse::new(Provider::Gemini, ClientOutput::Output(args))
-                        .with_usage(result.usage)
-                        .with_provider_model(result.provider_model)
-                        .with_raw_metadata(result.raw_metadata));
-                }
-            }
+        if let Some(ref name) = self.exit_tool_name
+            && let ClientOutput::ToolCalls { calls, .. } = &result.output
+            && let Some(args) = extract_exit_tool_call(calls, name)
+        {
+            return Ok(
+                ClientResponse::new(Provider::Gemini, ClientOutput::Output(args))
+                    .with_usage(result.usage)
+                    .with_provider_model(result.provider_model)
+                    .with_raw_metadata(result.raw_metadata),
+            );
         }
 
         Ok(result)
@@ -427,16 +435,27 @@ impl Client for GeminiClient {
 
 /// Creates a Gemini client.
 /// Fails when the API key cannot be resolved.
-pub fn new_client(url: &LlmUrl, mut options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
+pub fn new_client(
+    url: &LlmUrl,
+    mut options: ClientOptions,
+) -> Result<Box<dyn Client>, ClientError> {
     let client = build_client(url)?;
-    let exit_tool_name = if url.needs_exit_tool() && !options.output_type_name.is_empty() && !options.tools.is_empty() {
+    let exit_tool_name = if url.needs_exit_tool()
+        && !options.output_type_name.is_empty()
+        && !options.tools.is_empty()
+    {
         let name = options.output_type_name.clone();
         inject_exit_tool(&mut options);
         Some(name)
     } else {
         None
     };
-    Ok(Box::new(GeminiClient { client, options, url: url.clone(), exit_tool_name }))
+    Ok(Box::new(GeminiClient {
+        client,
+        options,
+        url: url.clone(),
+        exit_tool_name,
+    }))
 }
 
 #[cfg(test)]
@@ -598,7 +617,10 @@ mod tests {
             .parts
             .as_ref()
             .expect("tool response parts should be present");
-        assert!(matches!(tool_parts.first(), Some(Part::FunctionResponse { .. })));
+        assert!(matches!(
+            tool_parts.first(),
+            Some(Part::FunctionResponse { .. })
+        ));
 
         let tool_debug = format!("{:?}", tool_parts[0]);
         assert!(tool_debug.contains("result"));
@@ -632,8 +654,8 @@ mod tests {
     /// Input schema hints do not change Gemini response mode on their own.
     #[test]
     fn input_schema_alone_does_not_enable_json_output() {
-        let with_input_schema = ClientOptions::default()
-            .with_input_schema(json!({ "type": "object" }));
+        let with_input_schema =
+            ClientOptions::default().with_input_schema(json!({ "type": "object" }));
         assert!(!wants_json_output(&with_input_schema));
         assert!(response_schema(&with_input_schema).is_none());
     }

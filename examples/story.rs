@@ -8,13 +8,11 @@ use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct Dialogue {
     character: String,
     line: String,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct StoryTurn {
@@ -22,7 +20,6 @@ struct StoryTurn {
     recap: String,
     direction: String,
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ChoreographerBrief {
@@ -49,7 +46,6 @@ struct TurnCarry {
     panel_number: usize,
     recap: String,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct ChoreoNotes {
@@ -80,7 +76,6 @@ struct AllNotes {
     recap: String,
 }
 
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DirectorBrief {
     panel_number: usize,
@@ -98,7 +93,6 @@ struct DirectorCarry {
     dialogue: DialogueNotes,
     cinema: CinemaNote,
 }
-
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ComicPanel {
@@ -133,7 +127,12 @@ struct FinalSummary {
 }
 fn split_crew(
     turn: StoryTurn,
-) -> (ChoreographerBrief, DialogueBrief, CinematographerBrief, TurnCarry) {
+) -> (
+    ChoreographerBrief,
+    DialogueBrief,
+    CinematographerBrief,
+    TurnCarry,
+) {
     (
         ChoreographerBrief {
             panel_number: turn.panel_number,
@@ -150,7 +149,10 @@ fn split_crew(
             recap: turn.recap.clone(),
             direction: turn.direction,
         },
-        TurnCarry { panel_number: turn.panel_number, recap: turn.recap },
+        TurnCarry {
+            panel_number: turn.panel_number,
+            recap: turn.recap,
+        },
     )
 }
 
@@ -184,9 +186,7 @@ fn merge_all_notes(
     }
 }
 
-fn merge_director(
-    (panel, carry): (ComicPanel, DirectorCarry),
-) -> DirectorPanel {
+fn merge_director((panel, carry): (ComicPanel, DirectorCarry)) -> DirectorPanel {
     DirectorPanel {
         panel_number: carry.panel_number,
         recap: carry.recap,
@@ -196,7 +196,6 @@ fn merge_director(
         cinema: carry.cinema,
     }
 }
-
 
 impl Agent for ChoreographerBrief {
     type Output = ChoreoNotes;
@@ -295,7 +294,6 @@ impl Agent for DirectorBrief {
     }
 }
 
-
 async fn print_and_read(dp: DirectorPanel, _ctx: Context) -> Result<UserInput, FlowError> {
     let rule = "─".repeat(62);
     println!("\n{rule}");
@@ -310,7 +308,10 @@ async fn print_and_read(dp: DirectorPanel, _ctx: Context) -> Result<UserInput, F
     }
     println!();
     println!("  [Choreographer]  {}", dp.choreo.action_beat);
-    println!("  [Cinematographer] {} · {}", dp.cinema.shot_type, dp.cinema.lighting);
+    println!(
+        "  [Cinematographer] {} · {}",
+        dp.cinema.shot_type, dp.cinema.lighting
+    );
     println!("{rule}");
 
     let direction = tokio::task::spawn_blocking(|| {
@@ -337,18 +338,19 @@ async fn print_and_read(dp: DirectorPanel, _ctx: Context) -> Result<UserInput, F
     })
 }
 
-
-fn route_input(
-    input: UserInput,
-) -> Either<StoryTurn, FinalSummary> {
+fn route_input(input: UserInput) -> Either<StoryTurn, FinalSummary> {
     if input.direction.eq_ignore_ascii_case("exit") {
-        return Either::Right(FinalSummary { panels_written: input.panel_number });
+        return Either::Right(FinalSummary {
+            panels_written: input.panel_number,
+        });
     }
 
     let dialogue_text = if input.panel.dialogues.is_empty() {
         "  (silent panel)".to_string()
     } else {
-        input.panel.dialogues
+        input
+            .panel
+            .dialogues
             .iter()
             .map(|d| format!("  [{}]: \"{}\"", d.character, d.line))
             .collect::<Vec<_>>()
@@ -394,7 +396,6 @@ fn route_input(
     })
 }
 
-
 impl Flow for StoryTurn {
     type Output = FinalSummary;
 
@@ -414,7 +415,6 @@ impl Flow for StoryTurn {
             .right()
     }
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -441,7 +441,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nProduction starting — Panel 1 in progress...\n");
 
     let ctx = Context::new(FlowConf::default());
-    let start = StoryTurn { panel_number: 1, recap: String::new(), direction: initial };
+    let start = StoryTurn {
+        panel_number: 1,
+        recap: String::new(),
+        direction: initial,
+    };
     let mut runtime = FlowRuntime::new(start)?;
 
     loop {
@@ -449,7 +453,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             FlowStep::Continue => {}
             FlowStep::Done(summary) => {
                 println!("\n{rule}");
-                println!("  Story complete — {} panel(s) written.", summary.panels_written);
+                println!(
+                    "  Story complete — {} panel(s) written.",
+                    summary.panels_written
+                );
                 println!("{rule}");
                 break;
             }
