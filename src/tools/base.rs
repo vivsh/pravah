@@ -12,6 +12,8 @@ use crate::clients::Message;
 use crate::context::Context;
 use crate::deps::DepsError;
 
+pub use crate::clients::ToolDefinition;
+
 /// Error returned by tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -151,17 +153,6 @@ impl std::fmt::Debug for SuspendedValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "SuspendedValue(..)")
     }
-}
-
-/// Tool metadata exposed to the model.
-#[derive(Debug, Clone)]
-pub struct ToolDefinition {
-    /// Registered tool name as seen by the model.
-    pub name: String,
-    /// Human-readable description of what the tool does.
-    pub description: String,
-    /// JSON Schema describing the tool input.
-    pub parameters: Value,
 }
 
 /// Converts a PascalCase (or camelCase) identifier to snake_case.

@@ -1,7 +1,7 @@
 //! Integration tests for agent tool-call dispatch.
 
 use pravah::clients::{ClientError, Role};
-use pravah::flows::{
+use pravah::legacy::{
     Agent, AgentConfig, AgentError, Flow, FlowError, FlowRuntime, FlowStep, Node, PhaseKind,
     Toolbox,
 };
@@ -575,7 +575,7 @@ async fn test_tool_results_accumulate_across_rounds() {
 
 #[tokio::test]
 async fn test_llm_error_on_first_dispatch_propagates() {
-    let factory = ScriptedFactory::new().then_err(ClientError::Llm("network timeout".into()));
+    let factory = ScriptedFactory::new().then_err(ClientError::Provider("network timeout".into()));
     let rt = FlowRuntime::new(LlmErrIn { x: "hello".into() })
         .unwrap()
         .with_factory(factory);
@@ -592,7 +592,7 @@ async fn test_llm_error_on_first_dispatch_propagates() {
 async fn test_llm_error_on_second_dispatch_propagates() {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call("c1", "echo", json!({ "text": "hi" }))])
-        .then_err(ClientError::Llm("server error on retry".into()));
+        .then_err(ClientError::Provider("server error on retry".into()));
     let rt = FlowRuntime::new(LlmErrIn { x: "hello".into() })
         .unwrap()
         .with_factory(factory);
@@ -635,22 +635,22 @@ async fn test_capturing_store_receives_all_messages() {
     .with_factory(factory)
     .with_store(store);
     run_to_done(rt).await.unwrap();
-    assert!(store_spy.flush_count() >= 2);
-    let snapshot = store_spy.last_snapshot().unwrap();
-    let live: Vec<_> = snapshot.iter().filter(|e| !e.evicted).collect();
-    assert!(live.iter().any(|e| matches!(e.message.role, Role::User)));
+    let entries = store_spy.all_entries();
+    assert!(entries.iter().any(|e| matches!(e.message.role, Role::User)));
     assert!(
-        live.iter()
+        entries
+            .iter()
             .any(|e| matches!(&e.message.role, Role::AssistantToolCalls { .. }))
     );
     assert!(
-        live.iter()
+        entries
+            .iter()
             .any(|e| matches!(&e.message.role, Role::Tool { call_id } if call_id == "s1"))
     );
 }
 
 #[tokio::test]
-async fn test_store_flush_count_matches_steps() {
+async fn test_store_records_appended_messages() {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call("f1", "echo", json!({ "text": "x" }))])
         .then_output(json!({ "echoed": "x" }));
@@ -661,7 +661,7 @@ async fn test_store_flush_count_matches_steps() {
         .with_factory(factory)
         .with_store(store);
     run_to_done(rt).await.unwrap();
-    assert!(store_spy.flush_count() >= 2);
+    assert!(store_spy.record_count() >= 4);
 }
 
 #[tokio::test]

@@ -1,9 +1,14 @@
-//! Nested flow example where an outer flow delegates research to an inner flow.
+//! Compatibility-only legacy example where an outer flow delegates to an inner flow.
+//!
+//! Requires `GEMINI_API_KEY`.
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
+mod support;
+
+use pravah::legacy::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use support::ExampleError;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ResearchQuery {
@@ -74,7 +79,7 @@ impl Flow for BlogRequest {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), ExampleError> {
     dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 
@@ -93,8 +98,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             FlowStep::Suspend(_) => {
-                eprintln!("Unexpected suspension");
-                break;
+                return Err(ExampleError::unexpected(
+                    "nested flow unexpectedly suspended",
+                ));
             }
         }
     }

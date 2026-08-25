@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::clients::{Message, Role};
 use crate::context::Context;
-use crate::flows::FlowError;
+use crate::legacy::FlowError;
 
 /// Runtime settings returned by [`Agent::configure`].
 pub struct AgentConfig {
@@ -22,6 +22,8 @@ pub struct AgentConfig {
     /// Overrides the default last-turn reminder injected when `turn_budget` is reached.
     /// When `None` a provider-appropriate default is used.
     pub turn_budget_message: Option<String>,
+    /// Opaque provider-specific LLM configuration passed through to Rath.
+    pub provider_config: Option<Value>,
 }
 
 impl AgentConfig {
@@ -33,6 +35,7 @@ impl AgentConfig {
             keep_alive: false,
             turn_budget: None,
             turn_budget_message: None,
+            provider_config: None,
         }
     }
 
@@ -51,6 +54,12 @@ impl AgentConfig {
     /// Overrides the last-turn reminder message injected when the budget is reached.
     pub fn with_turn_budget_message(mut self, msg: impl Into<String>) -> Self {
         self.turn_budget_message = Some(msg.into());
+        self
+    }
+
+    /// Sets opaque provider-specific LLM configuration.
+    pub fn with_provider_config(mut self, config: impl Into<Value>) -> Self {
+        self.provider_config = Some(config.into());
         self
     }
 }

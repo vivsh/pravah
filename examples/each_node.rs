@@ -1,13 +1,17 @@
-//! Each-node example: classify the sentiment of every review in a list, then
-//! summarise the counts.
+//! Compatibility-only legacy `each` example over a list of reviews.
+//!
+//! Requires `GEMINI_API_KEY`.
 //!
 //! Sub-flow: `ReviewItem` → agent → `ReviewSentiment`
 //! Outer flow: `ReviewBatch` → map → `Vec<ReviewItem>` → each() → `Vec<ReviewSentiment>` → work → `SentimentReport`
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
+mod support;
+
+use pravah::legacy::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use support::ExampleError;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ReviewItem {
@@ -97,7 +101,7 @@ impl Flow for ReviewBatch {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), ExampleError> {
     dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 
@@ -131,8 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             FlowStep::Suspend(_) => {
-                eprintln!("Unexpected suspension");
-                break;
+                return Err(ExampleError::unexpected("each flow unexpectedly suspended"));
             }
         }
     }

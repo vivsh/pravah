@@ -4,10 +4,10 @@
 //!
 //! Requires a provider API key: set `GEMINI_API_KEY` or change the URL to another provider.
 
-use pravah::{Chat, Context, FlowConf};
+use pravah::{Chat, ChatError, Context, FlowConf};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), ChatError> {
     dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 

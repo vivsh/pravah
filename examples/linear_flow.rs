@@ -1,9 +1,14 @@
-//! Linear flow example with one agent followed by one deterministic work node.
+//! Compatibility-only legacy flow with one agent and one deterministic work node.
+//!
+//! Requires `GEMINI_API_KEY`.
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
+mod support;
+
+use pravah::legacy::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use support::ExampleError;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct SummariseRequest {
@@ -51,7 +56,7 @@ impl Flow for SummariseRequest {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), ExampleError> {
     dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 
@@ -73,8 +78,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             FlowStep::Suspend(_) => {
-                eprintln!("Unexpected suspension");
-                break;
+                return Err(ExampleError::unexpected(
+                    "linear flow unexpectedly suspended",
+                ));
             }
         }
     }

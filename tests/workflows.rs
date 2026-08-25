@@ -1,7 +1,7 @@
 //! Integration tests for work-only flow graphs.
 
 use either::Either;
-use pravah::flows::{Flow, FlowError, FlowRuntime, FlowStep, HumanInput, Node};
+use pravah::legacy::{Flow, FlowError, FlowRuntime, FlowStep, HumanInput, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -552,7 +552,7 @@ async fn test_snapshot_restore_mid_flow() {
 
     let snap = rt.snapshot();
     let json = serde_json::to_string(&snap).unwrap();
-    let snap2: pravah::flows::FlowSnapshot = serde_json::from_str(&json).unwrap();
+    let snap2: pravah::legacy::FlowSnapshot = serde_json::from_str(&json).unwrap();
 
     let rt2 = FlowRuntime::<SnapIn>::from_snapshot(snap2).unwrap();
     let out = run_to_done(rt2).await;
@@ -772,7 +772,7 @@ async fn test_snapshot_before_fork() {
 
     let snap = FlowRuntime::new(ForkJoinIn { x: 7 }).unwrap().snapshot();
     let json = serde_json::to_string(&snap).unwrap();
-    let snap2: pravah::flows::FlowSnapshot = serde_json::from_str(&json).unwrap();
+    let snap2: pravah::legacy::FlowSnapshot = serde_json::from_str(&json).unwrap();
     let out2 = run_to_done(FlowRuntime::<ForkJoinIn>::from_snapshot(snap2).unwrap()).await;
 
     assert_eq!(fresh_out.sum, out2.sum);
@@ -889,7 +889,7 @@ async fn test_snapshot_mid_fork_work_join() {
     rt.next(ctx()).await.unwrap();
     let snap = rt.snapshot();
     let json = serde_json::to_string(&snap).unwrap();
-    let snap2: pravah::flows::FlowSnapshot = serde_json::from_str(&json).unwrap();
+    let snap2: pravah::legacy::FlowSnapshot = serde_json::from_str(&json).unwrap();
     let out = run_to_done(FlowRuntime::<FWJIn>::from_snapshot(snap2).unwrap()).await;
     assert_eq!(fresh.0, out.0);
 }
@@ -898,7 +898,7 @@ async fn test_deep_nested_flow_snapshot_restore() {
     let fresh = run_to_done(FlowRuntime::new(RootIn(3)).unwrap()).await;
     let snap = FlowRuntime::new(RootIn(3)).unwrap().snapshot();
     let json = serde_json::to_string(&snap).unwrap();
-    let snap2: pravah::flows::FlowSnapshot = serde_json::from_str(&json).unwrap();
+    let snap2: pravah::legacy::FlowSnapshot = serde_json::from_str(&json).unwrap();
     let out = run_to_done(FlowRuntime::<RootIn>::from_snapshot(snap2).unwrap()).await;
     assert_eq!(fresh.0, out.0);
 }

@@ -10,7 +10,7 @@ pub use client::{
 };
 pub use store::CapturingHistoryStore;
 
-use crate::flows::{FlowHistory, HistoryEntry};
+use crate::legacy::{FlowHistory, HistoryEntry};
 
 /// Returns the number of live history entries for `session_id`.
 pub fn session_message_count(history: &FlowHistory, session_id: &str) -> usize {

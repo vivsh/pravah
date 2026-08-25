@@ -1,14 +1,15 @@
 # Chat
 
-Read this when you want a simple multi-turn conversation without building a
-flow graph. For graph construction, typed agents, tools, and runtime semantics,
-start with [clients.md](clients.md) and [flows.md](flows.md). For full API
-details, use [docs.rs](https://docs.rs/pravah).
+Pravah provides a graph-backed typed chat loop and a direct single-client chat
+helper. For graph construction, typed agents, tools, and runtime semantics,
+start with [graph.md](graph.md) and [clients.md](clients.md).
 
 ## When To Use Chat
 
-`Chat` is for single-session conversations with one model. It maintains
-history automatically, optionally compacts it, and optionally persists it.
+Use `pravah::graph::Chat` when the conversation needs the function-defined
+agent API, dynamic configuration, prepared tools, or serializable VM state.
+Use `pravah::Chat` for a direct single-model conversation without a workflow
+graph.
 
 Use `Chat` when you want:
 
@@ -17,10 +18,43 @@ Use `Chat` when you want:
 - snapshot and restore within a single session
 - multimodal input (images, files) without a flow graph
 
-Use [`FlowRuntime`](flows.md) instead when you need tool calls, branching,
-multiple agents, or human approvals.
+The compatibility-only [`FlowRuntime`](legacy.md) remains documented for
+existing applications.
 
-## Basic Usage
+## Graph-Backed Typed Chat
+
+```rust
+use pravah::clients::Message;
+use pravah::graph::{Agent, AgentConfig, Chat};
+use pravah::Context;
+
+fn tutor(root: Agent<Question>) -> Agent<Answer> {
+    root.configure(configure_tutor)
+}
+
+async fn configure_tutor(
+    question: Question,
+    _ctx: Context,
+) -> Result<AgentConfig, AppError> {
+    Ok(AgentConfig::new(
+        "openai:///gpt-5",
+        "You are a concise Rust tutor.",
+        Message::user(question.text),
+    )
+    .keep_alive())
+}
+
+let mut chat = Chat::new(tutor);
+let turn = chat.send(Question::new("What is ownership?"), ctx).await?;
+println!("{}", turn.output.text);
+```
+
+Enable `keep_alive` when later sends should retain the model-visible session.
+`Chat::snapshot()` captures the graph VM and history. Restore with
+`Chat::from_snapshot(tutor, snapshot)` and supply runtime-only services through
+the new `Context`.
+
+## Direct Chat Usage
 
 ```rust
 use pravah::{Chat, Context, FlowConf};
@@ -57,7 +91,7 @@ if let Some(usage) = t1.usage {
 | `.session_id(id)`    | Override the auto-generated UUID (useful for durable storage) |
 | `.with_compactor(c)` | Attach a history compactor (e.g. `SlidingWindowCompactor`)    |
 | `.with_store(s)`     | Attach a history store for persistence                        |
-| `.with_memory(f)`    | Attach a memory factory for per-turn dynamic context          |
+| `.with_memory(f)`    | Attach the compatibility memory factory for dynamic context   |
 
 `.preamble` and `.environment` compose: the final system prompt is
 `{preamble}\n\n{environment}` when both are set.
@@ -109,7 +143,7 @@ println!("{}", turn.text());
 Attach a compactor to prevent unbounded history growth:
 
 ```rust
-use pravah::flows::SlidingWindowCompactor;
+use pravah::legacy::SlidingWindowCompactor;
 
 let mut chat: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
     .with_compactor(SlidingWindowCompactor::new(20))
@@ -138,7 +172,7 @@ include the compactor or store.
 
 ## Durable Persistence
 
-Attach a `HistoryStore` to flush history after each turn:
+Attach a `HistoryStore` to persist each history entry:
 
 ```rust
 let mut chat: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
@@ -147,11 +181,13 @@ let mut chat: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
     .build()?;
 ```
 
-The store receives the full history after every `send` or `send_message` call.
-If the flush fails, the error is returned as `ChatError::Store`; in-memory
-history is already updated at that point.
+Pravah asks the store to record each entry before committing that entry to
+in-memory history. If recording fails, `ChatError::Store` is returned and the
+failed entry is not committed. Entries recorded successfully earlier in the
+turn remain present and should be deduplicated by their stable position when a
+caller retries.
 
-## Memory Injection
+## Direct Chat Memory Injection
 
 Attach a [`MemoryFactory`](https://docs.rs/pravah) to inject dynamic context
 into the system prompt before each turn. The retrieved text is prepended as a
@@ -159,7 +195,7 @@ transient system message; it is never stored in history and does not affect
 compaction or snapshots.
 
 ```rust
-use pravah::flows::memory::{MemoryFactory, MemoryQuery, MemoryResult};
+use pravah::legacy::memory::{MemoryFactory, MemoryQuery, MemoryResult};
 
 struct UserProfile { store: ProfileStore }
 
@@ -182,17 +218,17 @@ let mut chat: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
 for `Chat<String, _>` and a JSON object for typed inputs.
 
 For per-agent routing across multiple agents, use [`MemoryRegistry`](https://docs.rs/pravah)
-with [`FlowRuntime::with_memory`](flows.md).
+with [`FlowRuntime::with_memory`](legacy.md).
 
 ## Model URLs
 
 `Chat` accepts the same model URL format as flow agents:
 
 ```text
-provider[+transport]://[authority][/prefix/]model[?param=value]
+provider:///provider-native-model-id[?param=value]
 ```
 
 Examples: `openai:///gpt-4o`, `anthropic:///claude-sonnet-4-5`,
-`gemini:///gemini-2.5-flash-lite`, `ollama://localhost:11434/qwen3:8b`.
+`gemini:///gemini-2.5-flash-lite`, `ollama:///qwen3:8b?base_url=http://localhost:11434`.
 
 See [clients.md — Model URLs](clients.md#model-urls) for the full reference.

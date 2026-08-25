@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::clients::{
-    Client, ClientError, ClientFactory, ClientOptions, ClientOutput, ClientResponse, LlmUrl,
-    Message, Provider, ToolCall,
+    Client, ClientError, ClientFactory, ClientOptions, ClientOutput, ClientResponse, Message,
+    ModelUrl, Provider, ToolCall,
 };
 
 struct ScriptedInner {
@@ -27,14 +27,14 @@ impl ScriptedInner {
 struct ScriptedClient {
     inner: Arc<Mutex<ScriptedInner>>,
     model_url: String,
-    url: LlmUrl,
+    url: ModelUrl,
     options: ClientOptions,
 }
 
 impl ScriptedClient {
     fn new(inner: Arc<Mutex<ScriptedInner>>, model_url: String) -> Self {
-        let url = LlmUrl::parse(&model_url).unwrap_or_else(|_| {
-            LlmUrl::parse("openai:///test-model").expect("fallback URL is valid")
+        let url = ModelUrl::parse(&model_url).unwrap_or_else(|_| {
+            ModelUrl::parse("openai:///test-model").expect("fallback URL is valid")
         });
         Self {
             inner,
@@ -47,7 +47,7 @@ impl ScriptedClient {
 
 #[async_trait]
 impl Client for ScriptedClient {
-    fn model_url(&self) -> &LlmUrl {
+    fn model_url(&self) -> &ModelUrl {
         &self.url
     }
 
@@ -61,7 +61,7 @@ impl Client for ScriptedClient {
             .calls
             .push((self.model_url.clone(), messages.to_vec()));
         guard.responses.pop_front().unwrap_or_else(|| {
-            Err(ClientError::Llm(
+            Err(ClientError::Provider(
                 "ScriptedClient: response queue exhausted".into(),
             ))
         })

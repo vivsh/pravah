@@ -2,9 +2,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "mcp")]
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
+use crate::clients::{ClientFactory, DefaultClientFactory};
 use crate::deps::{Deps, DepsError};
+#[cfg(feature = "mcp")]
+use crate::graph::{McpError, McpResourceInfo, McpServer};
 
 /// Settings used to build a [`Context`].
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -27,6 +33,9 @@ struct ContextInner {
     deps: Deps,
     http_client: Option<reqwest::Client>,
     http_timeout_secs: u64,
+    client_factory: Arc<dyn ClientFactory>,
+    #[cfg(feature = "mcp")]
+    mcp_servers: Arc<BTreeMap<String, McpServer>>,
 }
 
 /// Shared execution context passed to every step and tool.
@@ -52,6 +61,9 @@ impl Context {
             deps: Deps::default(),
             http_client: None,
             http_timeout_secs: conf.http_timeout_secs.unwrap_or(30),
+            client_factory: Arc::new(DefaultClientFactory),
+            #[cfg(feature = "mcp")]
+            mcp_servers: Arc::new(BTreeMap::new()),
         }))
     }
 
@@ -74,6 +86,36 @@ impl Context {
             http_client: Some(http_client),
             ..inner
         }))
+    }
+
+    /// Replaces the LLM client factory used by graph agents in this context.
+    ///
+    /// The factory is runtime-only and must be installed again after restoring
+    /// a serialized workflow snapshot.
+    pub fn with_client_factory(self, client_factory: impl ClientFactory + 'static) -> Self {
+        let inner = Arc::unwrap_or_clone(self.0);
+        Self(Arc::new(ContextInner {
+            client_factory: Arc::new(client_factory),
+            ..inner
+        }))
+    }
+
+    /// Registers one runtime-only Streamable HTTP MCP resource server.
+    #[cfg(feature = "mcp")]
+    pub fn with_mcp_server(self, server: McpServer) -> Self {
+        let inner = Arc::unwrap_or_clone(self.0);
+        let mut servers = (*inner.mcp_servers).clone();
+        servers.insert(server.id().to_owned(), server);
+        Self(Arc::new(ContextInner {
+            mcp_servers: Arc::new(servers),
+            ..inner
+        }))
+    }
+
+    /// Lists concrete resources and templates from a configured MCP server.
+    #[cfg(feature = "mcp")]
+    pub async fn mcp_resources(&self, server: &str) -> Result<Vec<McpResourceInfo>, McpError> {
+        crate::graph::mcp::list_resources(self, server).await
     }
 
     /// Base directory for relative-path resolution and path-escape checks.
@@ -106,5 +148,33 @@ impl Context {
     /// Returns [`DepsError::MissingDependency`] when the type was not registered.
     pub fn require<T: std::any::Any + Send + Sync + 'static>(&self) -> Result<&T, DepsError> {
         self.0.deps.require::<T>()
+    }
+
+    pub(crate) fn client_factory(&self) -> &dyn ClientFactory {
+        self.0.client_factory.as_ref()
+    }
+
+    #[cfg(feature = "mcp")]
+    pub(crate) fn mcp_server(&self, id: &str) -> Option<&McpServer> {
+        self.0.mcp_servers.get(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::clients::ClientOptions;
+
+    use super::*;
+
+    /// Verifies graph contexts provide Rath's default client factory without setup.
+    #[test]
+    fn context_installs_default_graph_client_factory() {
+        let context = Context::default();
+        let client = context
+            .client_factory()
+            .create("ollama:///qwen3:8b", ClientOptions::default())
+            .expect("default client factory should create an Ollama client");
+
+        assert_eq!(client.model_url().model, "qwen3:8b");
     }
 }

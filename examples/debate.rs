@@ -1,11 +1,16 @@
-//! Debate example with split/merge plus a nested verdict flow.
+//! Compatibility-only legacy debate with split/merge and a nested verdict flow.
+//!
+//! Requires `GEMINI_API_KEY` and accepts an optional claim argument.
+
+mod support;
 
 use std::io::{self, Write};
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
+use pravah::legacy::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use support::ExampleError;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DebateInput {
@@ -150,28 +155,28 @@ impl Flow for DebateInput {
     }
 }
 
-fn read_claim() -> String {
+fn read_claim() -> Result<String, std::io::Error> {
     let mut args = std::env::args().skip(1);
     if let Some(arg) = args.next() {
-        return arg;
+        return Ok(arg);
     }
     print!("Enter a claim to debate (or press Enter for a default): ");
-    io::stdout().flush().ok();
+    io::stdout().flush()?;
     let mut line = String::new();
-    io::stdin().read_line(&mut line).ok();
+    io::stdin().read_line(&mut line)?;
     let trimmed = line.trim().to_string();
     if trimmed.is_empty() {
-        "Artificial intelligence will eventually replace most creative professions".to_string()
+        Ok("Artificial intelligence will eventually replace most creative professions".to_string())
     } else {
-        trimmed
+        Ok(trimmed)
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), ExampleError> {
     dotenvy::dotenv().ok();
 
-    let claim = read_claim();
+    let claim = read_claim()?;
     println!("\nDebating: \"{claim}\"\n");
 
     let ctx = Context::new(FlowConf::default());
@@ -186,8 +191,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             FlowStep::Suspend(_) => {
-                eprintln!("Unexpected suspension");
-                break;
+                return Err(ExampleError::unexpected(
+                    "debate flow unexpectedly suspended",
+                ));
             }
         }
     }

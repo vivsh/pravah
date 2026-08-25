@@ -1,7 +1,7 @@
 //! Integration tests for parallel and queued tool dispatch.
 
 use pravah::clients::ClientError;
-use pravah::flows::{
+use pravah::legacy::{
     Agent, AgentConfig, AgentError, Flow, FlowError, FlowRuntime, FlowStep, Node, Toolbox,
 };
 use pravah::testing::{ScriptedFactory, mock_tool_call};
@@ -285,7 +285,8 @@ async fn test_duplicate_call_id_across_different_tools_is_rejected() {
 
 #[tokio::test]
 async fn test_llm_error_on_first_dispatch_propagates_as_agent_error() {
-    let factory = ScriptedFactory::new().then_err(ClientError::Llm("upstream rate limited".into()));
+    let factory =
+        ScriptedFactory::new().then_err(ClientError::Provider("upstream rate limited".into()));
     let rt = FlowRuntime::new(LlmFailIn { x: 0 })
         .unwrap()
         .with_factory(factory);
@@ -305,7 +306,7 @@ async fn test_llm_error_on_first_dispatch_propagates_as_agent_error() {
 async fn test_llm_error_on_re_dispatch_propagates_as_agent_error() {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call("c1", "echo", json!({ "text": "hi" }))])
-        .then_err(ClientError::Llm("second call failed".into()));
+        .then_err(ClientError::Provider("second call failed".into()));
     let rt = FlowRuntime::new(LlmFailIn { x: 0 })
         .unwrap()
         .with_factory(factory);

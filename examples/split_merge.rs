@@ -1,9 +1,14 @@
-//! Split/merge example with three agent branches converging into one brief.
+//! Compatibility-only legacy split/merge example with three agent branches.
+//!
+//! Requires `GEMINI_API_KEY`.
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowRuntime, FlowStep, Node};
+mod support;
+
+use pravah::legacy::{Agent, AgentConfig, Flow, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use support::ExampleError;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct Proposal {
@@ -126,7 +131,7 @@ impl Flow for Proposal {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), ExampleError> {
     dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 
@@ -150,8 +155,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             FlowStep::Suspend(_) => {
-                eprintln!("Unexpected suspension");
-                break;
+                return Err(ExampleError::unexpected(
+                    "split/merge flow unexpectedly suspended",
+                ));
             }
         }
     }

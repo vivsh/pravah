@@ -1,9 +1,11 @@
-//! Diagram generation example that exercises the main flow node types.
+//! Compatibility-only legacy diagram generation example.
+//!
+//! This prints tree, Mermaid, and DOT output without calling a model provider.
 
 use either::Either;
 use pravah::Context;
-use pravah::flows::FlowGraphDiagram;
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
+use pravah::legacy::FlowGraphDiagram;
+use pravah::legacy::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -244,7 +246,7 @@ impl Flow for ArticleRequest {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), FlowError> {
     let diagram = FlowGraphDiagram::from_flow::<ArticleRequest>()?;
 
     println!("=== TREE ===");

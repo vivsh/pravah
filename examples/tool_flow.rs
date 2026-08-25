@@ -1,4 +1,6 @@
-//! Tool-flow example: a sub-flow registered as a callable tool on an agent.
+//! Compatibility-only legacy tool flow backed by a nested flow.
+//!
+//! Requires `GEMINI_API_KEY`.
 //!
 //! The outer agent summarises an article. When it needs to verify a claim it
 //! calls the `verify_claim` tool, which is itself a full sub-flow backed by
@@ -10,17 +12,16 @@
 //! root
 //!     .agent_with(|toolbox| toolbox.tool_flow::<VerifyClaim>())
 //! ```
-//! For non-flow tools, use the low-level `tool_with` on `Toolbox`.
+//! For a one-shot handler, use the low-level `tool_handler` on `Toolbox`.
 
-use pravah::flows::{Agent, AgentConfig, Flow, FlowRuntime, FlowStep, Node};
+mod support;
+
+use pravah::legacy::{Agent, AgentConfig, Flow, FlowRuntime, FlowStep, Node};
 use pravah::tools::ToolOutput;
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-// ---------------------------------------------------------------------------
-// Inner flow: fact-check a single claim
-// ---------------------------------------------------------------------------
+use support::ExampleError;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct VerifyClaim {
@@ -59,10 +60,6 @@ impl Flow for VerifyClaim {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Outer flow: summarise + fact-check
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ArticleRequest {
     article: String,
@@ -96,12 +93,8 @@ impl Flow for ArticleRequest {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), ExampleError> {
     dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 
@@ -129,8 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             FlowStep::Suspend(_) => {
-                eprintln!("Unexpected suspension");
-                break;
+                return Err(ExampleError::unexpected("tool flow unexpectedly suspended"));
             }
         }
     }

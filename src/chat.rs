@@ -12,10 +12,10 @@ use crate::clients::{
     materialize_messages,
 };
 use crate::context::Context;
-use crate::flows::compactor::{DynHistoryCompactor, HistoryCompactor, NoopCompactor};
-use crate::flows::memory::{DynMemoryFactory, MemoryFactory, MemoryQuery, NoopMemoryFactory};
-use crate::flows::store::{DynHistoryStore, HistoryStore, NoopHistoryStore};
-use crate::flows::{FlowHistory, HistoryEntry};
+use crate::legacy::compactor::{DynHistoryCompactor, HistoryCompactor, NoopCompactor};
+use crate::legacy::memory::{DynMemoryFactory, MemoryFactory, MemoryQuery, NoopMemoryFactory};
+use crate::legacy::store::{DynHistoryStore, HistoryStore, NoopHistoryStore};
+use crate::legacy::{FlowHistory, HistoryEntry};
 
 /// Agent-id label used when pushing messages into [`FlowHistory`].
 const CHAT_AGENT_ID: &str = "chat";
@@ -58,12 +58,11 @@ pub enum ChatError {
         #[source]
         source: serde_json::Error,
     },
-    /// The history store flush reported an error.
+    /// The history store reported an error while recording a message.
     ///
     /// The store interface erases the concrete error type.
-    /// When a flush fails the in-memory history is already updated; the store
-    /// may be behind. There are no rollback semantics.
-    #[error("history store flush failed: {0}")]
+    /// The in-memory history is not updated when recording fails.
+    #[error("history store record failed: {0}")]
     Store(Box<dyn std::error::Error + Send + Sync>),
     /// Memory retrieval failed before dispatch.
     #[error("memory retrieval failed: {0}")]
@@ -199,7 +198,7 @@ impl ChatTurn<String> {
 /// **Not included:** compactor and store. Re-attach them after
 /// [`Chat::from_snapshot`] with [`Chat::with_compactor`] and
 /// [`Chat::with_store`]. For durable persistence, attach a
-/// [`HistoryStore`] to the session before calling [`Chat::snapshot`].
+/// [`HistoryStore`] to the session before sending messages.
 #[derive(Clone)]
 pub struct ChatSnapshot<Input = String, Output = String>
 where
@@ -310,11 +309,11 @@ impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
 /// type switches the session into JSON mode for that side.
 ///
 /// One instance owns exactly one conversation. For multi-user or multi-agent
-/// scenarios use [`FlowRuntime`](crate::flows::FlowRuntime).
+/// scenarios use [`FlowRuntime`](crate::legacy::FlowRuntime).
 ///
 /// **Supported:** text and typed JSON sessions, plus multimodal input via
 /// [`send_message`](Chat::send_message) on `Chat<String, Output>`.
-/// **Not supported:** tool calls. Use [`Flow`](crate::flows::Flow) for that.
+/// **Not supported:** tool calls. Use [`Flow`](crate::legacy::Flow) for that.
 pub struct Chat<Input = String, Output = String>
 where
     Input: ChatType,
@@ -417,9 +416,9 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
         let msg = Message::user(input.encode_input()?);
         let turn = self.dispatch(&ctx, &msg, env).await?;
         let reply = build_reply(&turn.reply_content, turn.usage);
-        self.history.push(&self.session_id, CHAT_AGENT_ID, msg);
-        self.history.push(&self.session_id, CHAT_AGENT_ID, reply);
-        self.compact_and_flush().await?;
+        self.record_history(msg).await?;
+        self.record_history(reply).await?;
+        self.compact_history().await;
         Ok(turn.into_turn())
     }
 
@@ -467,11 +466,23 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
         })
     }
 
-    /// Clones session entries to satisfy the compactor's borrowing contract,
-    /// then flushes the store. The clone is O(n) in history length; a
-    /// [`SlidingWindowCompactor`](crate::flows::SlidingWindowCompactor) keeps
+    async fn record_history(&mut self, message: Message) -> Result<(), ChatError> {
+        let entry = self
+            .history
+            .prepare_entry(&self.session_id, CHAT_AGENT_ID, message);
+        self.store
+            .record_dyn(&entry)
+            .await
+            .map_err(ChatError::Store)?;
+        self.history.commit_entry(entry);
+        Ok(())
+    }
+
+    /// Clones session entries to satisfy the compactor's borrowing contract.
+    /// The clone is O(n) in history length; a
+    /// [`SlidingWindowCompactor`](crate::legacy::SlidingWindowCompactor) keeps
     /// n small.
-    async fn compact_and_flush(&mut self) -> Result<(), ChatError> {
+    async fn compact_history(&mut self) {
         let owned: Vec<HistoryEntry> = self
             .history
             .session_entries(&self.session_id)
@@ -490,10 +501,6 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
                 "compaction failed; history unchanged"
             );
         }
-        self.store
-            .flush_dyn(&mut self.history)
-            .await
-            .map_err(ChatError::Store)
     }
 }
 
@@ -514,9 +521,9 @@ impl<Output: ChatType> Chat<String, Output> {
         let env = self.retrieve_memory(&ctx, &input_value).await?;
         let turn = self.dispatch(&ctx, &msg, env).await?;
         let reply = build_reply(&turn.reply_content, turn.usage);
-        self.history.push(&self.session_id, CHAT_AGENT_ID, msg);
-        self.history.push(&self.session_id, CHAT_AGENT_ID, reply);
-        self.compact_and_flush().await?;
+        self.record_history(msg).await?;
+        self.record_history(reply).await?;
+        self.compact_history().await;
         Ok(turn.into_turn())
     }
 }

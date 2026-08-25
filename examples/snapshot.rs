@@ -1,12 +1,17 @@
-//! Snapshot example showing save and restore mid-execution with work-only nodes.
+//! Compatibility-only legacy snapshot save and restore with work-only nodes.
+//!
+//! This example is deterministic and requires no external services.
+
+mod support;
 
 use std::fs;
 use std::path::PathBuf;
 
-use pravah::flows::{Flow, FlowError, FlowRuntime, FlowSnapshot, FlowStep, Node};
+use pravah::legacy::{Flow, FlowError, FlowRuntime, FlowSnapshot, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use support::ExampleError;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct RawRecord {
@@ -83,14 +88,14 @@ fn snapshot_path() -> PathBuf {
     std::env::temp_dir().join("pravah_snapshot_example.json")
 }
 
-fn save_snapshot(snap: &FlowSnapshot) -> Result<(), Box<dyn std::error::Error>> {
+fn save_snapshot(snap: &FlowSnapshot) -> Result<(), ExampleError> {
     let json = serde_json::to_string_pretty(snap)?;
     fs::write(snapshot_path(), json)?;
     println!("[snapshot] saved to {}", snapshot_path().display());
     Ok(())
 }
 
-fn load_snapshot() -> Result<FlowSnapshot, Box<dyn std::error::Error>> {
+fn load_snapshot() -> Result<FlowSnapshot, ExampleError> {
     let json = fs::read_to_string(snapshot_path())?;
     let snap: FlowSnapshot = serde_json::from_str(&json)?;
     println!("[snapshot] loaded from {}", snapshot_path().display());
@@ -98,7 +103,7 @@ fn load_snapshot() -> Result<FlowSnapshot, Box<dyn std::error::Error>> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), ExampleError> {
     dotenvy::dotenv().ok();
     let ctx = Context::new(FlowConf::default());
 
@@ -112,7 +117,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match runtime.next(ctx.clone()).await? {
         FlowStep::Continue => println!("[phase A] step 1 complete"),
-        other => panic!("unexpected: {other:?}"),
+        other => {
+            return Err(ExampleError::unexpected(format!(
+                "first snapshot step returned {other:?}"
+            )));
+        }
     }
 
     save_snapshot(&runtime.snapshot())?;
@@ -129,12 +138,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             FlowStep::Done(record) => {
                 println!("\n=== Done ===\n{}", record.report);
 
-                let _ = fs::remove_file(snapshot_path());
+                fs::remove_file(snapshot_path())?;
                 break;
             }
             FlowStep::Suspend(_) => {
-                eprintln!("Unexpected suspension");
-                break;
+                return Err(ExampleError::unexpected(
+                    "legacy snapshot flow unexpectedly suspended",
+                ));
             }
         }
     }

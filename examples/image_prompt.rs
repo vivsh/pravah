@@ -1,4 +1,7 @@
-//! User-image example using `Agent::to_message` with a file attachment.
+//! Compatibility-only legacy image prompt using a file attachment.
+//!
+//! Requires an image path and credentials for the model selected through
+//! `PRAVAH_MODEL_URL`.
 
 use argh::FromArgs;
 use std::env;
@@ -6,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use pravah::clients::{Attachment, Message, Role};
-use pravah::flows::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
+use pravah::legacy::{Agent, AgentConfig, Flow, FlowError, FlowRuntime, FlowStep, Node};
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -258,10 +261,10 @@ mod tests {
 
     /// Flag-style args infer the mime type from the image extension when omitted.
     #[test]
-    fn parse_args_from_flags_infers_mime() {
-        let dir = tempfile::tempdir().expect("tempdir should be created");
+    fn parse_args_from_flags_infers_mime() -> Result<(), ExampleError> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("portrait.png");
-        std::fs::write(&path, b"png").expect("image file should be written");
+        std::fs::write(&path, b"png")?;
 
         let args = parse_args_from(vec![
             "--image_path".to_string(),
@@ -269,20 +272,20 @@ mod tests {
             "who".to_string(),
             "is".to_string(),
             "this?".to_string(),
-        ])
-        .expect("flag args should parse");
+        ])?;
 
         assert_eq!(args.image_path, path);
         assert_eq!(args.mime_type, "image/png");
         assert_eq!(args.prompt, "who is this?");
+        Ok(())
     }
 
     /// Explicit mime flags are accepted alongside a trailing positional prompt.
     #[test]
-    fn parse_args_from_flags_accepts_explicit_mime() {
-        let dir = tempfile::tempdir().expect("tempdir should be created");
+    fn parse_args_from_flags_accepts_explicit_mime() -> Result<(), ExampleError> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("portrait.jpg");
-        std::fs::write(&path, b"jpg").expect("image file should be written");
+        std::fs::write(&path, b"jpg")?;
 
         let args = parse_args_from(vec![
             "--image_path".to_string(),
@@ -292,29 +295,29 @@ mod tests {
             "describe".to_string(),
             "the".to_string(),
             "photo".to_string(),
-        ])
-        .expect("flag args should parse");
+        ])?;
 
         assert_eq!(args.mime_type, "image/jpeg");
         assert_eq!(args.prompt, "describe the photo");
+        Ok(())
     }
 
     /// Preparing the runtime rebases the attachment path under the image's parent directory.
     #[test]
-    fn prepare_runtime_uses_image_parent_as_working_dir() {
-        let dir = tempfile::tempdir().expect("tempdir should be created");
+    fn prepare_runtime_uses_image_parent_as_working_dir() -> Result<(), ExampleError> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("guru_nanak.png");
-        std::fs::write(&path, b"png").expect("image file should be written");
+        std::fs::write(&path, b"png")?;
 
         let (input, ctx) = prepare_runtime(CliArgs {
             prompt: "who is this?".to_string(),
             image_path: path,
             mime_type: "image/png".to_string(),
-        })
-        .expect("runtime preparation should succeed");
+        })?;
 
-        let canonical_dir = std::fs::canonicalize(dir.path()).expect("tempdir should canonicalize");
+        let canonical_dir = std::fs::canonicalize(dir.path())?;
         assert_eq!(ctx.working_dir(), canonical_dir);
         assert_eq!(input.image_path, "guru_nanak.png");
+        Ok(())
     }
 }
