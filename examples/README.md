@@ -56,11 +56,5 @@ cargo run --example graph_agent_mcp --features mcp -- "How should this be approv
 Set `PRAVAH_MCP_BEARER_TOKEN` and `PRAVAH_MCP_TENANT` when required by the
 server. Set `PRAVAH_ALLOW_SEARCH=1` to expose the optional search tool.
 
-## Database-Backed Memory
-
-Memory examples now live with the independent
-[`pravah-memory`](../pravah-memory/README.md) crate. Its PostgreSQL example uses
-deterministic providers and optionally queues recall telemetry after retrieval.
-
 The compatibility-only examples remain available for existing applications.
 New workflow features target `pravah::graph`.

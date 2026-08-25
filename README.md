@@ -33,12 +33,8 @@ Applications provide those facilities and decide when to call the runtime.
 pravah = "0.4.8"
 ```
 
-The repository is a workspace with two independently usable crates:
-
-| Crate | Purpose |
-| --- | --- |
-| [`pravah`](https://crates.io/crates/pravah) | Explicit, resumable agent and application workflows |
-| [`pravah-memory`](pravah-memory/README.md) | Evidence-backed, temporal memory and PostgreSQL hybrid retrieval |
+The repository contains the `pravah` crate for explicit, resumable agent and
+application workflows.
 
 ## A Small Typed Workflow
 
@@ -93,11 +89,6 @@ All three use the same stepwise runtime. Snapshots contain execution state and
 history tied to a graph fingerprint. Store the serializable graph separately,
 and supply runtime services again when restoring.
 
-Memory is intentionally a separate crate. Add `pravah-memory` when an
-application needs immutable evidence, searchable claims, temporal relations,
-deterministic context assembly, or optional recall telemetry. Neither crate
-requires the other.
-
 ## Selected Examples
 
 | Example | What it shows |
@@ -121,8 +112,6 @@ index](examples/README.md) for prerequisites and commands for every example.
 - [`docs/chat.md`](docs/chat.md): simple multi-turn chat
 - [`docs/clients.md`](docs/clients.md): providers, models, tools, and attachments
 - [`docs/mcp.md`](docs/mcp.md): MCP text resources and dynamic agent tool filters
-- [`pravah-memory`](pravah-memory/README.md): evidence-derived memory, temporal
-  search, deterministic context, and optional recall telemetry
 - [`docs/legacy.md`](docs/legacy.md): compatibility-only workflow API
 - [docs.rs](https://docs.rs/pravah): complete API reference
 

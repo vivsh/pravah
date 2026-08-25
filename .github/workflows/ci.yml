@@ -26,8 +26,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --all-features
-      - name: Memory evaluations
-        run: cargo test --manifest-path evaluations/memory/Cargo.toml
       - name: Deterministic examples
         run: |
           cargo run --quiet -p pravah --example graph_typed_composition
@@ -37,5 +35,3 @@ jobs:
           cargo run --quiet -p pravah --example graph_untyped
       - name: Package Pravah
         run: cargo package -p pravah
-      - name: Package Pravah Memory
-        run: cargo package -p pravah-memory

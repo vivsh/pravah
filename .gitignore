@@ -1,8 +1,5 @@
 /target
 **/target/
 Cargo.lock
-!/evaluations/memory/Cargo.lock
 /.env
 **/.DS_Store
-/evaluations/memory/data/
-/evaluations/memory/results/

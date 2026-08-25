@@ -20,9 +20,6 @@ include = [
 ]
 
 [workspace]
-members = ["pravah-memory"]
-default-members = [".", "pravah-memory"]
-exclude = ["evaluations/memory"]
 resolver = "3"
 
 [features]
