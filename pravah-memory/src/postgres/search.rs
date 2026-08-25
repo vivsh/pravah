@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use mool as db;
 use mool::Model;
-use mool::types::Vector;
 use uuid::Uuid;
 
 use super::models::{EvidenceRow, MemoryRelationRow, MemoryRow};
 use super::repository::{MemoryRepository, RepositoryError, memory_from_row};
+use super::vector::PgVector;
 use crate::{
     ClaimView, Embedding, MemoryId, SearchRequest, SearchResult, SearchTimeline, StalePolicy,
     ValidTime,
@@ -163,8 +163,7 @@ impl CandidatePlan {
         if self.vector
             && let Some(embedding) = embedding
         {
-            let vector = Vector::try_from_vec(embedding.values().to_vec())
-                .map_err(|error| RepositoryError::InvalidStoredData(error.to_string()))?;
+            let vector = PgVector::from_embedding(embedding);
             query = query.bind("embedding", vector);
         }
         if self.entity {

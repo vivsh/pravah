@@ -1,6 +1,5 @@
 use std::{collections::BTreeSet, time::Instant};
 
-use mool::types::Vector;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -380,7 +379,7 @@ fn search_sql(dimensions: usize) -> String {
 fn bind_query<'q>(
     sql: &'q str,
     query: &'q HnswQuery,
-    vector: &'q Vector,
+    vector: &'q str,
     k: u32,
 ) -> sqlx::query::QueryScalar<'q, Postgres, Uuid, sqlx::postgres::PgArguments> {
     sqlx::query_scalar(sql)
@@ -390,9 +389,14 @@ fn bind_query<'q>(
         .bind(i64::from(k))
 }
 
-fn query_vector(query: &HnswQuery) -> Result<Vector, EvaluationError> {
-    Vector::try_from_vec(query.embedding.clone())
-        .map_err(|error| configuration(format!("invalid query vector: {error}")))
+fn query_vector(query: &HnswQuery) -> Result<String, EvaluationError> {
+    let values = query
+        .embedding
+        .iter()
+        .map(f32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(format!("[{values}]"))
 }
 
 fn validate_queries(queries: &[HnswQuery], dimensions: usize) -> Result<(), EvaluationError> {

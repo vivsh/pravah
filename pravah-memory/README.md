@@ -18,7 +18,7 @@ staleness propagation, reconciliation, and retrieval.
 Enable PostgreSQL memory support:
 
 ```toml
-pravah-memory = { version = "0.1.1", features = ["postgres"] }
+pravah-memory = { version = "0.1.2", features = ["postgres"] }
 ```
 
 Add `recall-postgres` only when the application also wants durable,

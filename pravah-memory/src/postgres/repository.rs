@@ -4,7 +4,6 @@ use chrono::{DateTime, Utc};
 use mool as db;
 use mool::Model;
 use mool::backend::{IgnoreConflictsExt, RowLockExt};
-use mool::types::Vector;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -16,6 +15,7 @@ use super::models::{
     ScopeLeasePatch, ScopeProjectionPatch, ScopeRevisionPatch,
 };
 use super::projection::{recompute_projection, recompute_projection_ids, relation_neighbourhood};
+use super::vector::PgVector;
 use crate::{
     EntityId, Evidence, ExtractedEntity, Memory, MemoryId, MemoryKind, ProcessingState,
     ReconciliationDecision, ReconciliationOutcome, ReconciliationState, TemporalMetadata,

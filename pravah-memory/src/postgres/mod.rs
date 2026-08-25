@@ -6,6 +6,7 @@ pub(crate) mod repository;
 mod schema;
 mod search;
 mod sql;
+mod vector;
 
 #[cfg(feature = "recall-postgres")]
 mod recall;

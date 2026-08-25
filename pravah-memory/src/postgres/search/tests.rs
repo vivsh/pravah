@@ -16,7 +16,7 @@ fn memory_row(id: Uuid) -> MemoryRow {
         event_at: None,
         temporal_precision: "unknown".to_owned(),
         temporal_state: "unspecified".to_owned(),
-        embedding: Vector::from([1.0]),
+        embedding: PgVector::from_embedding(&Embedding::new(vec![1.0]).unwrap()),
         metadata: serde_json::json!({}),
         created_at: chrono::Utc::now(),
         stale: false,

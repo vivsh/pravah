@@ -409,7 +409,7 @@ async fn seed_memory(pool: &sqlx::PgPool) -> Result<MemoryId, BenchmarkError> {
          content_hash, kind, valid_from, valid_until, event_at, temporal_precision, \
          temporal_state, embedding, metadata, created_at, stale, current_for_retrieval) \
          VALUES ($1, $2, $3, $4, 0, $5, $6, 'fact', NULL, NULL, NULL, 'unknown', \
-         'unspecified', $7, $8, $9, FALSE, TRUE)",
+         'unspecified', CAST($7 AS vector(3)), $8, $9, FALSE, TRUE)",
     )
     .bind(memory_id)
     .bind(USER_KEY)
@@ -417,7 +417,7 @@ async fn seed_memory(pool: &sqlx::PgPool) -> Result<MemoryId, BenchmarkError> {
     .bind(evidence_id)
     .bind("The benchmark user prefers deterministic memory telemetry.")
     .bind(vec![2_u8; 32])
-    .bind(pgvector::Vector::from(vec![1.0_f32, 0.0, 0.0]))
+    .bind("[1,0,0]")
     .bind(serde_json::json!({}))
     .bind(now)
     .execute(pool)

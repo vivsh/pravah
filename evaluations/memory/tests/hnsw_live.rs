@@ -1,4 +1,3 @@
-use mool::types::Vector;
 use pravah_memory_eval::{HnswComparator, HnswComparisonOptions, HnswQuery};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -80,12 +79,11 @@ async fn insert_memory(pool: &PgPool, index: u32) {
             .await
             .expect("profile fixture should be inserted");
     }
-    let vector = Vector::try_from_vec(fixture_vector(index))
-        .expect("fixture vectors are finite and non-empty");
+    let vector = format_vector(&fixture_vector(index));
     sqlx::query(
         "INSERT INTO pravah_memories \
          (id, user_key, agent_key, embedding, stale, current_for_retrieval) \
-         VALUES ($1, 'eval-user', 'eval-agent', $2, FALSE, TRUE)",
+         VALUES ($1, 'eval-user', 'eval-agent', CAST($2 AS vector(3)), FALSE, TRUE)",
     )
     .bind(Uuid::now_v7())
     .bind(vector)
@@ -109,4 +107,13 @@ fn fixture_queries() -> Vec<HnswQuery> {
 fn fixture_vector(index: u32) -> Vec<f32> {
     let angle = index as f32 * 0.017_453_292;
     vec![angle.cos(), angle.sin(), (index % 17) as f32 / 17.0]
+}
+
+fn format_vector(values: &[f32]) -> String {
+    let values = values
+        .iter()
+        .map(f32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
 }

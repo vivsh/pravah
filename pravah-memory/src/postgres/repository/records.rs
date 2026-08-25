@@ -34,8 +34,7 @@ fn memory_row(
     memory: &PreparedMemory,
     now: DateTime<Utc>,
 ) -> Result<MemoryRow, RepositoryError> {
-    let embedding = Vector::try_from_vec(memory.embedding.values().to_vec())
-        .map_err(|error| RepositoryError::InvalidStoredData(error.to_string()))?;
+    let embedding = PgVector::from_embedding(&memory.embedding);
     Ok(MemoryRow {
         id: memory.id.as_uuid(),
         user_key: evidence.user_key.clone(),

@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use mool as db;
-use mool::types::Vector;
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
+
+use super::vector::PgVector;
 
 #[derive(Debug, Clone, db::Model)]
 #[table(name = "pravah_evidence")]
@@ -49,7 +50,7 @@ pub(crate) struct MemoryRow {
     pub temporal_precision: String,
     pub temporal_state: String,
     #[column(type = "vector")]
-    pub embedding: Vector,
+    pub embedding: PgVector,
     #[column(type = "jsonb")]
     pub metadata: JsonValue,
     pub created_at: DateTime<Utc>,
