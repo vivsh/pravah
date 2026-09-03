@@ -3,6 +3,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::graph::model::TypeSpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SparseState {
@@ -83,7 +84,8 @@ pub(crate) struct SparseSuspension {
     pub(crate) frame_depth: usize,
     pub(crate) graph_path: GraphPath,
     pub(crate) node: NodeId,
-    pub(crate) resume_type: String,
+    pub(crate) target: SuspensionTarget,
+    pub(crate) resume_type: TypeSpec,
     pub(crate) payload: Value,
 }
 
@@ -435,6 +437,7 @@ fn sparse_suspension(
         frame_depth: suspension.frame_depth,
         graph_path: graph.path.clone(),
         node: suspension.node,
+        target: suspension.target.clone(),
         resume_type: suspension.resume_type.clone(),
         payload: suspension.payload.clone(),
     })
@@ -449,6 +452,7 @@ fn expand_suspension(
         frame_depth: sparse.frame_depth,
         graph_index,
         node: sparse.node,
+        target: sparse.target,
         resume_type: sparse.resume_type,
         payload: sparse.payload,
     })

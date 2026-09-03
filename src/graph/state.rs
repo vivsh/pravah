@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::ids::{EdgeId, NodeId};
+use super::model::TypeSpec;
 use super::registry::ContinuationChildCall;
 use super::value::Value;
 
@@ -66,11 +67,17 @@ pub(crate) struct Frame {
     pub(crate) return_target: Option<ReturnTarget>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SuspensionTarget {
+    /// Resume writes to a first-class suspend node output.
+    Node,
+    /// Resume is delivered to the owning continuation handler.
+    Continuation,
+}
+
 #[derive(Debug, Clone)]
 /// Active external suspension recorded by the VM.
-///
-/// Only first-class suspend nodes create this; continuation nodes do not
-/// receive external resume events.
 pub struct Suspension {
     /// One-based frame depth where suspension occurred.
     pub(crate) frame_depth: usize,
@@ -78,8 +85,10 @@ pub struct Suspension {
     pub(crate) graph_index: usize,
     /// Suspend node waiting for resume.
     pub(crate) node: NodeId,
-    /// Expected resume type name.
-    pub(crate) resume_type: String,
+    /// Runtime owner that receives the resume value.
+    pub(crate) target: SuspensionTarget,
+    /// Expected resume type and JSON Schema.
+    pub(crate) resume_type: TypeSpec,
     /// Payload returned to the caller on suspend.
     pub(crate) payload: Value,
 }
@@ -92,7 +101,7 @@ impl Suspension {
 
     /// Returns the expected resume type name.
     pub fn resume_type(&self) -> &str {
-        &self.resume_type
+        &self.resume_type.name
     }
 
     /// Returns the payload supplied to the external caller.
@@ -109,7 +118,7 @@ impl Suspension {
 pub struct State {
     /// Active VM frame stack.
     pub(crate) frames: Vec<Frame>,
-    /// Active suspend-node state, if the VM is externally paused.
+    /// Active node- or continuation-owned state when the VM is externally paused.
     pub(crate) suspension: Option<Suspension>,
 }
 
@@ -140,6 +149,6 @@ pub enum Step {
     Continue,
     /// The root frame exited with this final output value.
     Done(Value),
-    /// The VM paused at a suspend node with this payload.
+    /// The VM paused at a node- or continuation-owned suspension payload.
     Suspend(Value),
 }

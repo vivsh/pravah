@@ -1,47 +1,13 @@
 use super::*;
-
-pub(super) fn maybe_inject_edge_turn_budget_message(
-    client: &dyn Client,
-    agent_name: &str,
-    session_msgs: &mut Vec<Message>,
-    turn_offset: usize,
-    completed: usize,
-) {
-    let options = client.options();
-    if options.tools.is_empty() && !client.uses_exit_tool() {
-        return;
-    }
-    let Some(budget) = options.turn_budget else {
-        return;
-    };
-    let turns_this_invocation = completed.saturating_sub(turn_offset);
-    if turns_this_invocation.saturating_add(1) < budget as usize {
-        return;
-    }
-    let exit_tool_name = (client.uses_exit_tool() && !options.output_type_name.is_empty())
-        .then_some(options.output_type_name.as_str());
-    let text = options
-        .turn_budget_message
-        .as_deref()
-        .map(|msg| client.wrap_system_reminder(msg))
-        .unwrap_or_else(|| client.default_turn_budget_message(exit_tool_name));
-    tracing::warn!(
-        agent = %agent_name,
-        completed_turns = completed,
-        turns_this_invocation,
-        budget = budget,
-        "turn budget reached; injecting last-turn reminder"
-    );
-    session_msgs.push(Message::user(text));
-}
+use crate::graph::model::TypeSpec;
 
 /// Validates and freezes one activation-time agent configuration.
 pub(super) async fn resolve_agent_config(
     payload: &AgentPayload,
     config: AgentConfig,
     ctx: &Context,
-) -> Result<(ResolvedAgentConfig, Message), GraphError> {
-    validate_agent_config(&config)?;
+) -> Result<(ResolvedAgentConfig, Message, Option<AgentBudgetState>), GraphError> {
+    validate_agent_config(payload, &config)?;
     let mut refs = BTreeSet::new();
     for resource in &config.resources {
         if !refs.insert(resource.clone()) {
@@ -57,7 +23,8 @@ pub(super) async fn resolve_agent_config(
         .iter()
         .filter(|tool| config.tool_filter.allows(tool))
         .map(|tool| tool.name.clone())
-        .collect();
+        .collect::<Vec<_>>();
+    let budget = AgentBudgetState::resolve(&config, &tools);
     let resources = resolve_resources(ctx, &config.resources).await?;
     let resolved = ResolvedAgentConfig {
         model: config.model,
@@ -65,15 +32,14 @@ pub(super) async fn resolve_agent_config(
         memory: config.memory,
         provider_config: config.provider_config,
         keep_alive: config.keep_alive,
-        turn_budget: config.turn_budget,
-        turn_budget_message: config.turn_budget_message,
         tools,
         resources,
     };
-    Ok((resolved, config.message))
+    Ok((resolved, config.message, budget))
 }
 
-fn validate_agent_config(config: &AgentConfig) -> Result<(), GraphError> {
+/// Checks activation settings that must hold before history can change.
+fn validate_agent_config(payload: &AgentPayload, config: &AgentConfig) -> Result<(), GraphError> {
     if config.model.trim().is_empty() {
         return Err(GraphError::AgentConfigValidation(
             "model must not be empty".into(),
@@ -84,12 +50,7 @@ fn validate_agent_config(config: &AgentConfig) -> Result<(), GraphError> {
             "initial agent message must have the user role".into(),
         ));
     }
-    if config.turn_budget == Some(0) {
-        return Err(GraphError::AgentConfigValidation(
-            "turn budget must be greater than zero".into(),
-        ));
-    }
-    Ok(())
+    validate_budget_config(payload, config)
 }
 
 #[cfg(feature = "mcp")]
@@ -125,6 +86,7 @@ impl MessageCallIdExt for Message {
     }
 }
 
+/// Produces a non-runnable placeholder that preserves a tool build error.
 pub(super) fn error_tool_spec(err: String) -> AgentToolSpec {
     let payload = AgentToolPayload {
         name: "__invalid_tool__".into(),
@@ -138,11 +100,12 @@ pub(super) fn error_tool_spec(err: String) -> AgentToolSpec {
         registry: HandlerRegistry::new(),
         runtime: Arc::new(EdgeAgentToolRuntime {
             decode_args: Arc::new(|_| Err(ToolError::Fatal("invalid tool".into()))),
-            to_message: Arc::new(|_| Err(ToolError::Fatal("invalid tool".into()).into())),
+            render_result: Arc::new(|_| Err(ToolError::Fatal("invalid tool".into()).into())),
         }),
     }
 }
 
+/// Lowers a small asynchronous tool handler into the canonical child graph.
 pub(super) fn build_tool_handler_flow<I, O, Fut, H>(
     func: H,
 ) -> Result<CompiledFlow<I, JsonValue>, String>
@@ -183,17 +146,41 @@ pub(super) fn decode_tool_result(value: Value) -> Result<EdgeToolResult, EdgeToo
     })
 }
 
-pub(super) fn decode_handler_tool_message<O: ToolOutput>(
+/// Decodes one handler-backed tool envelope into history and runtime values.
+pub(super) fn decode_handler_tool_result<O: ToolOutput>(
     value: Value,
-) -> Result<Message, EdgeToolMessageError> {
+) -> Result<EdgeRenderedToolResult, EdgeToolMessageError> {
     match decode_tool_result(value)? {
-        EdgeToolResult::Success { value } => decode_json_tool_message::<O>(value),
+        EdgeToolResult::Success { value } => {
+            let message = decode_json_tool_message::<O>(value.clone())?;
+            let value = to_value(value).map_err(|err| EdgeToolMessageError::Fatal {
+                expected: "tool output value".into(),
+                reason: err.to_string(),
+                raw: "<tool output>".into(),
+            })?;
+            Ok(EdgeRenderedToolResult {
+                message,
+                value,
+                error: false,
+            })
+        }
         EdgeToolResult::Error { value } => {
-            Ok(Message::tool_output(String::new(), value.to_string()))
+            let runtime_value =
+                to_value(value.clone()).map_err(|err| EdgeToolMessageError::Fatal {
+                    expected: "tool error value".into(),
+                    reason: err.to_string(),
+                    raw: preview_display(&value),
+                })?;
+            Ok(EdgeRenderedToolResult {
+                message: Message::tool_output(String::new(), value.to_string()),
+                value: runtime_value,
+                error: true,
+            })
         }
     }
 }
 
+/// Renders a JSON tool value through its declared `ToolOutput` contract.
 pub(super) fn decode_json_tool_message<O: ToolOutput>(
     value: JsonValue,
 ) -> Result<Message, EdgeToolMessageError> {
@@ -221,26 +208,34 @@ pub(super) fn decode_json_tool_message<O: ToolOutput>(
     }
 }
 
-pub(super) fn decode_runtime_tool_message<O: ToolOutput>(
+/// Renders a typed runtime tool value without losing recoverable error tags.
+pub(super) fn decode_runtime_tool_result<O: ToolOutput>(
     value: Value,
-) -> Result<Message, EdgeToolMessageError> {
-    match from_value::<O>(value.clone()) {
-        Ok(output) => output.to_message().map_err(Into::into),
+) -> Result<EdgeRenderedToolResult, EdgeToolMessageError> {
+    let message = match from_value::<O>(value.clone()) {
+        Ok(output) => output.to_message().map_err(EdgeToolMessageError::from)?,
         Err(first) => {
             if let Some(text) = value.as_str()
                 && let Ok(output) = serde_json::from_str::<O>(text)
             {
-                return output.to_message().map_err(Into::into);
+                output.to_message().map_err(EdgeToolMessageError::from)?
+            } else {
+                return Err(EdgeToolMessageError::Fatal {
+                    expected: O::schema_name(),
+                    reason: first.to_string(),
+                    raw: preview_value(&value),
+                });
             }
-            Err(EdgeToolMessageError::Fatal {
-                expected: O::schema_name(),
-                reason: first.to_string(),
-                raw: preview_value(&value),
-            })
         }
-    }
+    };
+    Ok(EdgeRenderedToolResult {
+        message,
+        value,
+        error: false,
+    })
 }
 
+/// Decodes and validates the current serialized agent payload version.
 pub(super) fn decode_payload(payload: &Value) -> Result<AgentPayload, GraphError> {
     let payload: AgentPayload = from_value(payload.clone())
         .map_err(|err| GraphError::Invalid(format!("failed to decode agent payload: {err}")))?;
@@ -257,27 +252,17 @@ pub(super) fn decode_payload(payload: &Value) -> Result<AgentPayload, GraphError
             "agent configure handler identity is missing or inconsistent".into(),
         ));
     }
+    let expected_control = format!("{}::control", payload.agent_id);
+    if payload
+        .control_handler_key
+        .as_deref()
+        .is_some_and(|key| key != expected_control)
+    {
+        return Err(GraphError::AgentConfigValidation(
+            "agent control handler identity is inconsistent".into(),
+        ));
+    }
     Ok(payload)
-}
-
-pub(crate) fn dispatch_injection_target(
-    payload: &Value,
-    checkpoint: &Value,
-) -> Result<Option<(String, String)>, GraphError> {
-    let payload: AgentPayload = match from_value(payload.clone()) {
-        Ok(payload) => payload,
-        Err(_) => return Ok(None),
-    };
-    if payload.version != PAYLOAD_VERSION {
-        return Ok(None);
-    }
-    let checkpoint: EdgeAgentCheckpoint = from_value(checkpoint.clone())
-        .map_err(|err| GraphError::Invalid(format!("failed to decode agent checkpoint: {err}")))?;
-    validate_checkpoint(&payload, &checkpoint)?;
-    if !matches!(checkpoint.phase, EdgeAgentPhase::Dispatch) {
-        return Ok(None);
-    }
-    Ok(Some((checkpoint.session_id, payload.agent_id)))
 }
 
 pub(super) fn single_input(mut inputs: Vec<Value>, label: &str) -> Result<Value, GraphError> {
@@ -303,9 +288,11 @@ pub(super) fn persist_checkpoint(
         outputs: Vec::new(),
         writes: Vec::new(),
         child_calls: Vec::new(),
+        suspension: None,
     })
 }
 
+/// Restores the keep-alive session identity from opaque continuation state.
 pub(super) fn restore_agent_state(state: Option<Value>) -> Result<Option<String>, GraphError> {
     let Some(state) = state else {
         return Ok(None);
@@ -327,6 +314,7 @@ pub(super) fn restore_agent_state(state: Option<Value>) -> Result<Option<String>
     Ok(Some(state.session_id))
 }
 
+/// Validates agent-specific checkpoint and saved state during graph restore.
 pub(crate) fn validate_agent_snapshot_state(
     payload: &Value,
     checkpoint: Option<&Value>,
@@ -356,6 +344,7 @@ pub(crate) fn validate_agent_snapshot_state(
     Ok(true)
 }
 
+/// Validates all stable agent checkpoint identities and phase relationships.
 pub(super) fn validate_checkpoint(
     payload: &AgentPayload,
     checkpoint: &EdgeAgentCheckpoint,
@@ -366,20 +355,18 @@ pub(super) fn validate_checkpoint(
         ));
     }
     validate_resolved_tools(payload, &checkpoint.resolved.tools)?;
+    validate_selected_tools(payload, checkpoint)?;
+    validate_budget_state(&checkpoint.resolved.tools, checkpoint.budget.as_ref())?;
     validate_resolved_resources(&checkpoint.resolved.resources)?;
     if checkpoint.resolved.model.trim().is_empty() {
         return Err(GraphError::SnapshotValidation(
             "agent checkpoint model is empty".into(),
         ));
     }
-    if checkpoint.resolved.turn_budget == Some(0) {
-        return Err(GraphError::SnapshotValidation(
-            "agent checkpoint turn budget is zero".into(),
-        ));
-    }
-    validate_pending_calls(payload, checkpoint)
+    validate_checkpoint_phase(payload, checkpoint)
 }
 
+/// Requires configured tool identities to be unique and in prepared order.
 fn validate_resolved_tools(payload: &AgentPayload, selected: &[String]) -> Result<(), GraphError> {
     let expected = payload
         .tools
@@ -396,6 +383,25 @@ fn validate_resolved_tools(payload: &AgentPayload, selected: &[String]) -> Resul
     Ok(())
 }
 
+/// Requires controller-selected tools to be an ordered configured subset.
+fn validate_selected_tools(
+    payload: &AgentPayload,
+    checkpoint: &EdgeAgentCheckpoint,
+) -> Result<(), GraphError> {
+    validate_resolved_tools(payload, &checkpoint.selected_tools)?;
+    if checkpoint
+        .selected_tools
+        .iter()
+        .any(|tool| !checkpoint.resolved.tools.contains(tool))
+    {
+        return Err(GraphError::SnapshotValidation(
+            "agent checkpoint selects a tool outside its configured set".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects empty or duplicated checkpointed MCP resource identities.
 fn validate_resolved_resources(resources: &[ResolvedResource]) -> Result<(), GraphError> {
     let mut seen = BTreeSet::new();
     for resource in resources {
@@ -413,13 +419,50 @@ fn validate_resolved_resources(resources: &[ResolvedResource]) -> Result<(), Gra
     Ok(())
 }
 
-fn validate_pending_calls(
+/// Dispatches validation for the checkpoint's explicit agent-loop phase.
+fn validate_checkpoint_phase(
     payload: &AgentPayload,
     checkpoint: &EdgeAgentCheckpoint,
 ) -> Result<(), GraphError> {
-    let EdgeAgentPhase::PendingTool { active, waiting } = &checkpoint.phase else {
-        return Ok(());
-    };
+    match &checkpoint.phase {
+        EdgeAgentPhase::BeforeTools { calls, .. } | EdgeAgentPhase::AcceptedTools { calls, .. } => {
+            validate_staged_calls(calls)
+        }
+        EdgeAgentPhase::PendingTool {
+            active,
+            waiting,
+            results,
+        } => validate_pending_calls(payload, checkpoint, active, waiting, results),
+        EdgeAgentPhase::AfterTools { results } => validate_completed_results(results),
+        EdgeAgentPhase::BeforeModel | EdgeAgentPhase::Dispatch { .. } => Ok(()),
+    }
+}
+
+/// Validates staged call identities before acceptance or restoration.
+fn validate_staged_calls(calls: &[EdgeProposedToolCall]) -> Result<(), GraphError> {
+    let mut ids: BTreeSet<&str> = BTreeSet::new();
+    if calls.is_empty()
+        || calls.iter().any(|call| {
+            call.proposal.call_id().is_empty()
+                || call.proposal.tool_name().is_empty()
+                || !ids.insert(call.proposal.call_id())
+        })
+    {
+        return Err(GraphError::SnapshotValidation(
+            "agent staged tool calls are empty, duplicated, or invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validates pending child calls and completed results as one unique batch.
+fn validate_pending_calls(
+    payload: &AgentPayload,
+    checkpoint: &EdgeAgentCheckpoint,
+    active: &[EdgeActiveToolCall],
+    waiting: &[EdgeWaitingToolCall],
+    results: &[EdgeCompletedToolCall],
+) -> Result<(), GraphError> {
     let mut ids = BTreeSet::new();
     for call in active
         .iter()
@@ -433,19 +476,98 @@ fn validate_pending_calls(
         let tool = payload.tools.get(call.2).ok_or_else(|| {
             GraphError::SnapshotValidation("agent tool call child index is invalid".into())
         })?;
-        if tool.name.as_str() != call.1.as_str() || !checkpoint.resolved.tools.contains(&tool.name)
+        if tool.name.as_str() != call.1.as_str() || !checkpoint.selected_tools.contains(&tool.name)
         {
             return Err(GraphError::SnapshotValidation(
                 "agent tool call does not match a selected tool".into(),
             ));
         }
-        if !ids.insert(call.0) {
+        if !ids.insert(call.0.as_str()) {
             return Err(GraphError::SnapshotValidation(
                 "agent checkpoint contains duplicate tool call ids".into(),
             ));
         }
     }
+    for result in results {
+        if !ids.insert(result.result.call_id()) {
+            return Err(GraphError::SnapshotValidation(
+                "agent checkpoint contains duplicate completed tool call ids".into(),
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Validates the complete ordered result batch observed at `AfterTools`.
+fn validate_completed_results(results: &[AgentToolResult]) -> Result<(), GraphError> {
+    let mut ids = BTreeSet::new();
+    if results.iter().any(|result| {
+        result.call_id().is_empty()
+            || result.tool_name().is_empty()
+            || !ids.insert(result.call_id())
+    }) {
+        return Err(GraphError::SnapshotValidation(
+            "agent completed tool results are duplicated or invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validates an agent-owned suspension envelope against its saved checkpoint.
+pub(crate) fn validate_agent_suspension(
+    payload: &Value,
+    checkpoint: &Value,
+    suspension_payload: &Value,
+    resume_type: &TypeSpec,
+) -> Result<bool, GraphError> {
+    let is_agent = payload.get("agent_id").is_some() && payload.get("output_schema").is_some();
+    if !is_agent {
+        return Ok(false);
+    }
+    let payload = decode_payload(payload)?;
+    let checkpoint: EdgeAgentCheckpoint = from_value(checkpoint.clone()).map_err(|err| {
+        GraphError::SnapshotValidation(format!("failed to decode agent checkpoint: {err}"))
+    })?;
+    validate_checkpoint(&payload, &checkpoint)?;
+    if payload.control_handler_key.is_none()
+        || checkpoint_point_for_validation(&checkpoint.phase).is_none()
+    {
+        return Err(GraphError::SnapshotValidation(
+            "agent suspension is not at a controlled intervention boundary".into(),
+        ));
+    }
+    let expected = TypeSpec::new(AgentResume::schema_name(), schema_for::<AgentResume>());
+    if resume_type != &expected {
+        return Err(GraphError::SnapshotValidation(
+            "agent suspension resume schema is inconsistent".into(),
+        ));
+    }
+    let suspension: AgentSuspension = from_value(suspension_payload.clone()).map_err(|err| {
+        GraphError::SnapshotValidation(format!("failed to decode agent suspension: {err}"))
+    })?;
+    let point = checkpoint_point_for_validation(&checkpoint.phase).ok_or_else(|| {
+        GraphError::SnapshotValidation("agent suspension phase is not resumable".into())
+    })?;
+    if suspension.agent_id() != payload.agent_id
+        || suspension.session_id() != checkpoint.session_id
+        || suspension.point() != point
+    {
+        return Err(GraphError::SnapshotValidation(
+            "agent suspension identity does not match its checkpoint".into(),
+        ));
+    }
+    Ok(true)
+}
+
+fn checkpoint_point_for_validation(phase: &EdgeAgentPhase) -> Option<AgentInterventionPoint> {
+    match phase {
+        EdgeAgentPhase::BeforeModel => Some(AgentInterventionPoint::BeforeModel),
+        EdgeAgentPhase::BeforeTools { .. } => Some(AgentInterventionPoint::BeforeTools),
+        EdgeAgentPhase::AfterTools { .. } => Some(AgentInterventionPoint::AfterTools),
+        EdgeAgentPhase::Dispatch { .. }
+        | EdgeAgentPhase::AcceptedTools { .. }
+        | EdgeAgentPhase::PendingTool { .. } => None,
+    }
 }
 
 pub(super) fn completed_agent_state(
@@ -474,14 +596,8 @@ pub(super) fn transition_with_children(
         outputs: Vec::new(),
         writes: Vec::new(),
         child_calls,
+        suspension: None,
     })
-}
-
-pub(super) fn pending_waiting(checkpoint: &EdgeAgentCheckpoint) -> Vec<EdgeWaitingToolCall> {
-    match &checkpoint.phase {
-        EdgeAgentPhase::PendingTool { waiting, .. } => waiting.clone(),
-        EdgeAgentPhase::Dispatch => Vec::new(),
-    }
 }
 
 pub(super) fn effective_preamble(payload: &AgentPayload, resolved: &ResolvedAgentConfig) -> String {

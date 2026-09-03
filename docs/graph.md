@@ -79,6 +79,14 @@ Configuration must be valid before Pravah changes VM state or history. Keep
 external work performed by configuration read-only or idempotent so callers can
 safely retry a failed step.
 
+An agent may also declare an optional asynchronous `control` function. It runs
+at explicit model and tool boundaries and can redirect guidance and tool
+visibility, request a final tool-disabled answer, suspend for application
+input, or abort the current step. Controller observations, metrics, state, and
+committed boundaries survive snapshots. Controller suspension uses the same
+`Runtime::resume` entry point as an ordinary suspend node, with `AgentResume`
+as its fixed resume value.
+
 Every serialized format has an explicit version. During the `0.4.x` line,
 incompatible versions are rejected and are not migrated automatically. Drain
 in-flight workflows or keep the matching Pravah runtime when upgrading across

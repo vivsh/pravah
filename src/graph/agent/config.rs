@@ -2,12 +2,23 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::clients::Message;
+use crate::clients::{Message, ToolDefinition};
 
 use super::AgentToolPayload;
+
+/// Builds the canonical model-facing definition used by tools and budgets.
+pub(super) fn agent_tool_definition<T: JsonSchema>() -> Result<ToolDefinition, String> {
+    crate::legacy::build_tool_definition::<T>()
+}
+
+/// Returns the canonical identity for a tool input type.
+fn agent_tool_identity<T: JsonSchema>() -> Result<String, String> {
+    agent_tool_definition::<T>().map(|definition| definition.name)
+}
 
 /// Read-only metadata presented to a runtime tool filter.
 #[derive(Debug, Clone)]
@@ -66,7 +77,7 @@ impl ToolFilter {
         Self::new(|_| true)
     }
 
-    /// Builds a filter evaluated once when an agent invocation starts.
+    /// Builds a filter for activation-time or intervention-time tool selection.
     pub fn new(predicate: impl Fn(&ToolInfo) -> bool + Send + Sync + 'static) -> Self {
         Self {
             predicate: Arc::new(predicate),
@@ -135,10 +146,17 @@ pub struct AgentConfig {
     pub(crate) memory: Option<String>,
     pub(crate) provider_config: Option<JsonValue>,
     pub(crate) keep_alive: bool,
-    pub(crate) turn_budget: Option<u32>,
-    pub(crate) turn_budget_message: Option<String>,
     pub(crate) tool_filter: ToolFilter,
     pub(crate) resources: Vec<McpResourceRef>,
+    pub(crate) turn_budget: Option<u32>,
+    pub(crate) tool_budgets: Vec<RequestedToolBudget>,
+    pub(crate) budget_errors: Vec<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RequestedToolBudget {
+    pub(crate) name: String,
+    pub(crate) limit: u32,
 }
 
 impl AgentConfig {
@@ -155,10 +173,11 @@ impl AgentConfig {
             memory: None,
             provider_config: None,
             keep_alive: false,
-            turn_budget: None,
-            turn_budget_message: None,
             tool_filter: ToolFilter::all(),
             resources: Vec::new(),
+            turn_budget: None,
+            tool_budgets: Vec::new(),
+            budget_errors: Vec::new(),
         }
     }
 
@@ -180,18 +199,6 @@ impl AgentConfig {
         self
     }
 
-    /// Sets the maximum number of model dispatch turns for this invocation.
-    pub fn turn_budget(mut self, turns: u32) -> Self {
-        self.turn_budget = Some(turns);
-        self
-    }
-
-    /// Overrides the reminder used on the final configured model turn.
-    pub fn turn_budget_message(mut self, message: impl Into<String>) -> Self {
-        self.turn_budget_message = Some(message.into());
-        self
-    }
-
     /// Selects a runtime subset of the statically prepared toolset.
     pub fn tool_filter(mut self, filter: ToolFilter) -> Self {
         self.tool_filter = filter;
@@ -203,6 +210,41 @@ impl AgentConfig {
         self.resources = resources.into_iter().collect();
         self
     }
+
+    /// Limits ordinary model dispatches before one forced conclusion turn.
+    pub fn turn_budget(mut self, turns: u32) -> Self {
+        if turns == 0 {
+            self.budget_errors
+                .push("agent turn budget must be positive".into());
+        } else if self.turn_budget.replace(turns).is_some() {
+            self.budget_errors
+                .push("agent turn budget may only be declared once".into());
+        }
+        self
+    }
+
+    /// Limits accepted calls for the tool identified by input type `I`.
+    pub fn tool_budget<I: JsonSchema>(mut self, calls: u32) -> Self {
+        let name = match agent_tool_identity::<I>() {
+            Ok(name) => name,
+            Err(error) => {
+                self.budget_errors.push(error);
+                return self;
+            }
+        };
+        if calls == 0 {
+            self.budget_errors
+                .push(format!("tool budget for '{name}' must be positive"));
+        } else if self.tool_budgets.iter().any(|budget| budget.name == name) {
+            self.budget_errors.push(format!(
+                "tool budget for '{name}' may only be declared once"
+            ));
+        } else {
+            self.tool_budgets
+                .push(RequestedToolBudget { name, limit: calls });
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,8 +254,6 @@ pub(crate) struct ResolvedAgentConfig {
     pub memory: Option<String>,
     pub provider_config: Option<JsonValue>,
     pub keep_alive: bool,
-    pub turn_budget: Option<u32>,
-    pub turn_budget_message: Option<String>,
     pub tools: Vec<String>,
     pub resources: Vec<ResolvedResource>,
 }

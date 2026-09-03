@@ -1,14 +1,21 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use futures::future::BoxFuture;
+use pravah::clients::{
+    Client, ClientError, ClientFactory, ClientOptions, ClientOutput, ClientResponse, Message,
+    ModelUrl, Provider,
+};
 use pravah::graph::{
-    BuiltinNode, ContinuationContext, ContinuationEvent, ContinuationHandler,
-    ContinuationTransition, EdgeId, GraphError, HandlerKey, HandlerRegistry, JSON_WIRE_VERSION,
-    JsonInvoker, JsonRequest, JsonResponse, NodeKind, PreparedGraph, Snapshot, Step, TypeSpec,
-    UntypedGraph, UntypedGraphBuilder, Value, VarId, VarKey, VarScope, from_value, to_value,
+    Agent, AgentConfig, AgentDecision, AgentLoop, BuiltinNode, CompiledFlow, ContinuationContext,
+    ContinuationEvent, ContinuationHandler, ContinuationTransition, EdgeId, Flow, GraphError,
+    HandlerKey, HandlerRegistry, JSON_WIRE_VERSION, JsonInvoker, JsonRequest, JsonResponse,
+    NodeKind, PreparedGraph, Snapshot, Step, TypeSpec, UntypedGraph, UntypedGraphBuilder, Value,
+    VarId, VarKey, VarScope, compile, from_value, to_value,
 };
 use pravah::{Context, FlowConf};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -40,6 +47,55 @@ struct TypedFixture {
 struct TypedItem {
     code: String,
     amount: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+struct AgentFixture {
+    prompt: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct AgentAnswer {
+    answer: String,
+}
+
+#[derive(Clone)]
+struct BenchmarkClientFactory;
+
+struct BenchmarkClient {
+    model_url: ModelUrl,
+    options: ClientOptions,
+}
+
+#[async_trait]
+impl Client for BenchmarkClient {
+    fn model_url(&self) -> &ModelUrl {
+        &self.model_url
+    }
+
+    fn options(&self) -> &ClientOptions {
+        &self.options
+    }
+
+    async fn execute(&self, _messages: &[Message]) -> Result<ClientResponse, ClientError> {
+        Ok(ClientResponse::new(
+            Provider::OpenAi,
+            ClientOutput::Output(json!({"answer": "done"})),
+        ))
+    }
+}
+
+impl ClientFactory for BenchmarkClientFactory {
+    fn create(
+        &self,
+        model_url: &str,
+        options: ClientOptions,
+    ) -> Result<Box<dyn Client>, ClientError> {
+        Ok(Box::new(BenchmarkClient {
+            model_url: ModelUrl::parse(model_url)?,
+            options,
+        }))
+    }
 }
 
 #[derive(Default)]
@@ -89,7 +145,163 @@ async fn main() {
 async fn run() -> Result<(), GraphError> {
     report_value_benchmarks()?;
     report_typed_benchmarks()?;
-    report_runtime_benchmarks().await
+    report_runtime_benchmarks().await?;
+    report_agent_benchmarks().await
+}
+
+/// Configures an ordinary synthetic agent without external provider latency.
+async fn configure_benchmark_agent(
+    input: AgentFixture,
+    _ctx: Context,
+) -> Result<AgentConfig, GraphError> {
+    Ok(AgentConfig::new(
+        "openai:///benchmark",
+        "Return the structured answer.",
+        Message::user(input.prompt),
+    ))
+}
+
+/// Configures the same synthetic agent with an invocation turn budget.
+async fn configure_budgeted_benchmark_agent(
+    input: AgentFixture,
+    _ctx: Context,
+) -> Result<AgentConfig, GraphError> {
+    Ok(AgentConfig::new(
+        "openai:///benchmark",
+        "Return the structured answer.",
+        Message::user(input.prompt),
+    )
+    .turn_budget(4))
+}
+
+async fn continue_benchmark_agent(
+    _loop: AgentLoop<AgentFixture>,
+    _ctx: Context,
+) -> Result<AgentDecision, GraphError> {
+    Ok(AgentDecision::continue_())
+}
+
+fn benchmark_agent(root: Agent<AgentFixture>) -> Agent<AgentAnswer> {
+    root.configure(configure_benchmark_agent)
+}
+
+fn controlled_benchmark_agent(root: Agent<AgentFixture>) -> Agent<AgentAnswer> {
+    root.control(continue_benchmark_agent)
+        .configure(configure_benchmark_agent)
+}
+
+fn budgeted_benchmark_agent(root: Agent<AgentFixture>) -> Agent<AgentAnswer> {
+    root.configure(configure_budgeted_benchmark_agent)
+}
+
+fn controlled_budgeted_benchmark_agent(root: Agent<AgentFixture>) -> Agent<AgentAnswer> {
+    root.control(continue_benchmark_agent)
+        .configure(configure_budgeted_benchmark_agent)
+}
+
+fn benchmark_flow(root: Flow<AgentFixture>) -> Flow<AgentAnswer> {
+    root.agent(benchmark_agent)
+}
+
+fn controlled_benchmark_flow(root: Flow<AgentFixture>) -> Flow<AgentAnswer> {
+    root.agent(controlled_benchmark_agent)
+}
+
+fn budgeted_benchmark_flow(root: Flow<AgentFixture>) -> Flow<AgentAnswer> {
+    root.agent(budgeted_benchmark_agent)
+}
+
+fn controlled_budgeted_benchmark_flow(root: Flow<AgentFixture>) -> Flow<AgentAnswer> {
+    root.agent(controlled_budgeted_benchmark_agent)
+}
+
+/// Compares ordinary and controlled agent execution without provider latency.
+async fn report_agent_benchmarks() -> Result<(), GraphError> {
+    let ordinary = compile(benchmark_flow)?;
+    let controlled = compile(controlled_benchmark_flow)?;
+    let budgeted = compile(budgeted_benchmark_flow)?;
+    let controlled_budgeted = compile(controlled_budgeted_benchmark_flow)?;
+    report_agent_allocations("agent/structured_output", &ordinary)?;
+    report_agent_allocations("agent/controlled_structured_output", &controlled)?;
+    report_agent_allocations("agent/budgeted_structured_output", &budgeted)?;
+    report_agent_allocations(
+        "agent/controlled_budgeted_structured_output",
+        &controlled_budgeted,
+    )?;
+    report_agent("agent/structured_output", VM_ITERATIONS, &ordinary).await?;
+    report_agent(
+        "agent/controlled_structured_output",
+        VM_ITERATIONS,
+        &controlled,
+    )
+    .await?;
+    report_agent("agent/budgeted_structured_output", VM_ITERATIONS, &budgeted).await?;
+    report_agent(
+        "agent/controlled_budgeted_structured_output",
+        VM_ITERATIONS,
+        &controlled_budgeted,
+    )
+    .await
+}
+
+/// Measures allocations for one complete agent invocation on this thread.
+fn report_agent_allocations(
+    name: &str,
+    flow: &CompiledFlow<AgentFixture, AgentAnswer>,
+) -> Result<(), GraphError> {
+    let ctx = context().with_client_factory(BenchmarkClientFactory);
+    futures::executor::block_on(run_agent_once(flow, ctx.clone()))?;
+    let mut result = Ok(());
+    let measured = allocation_counter::measure(|| {
+        result = futures::executor::block_on(run_agent_once(flow, ctx));
+    });
+    result?;
+    println!(
+        "{name}: {} allocation(s), {} byte(s)",
+        measured.count_total, measured.bytes_total
+    );
+    Ok(())
+}
+
+/// Measures repeated complete invocations against one prepared typed flow.
+async fn report_agent(
+    name: &str,
+    iterations: usize,
+    flow: &CompiledFlow<AgentFixture, AgentAnswer>,
+) -> Result<(), GraphError> {
+    let ctx = context().with_client_factory(BenchmarkClientFactory);
+    let mut samples = Vec::with_capacity(VM_SAMPLES);
+    for _ in 0..VM_SAMPLES {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            run_agent_once(flow, ctx.clone()).await?;
+        }
+        samples.push(ns_per_iteration(start.elapsed(), iterations));
+    }
+    print_median(name, iterations, VM_SAMPLES, &mut samples);
+    Ok(())
+}
+
+/// Runs one benchmark agent invocation through structured completion.
+async fn run_agent_once(
+    flow: &CompiledFlow<AgentFixture, AgentAnswer>,
+    ctx: Context,
+) -> Result<(), GraphError> {
+    let mut runtime = flow.runtime(AgentFixture {
+        prompt: "benchmark".into(),
+    })?;
+    loop {
+        match runtime.next(ctx.clone()).await? {
+            Step::Continue => {}
+            Step::Done(output) => {
+                black_box(flow.decode_output(output)?);
+                return Ok(());
+            }
+            Step::Suspend(_) => {
+                return Err(GraphError::Invalid("benchmark agent suspended".into()));
+            }
+        }
+    }
 }
 
 fn report_value_benchmarks() -> Result<(), GraphError> {

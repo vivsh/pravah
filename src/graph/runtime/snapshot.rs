@@ -449,23 +449,75 @@ pub(super) fn validate_snapshot_suspension(
             node.name
         )));
     }
-    let CompiledNodeKind::Suspend { resume_type, .. } = &compiled_node.kind else {
-        return Err(GraphError::SnapshotValidation(format!(
-            "snapshot suspension node '{}' is not a suspend node",
-            node.name
-        )));
-    };
-    if resume_type.as_ref() != suspension.resume_type {
-        return Err(GraphError::SnapshotValidation(format!(
-            "snapshot suspension resume type '{}' does not match node type '{}'",
-            suspension.resume_type, resume_type
-        )));
-    }
-    if !inputs_ready(frame, compiled_node)? {
-        return Err(GraphError::SnapshotValidation(format!(
-            "snapshot suspension node '{}' does not have ready inputs",
-            node.name
-        )));
+    match suspension.target {
+        SuspensionTarget::Node => {
+            let CompiledNodeKind::Suspend { .. } = &compiled_node.kind else {
+                return Err(GraphError::SnapshotValidation(format!(
+                    "snapshot suspension node '{}' is not a suspend node",
+                    node.name
+                )));
+            };
+            let output = compiled_node.outputs.first().copied().ok_or_else(|| {
+                GraphError::SnapshotValidation(format!(
+                    "snapshot suspension node '{}' has no output",
+                    node.name
+                ))
+            })?;
+            let expected = graph
+                .graph
+                .edge(output)
+                .map(|edge| &edge.type_spec)
+                .ok_or_else(|| {
+                    GraphError::SnapshotValidation(format!(
+                        "snapshot suspension node '{}' output type is missing",
+                        node.name
+                    ))
+                })?;
+            if expected != &suspension.resume_type || !inputs_ready(frame, compiled_node)? {
+                return Err(GraphError::SnapshotValidation(format!(
+                    "snapshot suspension node '{}' has inconsistent resume state",
+                    node.name
+                )));
+            }
+        }
+        SuspensionTarget::Continuation => {
+            let CompiledNodeKind::Continuation { payload, .. } = &compiled_node.kind else {
+                return Err(GraphError::SnapshotValidation(format!(
+                    "snapshot suspension node '{}' is not a continuation",
+                    node.name
+                )));
+            };
+            let checkpoint = frame
+                .checkpoints
+                .get(suspension.node.0)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    GraphError::SnapshotValidation(format!(
+                        "snapshot suspension continuation '{}' has no checkpoint",
+                        node.name
+                    ))
+                })?;
+            if frame
+                .continuation_inboxes
+                .get(suspension.node.0)
+                .is_none_or(|inbox| !inbox.is_empty())
+                || frame
+                    .continuation_child_queues
+                    .get(suspension.node.0)
+                    .is_none_or(|queue| !queue.is_empty())
+            {
+                return Err(GraphError::SnapshotValidation(format!(
+                    "snapshot suspension continuation '{}' has pending child work",
+                    node.name
+                )));
+            }
+            validate_agent_suspension(
+                payload,
+                checkpoint,
+                &suspension.payload,
+                &suspension.resume_type,
+            )?;
+        }
     }
     Ok(())
 }

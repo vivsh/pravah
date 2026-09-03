@@ -30,9 +30,9 @@ impl Runtime {
             .advance(payload.as_ref(), checkpoint, event, ctx)
             .await?;
         let node_id = node.id;
-        self.apply_continuation_transition(frame_index, &node, transition)?;
+        let suspension = self.apply_continuation_transition(frame_index, &node, transition)?;
         self.consume_continuation_event(frame_index, node_id)?;
-        Ok(Step::Continue)
+        Ok(suspension.map_or(Step::Continue, Step::Suspend))
     }
 
     pub(super) fn apply_continuation_transition(
@@ -40,17 +40,19 @@ impl Runtime {
         frame_index: usize,
         node: &CompiledNode,
         transition: ContinuationTransition,
-    ) -> Result<(), GraphError> {
+    ) -> Result<Option<Value>, GraphError> {
         let ContinuationTransition {
             checkpoint,
             state,
             outputs,
             writes,
             child_calls,
+            suspension,
         } = transition;
         let has_outputs = !outputs.is_empty();
         let has_checkpoint = checkpoint.is_some();
         let has_child_calls = !child_calls.is_empty();
+        let has_suspension = suspension.is_some();
 
         if has_outputs && has_checkpoint {
             return Err(GraphError::InvalidContinuationTransition {
@@ -69,6 +71,23 @@ impl Runtime {
                 node: node.name.to_string(),
                 reason: "child calls require checkpoint state".into(),
             });
+        }
+        if has_suspension && !has_checkpoint {
+            return Err(GraphError::InvalidContinuationTransition {
+                node: node.name.to_string(),
+                reason: "external suspension requires checkpoint state".into(),
+            });
+        }
+        if has_suspension && (has_outputs || has_child_calls || !writes.is_empty()) {
+            return Err(GraphError::InvalidContinuationTransition {
+                node: node.name.to_string(),
+                reason:
+                    "external suspension cannot be combined with outputs, writes, or child calls"
+                        .into(),
+            });
+        }
+        if let Some(suspension) = &suspension {
+            validate_continuation_suspension(node, suspension)?;
         }
         self.validate_continuation_child_calls(frame_index, node, &child_calls)?;
         let prepared_child =
@@ -124,7 +143,27 @@ impl Runtime {
         if let Some(prepared_child) = prepared_child {
             self.push_prepared_continuation_child_call(frame_index, node.id, prepared_child)?;
         }
-        Ok(())
+        let payload = if let Some(suspension) = suspension {
+            let payload = suspension.payload.clone();
+            let graph_index = self
+                .state
+                .frames
+                .get(frame_index)
+                .ok_or_else(|| GraphError::Invalid("continuation frame disappeared".into()))?
+                .graph_index;
+            self.state.suspension = Some(Suspension {
+                frame_depth: frame_index + 1,
+                graph_index,
+                node: node.id,
+                target: SuspensionTarget::Continuation,
+                resume_type: suspension.resume_type,
+                payload: suspension.payload,
+            });
+            Some(payload)
+        } else {
+            None
+        };
+        Ok(payload)
     }
 
     pub(super) fn peek_continuation_event(
@@ -307,4 +346,93 @@ impl Runtime {
         self.state.frames.push(prepared.frame);
         Ok(())
     }
+
+    /// Resumes a first-class suspend node after validating its output edge.
+    pub(super) fn resume_suspend_node(
+        &mut self,
+        frame_index: usize,
+        node: &CompiledNode,
+        value: Value,
+    ) -> Result<Step, GraphError> {
+        let CompiledNodeKind::Suspend { .. } = &node.kind else {
+            return Err(GraphError::Invalid(format!(
+                "suspended node '{}' is not a suspend node",
+                node.name
+            )));
+        };
+        let output_edge = node.outputs.first().copied().ok_or_else(|| {
+            GraphError::Invalid(format!("suspend node '{}' has no output", node.name))
+        })?;
+        self.validate_edge_write_value(
+            frame_index,
+            output_edge,
+            &value,
+            &format!("suspend node '{}'", node.name),
+        )?;
+        self.commit_edge_write(frame_index, output_edge, value)?;
+        self.complete_node(frame_index, node)?;
+        self.state.suspension = None;
+        self.try_exit_frames()
+    }
+
+    /// Delivers external input to the active continuation checkpoint.
+    pub(super) async fn resume_continuation(
+        &mut self,
+        frame_index: usize,
+        node: CompiledNode,
+        input: Value,
+        ctx: Context,
+    ) -> Result<Step, GraphError> {
+        let CompiledNodeKind::Continuation { key, payload, .. } = &node.kind else {
+            return Err(GraphError::Invalid(format!(
+                "suspended node '{}' is not a continuation",
+                node.name
+            )));
+        };
+        let checkpoint = self
+            .state
+            .frames
+            .get(frame_index)
+            .and_then(|frame| frame.checkpoints.get(node.id.0))
+            .and_then(Clone::clone)
+            .ok_or_else(|| GraphError::Invalid("continuation checkpoint disappeared".into()))?;
+        let handler = self
+            .registry
+            .continuation(key)
+            .ok_or_else(|| GraphError::MissingHandler(key.as_str().into()))?;
+        let transition = handler
+            .advance(
+                payload.as_ref(),
+                checkpoint,
+                ContinuationEvent::Resume { input },
+                self.continuation_context(ctx),
+            )
+            .await?;
+        let suspension = self.apply_continuation_transition(frame_index, &node, transition)?;
+        if let Some(payload) = suspension {
+            Ok(Step::Suspend(payload))
+        } else {
+            self.state.suspension = None;
+            self.try_exit_frames()
+        }
+    }
+}
+
+fn validate_continuation_suspension(
+    node: &CompiledNode,
+    suspension: &crate::graph::registry::ContinuationSuspension,
+) -> Result<(), GraphError> {
+    if suspension.resume_type.name.trim().is_empty() {
+        return Err(GraphError::InvalidContinuationTransition {
+            node: node.name.to_string(),
+            reason: "external suspension resume type is empty".into(),
+        });
+    }
+    jsonschema::validator_for(&suspension.resume_type.schema).map_err(|error| {
+        GraphError::InvalidContinuationTransition {
+            node: node.name.to_string(),
+            reason: format!("external suspension resume schema is invalid: {error}"),
+        }
+    })?;
+    Ok(())
 }

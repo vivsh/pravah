@@ -17,6 +17,7 @@ These examples are deterministic and require no provider credentials.
 | `graph_json_invocation` | Driving a trusted graph through JSON requests |
 | `graph_typed` | Typed maps, branches, variables, subflows, and `each` |
 | `graph_untyped` | Building an `UntypedGraph` and handler registry directly |
+| `graph_agent_budgets` | Deterministic agent and per-tool budgets; run with `--features testing` |
 
 ## Diagrams And Local Persistence
 
@@ -43,6 +44,7 @@ the provider's environment variable before running them.
 | `image_prompt` | An image path and credentials for `PRAVAH_MODEL_URL`; compatibility-only legacy flow |
 | `story` | `GEMINI_API_KEY`, `FAL_KEY`, a story prompt, and network access for generated image downloads |
 | `ollama_client` | A reachable Ollama server and the model selected by `OLLAMA_MODEL` |
+| `graph_agent_control` | Model credentials; adaptive guidance, tool visibility, conclusion, suspension, and resume |
 | `graph_agent_mcp` | `mcp` feature, Streamable HTTP MCP server, selected resource URI, and model credentials |
 
 Run the MCP resource and tool-filter example with:

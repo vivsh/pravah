@@ -168,14 +168,12 @@ impl Runtime {
                     .ok_or_else(|| GraphError::MissingHandler(key.as_str().into()))?;
                 let ctx = self.continuation_context(ctx);
                 let transition = handler.start(payload.as_ref(), state, inputs, ctx).await?;
-                self.apply_continuation_transition(frame_index, &node, transition)?;
+                let suspension =
+                    self.apply_continuation_transition(frame_index, &node, transition)?;
                 self.complete_node(frame_index, &node)?;
-                Ok(Step::Continue)
+                Ok(suspension.map_or(Step::Continue, Step::Suspend))
             }
-            CompiledNodeKind::Suspend {
-                resume_type,
-                payload,
-            } => {
+            CompiledNodeKind::Suspend { payload, .. } => {
                 if node.inputs.len() != 1 || node.outputs.len() != 1 {
                     return Err(GraphError::Invalid(format!(
                         "suspend node '{}' requires one input and one output",
@@ -186,11 +184,26 @@ impl Runtime {
                 let input_edge = single_input_edge(&node)?;
                 let input_ref = peek_edge(frame, input_edge)?;
                 let payload_value = suspend_payload(payload.as_ref(), input_ref);
+                let output_edge = node.outputs.first().copied().ok_or_else(|| {
+                    GraphError::Invalid(format!("suspend node '{}' has no output", node.name))
+                })?;
+                let resume_type = self
+                    .callables
+                    .get(frame.graph_index)
+                    .and_then(|graph| graph.graph.edge(output_edge))
+                    .map(|edge| edge.type_spec.clone())
+                    .ok_or_else(|| {
+                        GraphError::Invalid(format!(
+                            "suspend node '{}' output type is missing",
+                            node.name
+                        ))
+                    })?;
                 self.state.suspension = Some(Suspension {
                     frame_depth: frame_index + 1,
                     graph_index: frame.graph_index,
                     node: node.id,
-                    resume_type: resume_type.to_string(),
+                    target: SuspensionTarget::Node,
+                    resume_type,
                     payload: payload_value.clone(),
                 });
                 Ok(Step::Suspend(payload_value))

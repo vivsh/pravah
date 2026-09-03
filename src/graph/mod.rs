@@ -42,7 +42,11 @@ pub mod validation;
 pub mod value;
 
 pub use crate::diagram::{DiagramEdge, DiagramNode, DiagramNodeKind};
-pub use agent::{Agent, AgentConfig, McpResourceRef, ToolFilter, ToolInfo, Toolset};
+pub use agent::{
+    Agent, AgentConfig, AgentDecision, AgentDirective, AgentInterventionPoint, AgentLoop,
+    AgentLoopMetrics, AgentResume, AgentSuspension, AgentToolProposal, AgentToolResult,
+    McpResourceRef, ToolFilter, ToolInfo, Toolset,
+};
 pub use builder::UntypedGraphBuilder;
 pub use chat::{Chat, ChatTurn};
 pub use diagram::GraphDiagram;
@@ -57,7 +61,8 @@ pub use model::{
 };
 pub use registry::{
     ContinuationChildCall, ContinuationContext, ContinuationEvent, ContinuationHandler,
-    ContinuationTransition, EdgeWrite, HandlerRegistry, RuntimeServices, ValueHandler, WorkHandler,
+    ContinuationSuspension, ContinuationTransition, EdgeWrite, HandlerRegistry, RuntimeServices,
+    ValueHandler, WorkHandler,
 };
 pub use runtime::{GraphFingerprint, PreparedGraph, Runtime, SNAPSHOT_VERSION, Snapshot};
 pub use state::{State, Step, Suspension};

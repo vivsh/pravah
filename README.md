@@ -30,7 +30,7 @@ Applications provide those facilities and decide when to call the runtime.
 
 ```toml
 [dependencies]
-pravah = "0.4.8"
+pravah = "0.4.9"
 ```
 
 The repository contains the `pravah` crate for explicit, resumable agent and
@@ -98,6 +98,7 @@ and supply runtime services again when restoring.
 | [`graph_json_invocation`](examples/graph_json_invocation.rs) | Stateless JSON invocation through completion |
 | [`graph_typed`](examples/graph_typed.rs) | Typed maps, branches, and collections |
 | [`graph_untyped`](examples/graph_untyped.rs) | Building the untyped graph directly |
+| [`graph_agent_control`](examples/graph_agent_control.rs) | Adaptive tool visibility, conclusion, suspension, and resume |
 | [`graph_diagram_complex`](examples/graph_diagram_complex.rs) | Tree, Mermaid, and DOT diagrams |
 | [`story`](examples/story.rs) | A larger graph-backed agent workflow |
 

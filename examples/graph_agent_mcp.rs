@@ -111,8 +111,7 @@ mod enabled {
         .tool_filter(ToolFilter::new(move |tool| {
             allow_search || tool.name() != "search_knowledge"
         }))
-        .resources([resource])
-        .turn_budget(4))
+        .resources([resource]))
     }
 
     async fn select_resource(

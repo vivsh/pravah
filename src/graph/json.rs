@@ -11,7 +11,7 @@ use super::state::Step;
 use super::value::to_value;
 
 /// Current JSON invocation request and response version.
-pub const JSON_WIRE_VERSION: u32 = 4;
+pub const JSON_WIRE_VERSION: u32 = 6;
 
 /// One external command for a trusted graph-backed workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +80,7 @@ impl JsonInvoker {
         })
     }
 
-    /// Configures runtime-owned provider, memory, compaction, and history services.
+    /// Configures runtime-owned history persistence and compaction services.
     pub fn with_services(mut self, services: RuntimeServices) -> Self {
         self.services = services;
         self
@@ -149,7 +149,7 @@ impl JsonInvoker {
 fn response_from_step(runtime: &mut Runtime, step: Step) -> Result<JsonResponse, GraphError> {
     let suspension_type = runtime
         .suspension()
-        .map(|suspension| suspension.resume_type.clone());
+        .map(|suspension| suspension.resume_type().to_owned());
     let snapshot = runtime.snapshot()?;
     Ok(match step {
         Step::Continue => JsonResponse::Continue {
@@ -394,7 +394,7 @@ mod tests {
         let obsolete = invoker
             .invoke(
                 JsonRequest::Start {
-                    version: 3,
+                    version: 5,
                     input: json!(1),
                 },
                 ctx(),

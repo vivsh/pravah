@@ -5,11 +5,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::Context;
-use crate::clients::Message;
 use crate::legacy::FlowHistory;
 use crate::legacy::{HistoryCompactor, HistoryStore};
 
-use super::agent::support::{dispatch_injection_target, validate_agent_snapshot_state};
+use super::agent::support::{validate_agent_snapshot_state, validate_agent_suspension};
 use super::error::GraphError;
 use super::ids::{EdgeId, HandlerKey, NodeId, VarId};
 use super::model::{BuiltinNode, NodeKind, UntypedGraph, VarInit, VarKey, VarScope, Variable};
@@ -17,8 +16,10 @@ use super::registry::{
     ContinuationChildCall, ContinuationContext, ContinuationEvent, ContinuationTransition,
     HandlerRegistry, RuntimeServices,
 };
-use super::schema::{validate_resume_type, validate_value};
-use super::state::{ContinuationChildResult, Frame, ReturnTarget, State, Step, Suspension};
+use super::schema::validate_value;
+use super::state::{
+    ContinuationChildResult, Frame, ReturnTarget, State, Step, Suspension, SuspensionTarget,
+};
 use super::validation::{validate_graph_shape, validate_registry_keys};
 use super::value::Value;
 
@@ -45,7 +46,7 @@ use snapshot::validate_snapshot_state;
 use sparse::{SparseState, expand_state, sparse_state};
 
 /// Current serialized runtime snapshot version.
-pub const SNAPSHOT_VERSION: u32 = 6;
+pub const SNAPSHOT_VERSION: u32 = 8;
 
 #[derive(Clone)]
 struct CompiledGraph {
@@ -95,7 +96,6 @@ enum CompiledNodeKind {
         children: Arc<[usize]>,
     },
     Suspend {
-        resume_type: Arc<str>,
         payload: Arc<Value>,
     },
     Load {
@@ -230,6 +230,7 @@ impl PreparedGraph {
         let has_work = |key: &str| registry.has_work(key);
         let has_continuation = |key: &str| registry.has_continuation(key);
         validate_registry_keys(&graph, &has_value, &has_work, &has_continuation)?;
+        validate_continuation_payloads(&graph, &registry)?;
 
         let fingerprint = GraphFingerprint::calculate(&graph)?;
         let mut callables = Vec::new();
@@ -320,6 +321,44 @@ impl PreparedGraph {
     }
 }
 
+fn validate_continuation_payloads(
+    graph: &UntypedGraph,
+    registry: &HandlerRegistry,
+) -> Result<(), GraphError> {
+    for node in &graph.nodes {
+        match &node.kind {
+            NodeKind::Continuation {
+                key,
+                payload,
+                children,
+            } => {
+                let handler = registry
+                    .continuation(key)
+                    .ok_or_else(|| GraphError::MissingHandler(key.as_str().into()))?;
+                handler.validate_payload(payload)?;
+                for child in children {
+                    validate_continuation_payloads(child, registry)?;
+                }
+            }
+            NodeKind::Subflow { graph } | NodeKind::Each { graph } => {
+                validate_continuation_payloads(graph, registry)?;
+            }
+            NodeKind::Either { left, right, .. } => {
+                validate_continuation_payloads(left, registry)?;
+                validate_continuation_payloads(right, registry)?;
+            }
+            NodeKind::Builtin { .. }
+            | NodeKind::PureHandler { .. }
+            | NodeKind::WorkHandler { .. }
+            | NodeKind::Suspend { .. }
+            | NodeKind::Load { .. }
+            | NodeKind::Store { .. }
+            | NodeKind::Goto { .. } => {}
+        }
+    }
+    Ok(())
+}
+
 impl Runtime {
     /// Sets the history compactor used by runtime-owned history.
     pub fn with_compactor(mut self, compactor: impl HistoryCompactor + 'static) -> Self {
@@ -374,27 +413,10 @@ impl Runtime {
             .suspension
             .as_ref()
             .ok_or_else(|| GraphError::SnapshotValidation("runtime is not suspended".into()))?;
-        let graph = self
-            .callables
-            .get(suspension.graph_index)
-            .ok_or_else(|| GraphError::SnapshotValidation("suspension graph is missing".into()))?;
-        let node = graph
-            .nodes
-            .get(suspension.node.0)
-            .ok_or_else(|| GraphError::SnapshotValidation("suspension node is missing".into()))?;
-        let output = node.outputs.first().copied().ok_or_else(|| {
-            GraphError::SnapshotValidation("suspension output edge is missing".into())
-        })?;
-        graph
-            .graph
-            .edge(output)
-            .map(|edge| &edge.type_spec)
-            .ok_or_else(|| {
-                GraphError::SnapshotValidation("suspension output type is missing".into())
-            })
+        Ok(&suspension.resume_type)
     }
 
-    /// Captures a versioned snapshot of graph, VM state, and history.
+    /// Captures versioned VM state and history tied to this graph's fingerprint.
     pub fn snapshot(&self) -> Result<Snapshot, GraphError> {
         let history = self
             .history
@@ -409,63 +431,10 @@ impl Runtime {
         })
     }
 
-    /// Injects a user message into the active dispatch-ready agent session.
-    ///
-    /// This is a guarded control operation, not general history mutation. It
-    /// fails unless the top frame contains an agent continuation checkpoint in
-    /// dispatch phase.
-    pub async fn inject_message(&mut self, content: impl Into<String>) -> Result<(), GraphError> {
-        if self.state.frames.is_empty() {
-            return Err(GraphError::Invalid(
-                "inject_message called with no active frame".into(),
-            ));
-        }
-        if self.state.suspension.is_some() {
-            return Err(GraphError::Invalid(
-                "inject_message called while runtime is suspended".into(),
-            ));
-        }
-        let frame_index = self.state.frames.len() - 1;
-        let frame = self.frame(frame_index)?;
-        let compiled = self
-            .callables
-            .get(frame.graph_index)
-            .ok_or_else(|| GraphError::Invalid("active frame graph index is invalid".into()))?;
-        let mut target = None;
-        for node in &compiled.nodes {
-            let CompiledNodeKind::Continuation { payload, .. } = &node.kind else {
-                continue;
-            };
-            let Some(Some(checkpoint)) = frame.checkpoints.get(node.id.0) else {
-                continue;
-            };
-            if let Some(found) = dispatch_injection_target(payload.as_ref(), checkpoint)? {
-                target = Some(found);
-                break;
-            }
-        }
-        let (session_id, agent_name) = target.ok_or_else(|| {
-            GraphError::Invalid(
-                "no agent is at a dispatch boundary; call inject_message only before dispatch"
-                    .into(),
-            )
-        })?;
-        let mut history = self.history.lock().await;
-        let entry = history.prepare_entry(&session_id, &agent_name, Message::user(content));
-        self.runtime_context
-            .services
-            .store()
-            .record_dyn(&entry)
-            .await
-            .map_err(|err| GraphError::HistoryPersistence(err.to_string()))?;
-        history.commit_entry(entry);
-        Ok(())
-    }
-
     /// Advances the VM by at most one dispatchable operation.
     ///
-    /// Returns `ResumeRequired` if the VM is suspended; use `resume()` for
-    /// first-class suspend nodes.
+    /// Returns `ResumeRequired` if the VM is suspended; use `resume()` for a
+    /// suspend node or continuation-owned suspension.
     pub async fn next(&mut self, ctx: Context) -> Result<Step, GraphError> {
         if self.state.suspension.is_some() {
             return Err(GraphError::ResumeRequired);
@@ -477,16 +446,14 @@ impl Runtime {
         }
     }
 
-    /// Supplies a value to the active first-class suspend node.
-    ///
-    /// Continuation nodes do not receive this external resume event.
-    pub async fn resume(&mut self, value: Value, _ctx: Context) -> Result<Step, GraphError> {
+    /// Supplies a value to the active node- or continuation-owned suspension.
+    pub async fn resume(&mut self, value: Value, ctx: Context) -> Result<Step, GraphError> {
         let suspension = self
             .state
             .suspension
             .clone()
             .ok_or(GraphError::UnexpectedResume)?;
-        validate_resume_type(&suspension.resume_type, &value)?;
+        validate_value(&suspension.resume_type, &value, "resume value")?;
         if suspension.frame_depth == 0 || suspension.frame_depth > self.state.frames.len() {
             return Err(GraphError::Invalid(format!(
                 "suspension frame depth {} is invalid for stack depth {}",
@@ -529,25 +496,13 @@ impl Runtime {
                 node.name
             )));
         }
-        let CompiledNodeKind::Suspend { .. } = &node.kind else {
-            return Err(GraphError::Invalid(format!(
-                "suspended node '{}' cannot accept external resume events",
-                node.name
-            )));
-        };
-        let output_edge = node.outputs.first().copied().ok_or_else(|| {
-            GraphError::Invalid(format!("suspend node '{}' has no output", node.name))
-        })?;
-        self.validate_edge_write_value(
-            frame_index,
-            output_edge,
-            &value,
-            &format!("suspend node '{}'", node.name),
-        )?;
-        self.commit_edge_write(frame_index, output_edge, value)?;
-        self.complete_node(frame_index, &node)?;
-        self.state.suspension = None;
-        self.try_exit_frames()
+        match suspension.target {
+            SuspensionTarget::Node => self.resume_suspend_node(frame_index, &node, value),
+            SuspensionTarget::Continuation => {
+                self.resume_continuation(frame_index, node, value, ctx)
+                    .await
+            }
+        }
     }
 }
 
@@ -709,7 +664,7 @@ mod preparation_tests {
         ));
     }
 
-    /// Verifies version five snapshots are rejected rather than migrated.
+    /// Verifies version seven snapshots are rejected rather than migrated.
     #[test]
     fn restore_rejects_previous_snapshot_format() {
         let prepared = PreparedGraph::new(identity_graph("old_version"), HandlerRegistry::new())
@@ -719,12 +674,12 @@ mod preparation_tests {
             .expect("runtime should start")
             .snapshot()
             .expect("snapshot should build");
-        snapshot.snapshot_version = 5;
+        snapshot.snapshot_version = 7;
 
         assert!(matches!(
             prepared.restore(snapshot),
             Err(GraphError::SnapshotVersion {
-                got: 5,
+                got: 7,
                 expected: SNAPSHOT_VERSION
             })
         ));

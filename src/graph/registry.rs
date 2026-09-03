@@ -15,6 +15,7 @@ use crate::legacy::{HistoryCompactor, HistoryEntry, HistoryStore};
 
 use super::error::GraphError;
 use super::ids::{EdgeId, HandlerKey};
+use super::model::TypeSpec;
 use super::value::Value;
 
 #[derive(Clone)]
@@ -201,8 +202,19 @@ pub struct EdgeWrite {
 pub enum ContinuationEvent {
     /// A child graph completed and produced an output for this call id.
     ChildResult { call_id: String, output: Value },
+    /// External input supplied to a continuation-owned suspension.
+    Resume { input: Value },
     /// No child result is pending; the handler may do more internal work.
     Poll,
+}
+
+/// External suspension requested by an active continuation handler.
+#[derive(Debug, Clone)]
+pub struct ContinuationSuspension {
+    /// Expected resume type and schema exposed at invocation boundaries.
+    pub resume_type: TypeSpec,
+    /// Serializable payload returned to the external caller.
+    pub payload: Value,
 }
 
 /// Child graph invocation requested by a continuation transition.
@@ -229,6 +241,8 @@ pub struct ContinuationTransition {
     pub writes: Vec<EdgeWrite>,
     /// Child graph calls requested by this transition.
     pub child_calls: Vec<ContinuationChildCall>,
+    /// Optional external suspension owned by this continuation checkpoint.
+    pub suspension: Option<ContinuationSuspension>,
 }
 
 /// Synchronous value handler for pure edge transforms.
@@ -276,6 +290,14 @@ where
 /// Use this for agents, external protocols, or other state machines that need
 /// checkpoints, polling, or child graph calls.
 pub trait ContinuationHandler: Send + Sync {
+    /// Validates serialized payload metadata against this registered handler.
+    ///
+    /// Implementations with payload-bound runtime capabilities should reject a
+    /// graph whose serialized declaration does not match those capabilities.
+    fn validate_payload(&self, _payload: &Value) -> Result<(), GraphError> {
+        Ok(())
+    }
+
     /// Starts the continuation from ready input values.
     fn start<'a>(
         &'a self,

@@ -19,7 +19,10 @@ fn approval(root: Flow<Request>) -> Flow<Decision> {
 }
 
 fn reviewer(root: Agent<PreparedRequest>) -> Agent<Review> {
-    root.tools(review_tools).configure(configure_reviewer)
+    root
+        .tools(review_tools)
+        .control(control_reviewer)
+        .configure(configure_reviewer)
 }
 
 async fn configure_reviewer(
@@ -32,8 +35,7 @@ async fn configure_reviewer(
         instructions(&request),
         Message::user(message(&request)),
     )
-    .memory(memory)
-    .turn_budget(4))
+    .memory(memory))
 }
 ```
 
@@ -47,7 +49,7 @@ restoration.
 - model URL, instructions, and the initial user message;
 - optional text memory;
 - provider-specific JSON options;
-- keep-alive and turn-budget settings;
+- keep-alive session behavior;
 - a runtime filter over prepared tools;
 - selected MCP text resources.
 
@@ -97,12 +99,98 @@ Tool names and input schemas come from their Rust input types. Recoverable
 `ToolError` values are returned to the model as tagged tool results;
 `ToolError::Fatal` ends the workflow step with an error.
 
+## Set Simple Agent Budgets
+
+Most applications can bound an agent loop directly in its dynamic
+configuration:
+
+```rust
+Ok(AgentConfig::new(model, instructions, message)
+    .turn_budget(6)
+    .tool_budget::<SearchRequest>(2)
+    .tool_budget::<FetchRequest>(3))
+```
+
+`turn_budget` permits that many ordinary model requests. If the final request
+proposes tools instead of returning the structured output, Pravah completes
+the accepted tool batch and performs one additional tool-disabled conclusion
+request. A tool budget counts accepted attempts, including recoverable
+failures. Rejected proposals and calls to unavailable tools do not consume it.
+
+When a tool reaches zero it is omitted from later model requests. If a batch
+contains more calls than remain, Pravah admits them in proposal order and
+returns the ordinary unavailable result for the excess. Structured output,
+including Rath's provider-specific exit tool, remains available.
+
+Budgets are invocation-local and survive snapshot restoration. They are hard
+ceilings when combined with a custom controller. A controller can inspect
+them without maintaining its own counters:
+
+```rust
+let turns = loop_.turns_remaining();
+let searches = loop_.calls_remaining("search_request");
+```
+
+`Some(0)` means exhausted. `None` means unbudgeted; use
+`configured_tools()` to distinguish an unknown tool name.
+
+## Control Long Agent Loops
+
+An optional asynchronous controller can inspect each meaningful loop boundary
+and choose how execution proceeds:
+
+```rust
+use pravah::graph::{
+    AgentDecision, AgentInterventionPoint, AgentLoop, ToolFilter,
+};
+
+async fn control_reviewer(
+    loop_: AgentLoop<PreparedRequest>,
+    _ctx: Context,
+) -> Result<AgentDecision, ControlError> {
+    match loop_.point() {
+        AgentInterventionPoint::AfterTools
+            if loop_.metrics().repeated_results() >= 2 =>
+        {
+            Ok(AgentDecision::redirect()
+                .guidance("Use the evidence already collected; do not repeat calls.")
+                .tools(ToolFilter::new(|tool| tool.name() == "summarize_input")))
+        }
+        AgentInterventionPoint::AfterTools
+            if loop_.metrics().consecutive_tool_rounds() >= 4 =>
+        {
+            Ok(AgentDecision::conclude(
+                "Return the best supported structured answer now.",
+            ))
+        }
+        _ => Ok(AgentDecision::continue_()),
+    }
+}
+```
+
+The controller sees typed invocation input, live history, configured and active
+tools, pending calls, completed results, cumulative usage, failures, and
+deterministic repetition metrics. It can continue, redirect with one-shot
+guidance and another subset of the originally configured tools, force one
+tool-disabled conclusion turn, suspend for application input, or abort the
+step without mutation.
+
+Changing tool visibility affects later model requests only. Accepted calls and
+results already in history remain unchanged. Calls to a currently unavailable
+tool are not executed; the model receives a generic recoverable result for that
+turn while valid calls from the same batch continue.
+
+Controller state and metrics are checkpointed independently of compacted
+history. Restoring does not repeat a committed controller decision. See
+[`graph_agent_control`](../examples/graph_agent_control.rs) for an end-to-end
+example including suspension and typed resume.
+
 ## MCP Text Resources
 
 Enable the `mcp` feature to use Streamable HTTP resource servers:
 
 ```toml
-pravah = { version = "0.4.8", features = ["mcp"] }
+pravah = { version = "0.4.9", features = ["mcp"] }
 ```
 
 Register credentials and headers on the runtime `Context`, not in the graph or

@@ -9,11 +9,10 @@ use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 use crate::clients::{
-    Client, ClientOptions, ClientOutput, Message, Role, ToolCall, ToolChoice, ToolDefinition,
+    ClientOptions, ClientOutput, Message, Role, ToolCall, ToolChoice, ToolDefinition,
     materialize_messages,
 };
 use crate::context::Context;
-use crate::legacy::build_tool_definition;
 use crate::tools::{Tool, ToolError, ToolOutput};
 
 use super::error::GraphError;
@@ -25,19 +24,34 @@ use super::registry::{
 use super::value::{Value, from_value, to_value};
 use super::{CompiledFlow, HandlerRegistry};
 
+mod budget;
+#[cfg(test)]
+mod budget_tests;
+mod checkpoint;
 mod config;
+mod control;
 mod definition;
+mod execution;
+mod intervention;
 pub(crate) mod support;
+mod tool_execution;
 
-use config::ResolvedAgentConfig;
+use budget::*;
+use checkpoint::*;
 pub(crate) use config::ResolvedResource;
 pub use config::{AgentConfig, McpResourceRef, ToolFilter, ToolInfo};
+use config::{ResolvedAgentConfig, agent_tool_definition};
+pub use control::{
+    AgentDecision, AgentDirective, AgentInterventionPoint, AgentLoop, AgentLoopMetrics,
+    AgentResume, AgentSuspension, AgentToolProposal, AgentToolResult,
+};
+use control::{AgentDecisionKind, AgentLoopData, ControlStateUpdate};
 pub use definition::Agent;
-use definition::AgentConfigurator;
+use definition::{AgentConfigurator, AgentController};
 use support::*;
 
-const PAYLOAD_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 2;
+const PAYLOAD_VERSION: u32 = 3;
+const CHECKPOINT_VERSION: u32 = 4;
 
 /// Validates the identity duplicated in an agent's generic continuation payload.
 pub(crate) fn validate_payload_handler(
@@ -56,7 +70,35 @@ pub(crate) fn validate_payload_handler(
             payload.configure_handler_key
         )));
     }
+    let expected_control = format!("{handler_key}::control");
+    if payload
+        .control_handler_key
+        .as_deref()
+        .is_some_and(|key| key != expected_control)
+    {
+        return Err(GraphError::GraphValidation(format!(
+            "agent control handler does not match continuation handler '{handler_key}'"
+        )));
+    }
     Ok(())
+}
+
+/// Rewrites identities duplicated inside a typed agent continuation payload.
+pub(crate) fn namespace_payload_handler(payload: &mut Value, handler_key: &str) {
+    let Ok(mut agent): Result<AgentPayload, _> = from_value(payload.clone()) else {
+        return;
+    };
+    if agent.agent_id.is_empty() || agent.output_schema.is_null() {
+        return;
+    }
+    agent.agent_id = handler_key.to_owned();
+    agent.configure_handler_key = handler_key.to_owned();
+    if agent.control_handler_key.is_some() {
+        agent.control_handler_key = Some(format!("{handler_key}::control"));
+    }
+    if let Ok(value) = to_value(agent) {
+        *payload = value;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +113,9 @@ pub(crate) struct AgentPayload {
     pub agent_id: String,
     /// Stable registry key for this agent's activation function.
     pub configure_handler_key: String,
+    /// Stable identity of the optional intervention controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_handler_key: Option<String>,
     /// JSON schema metadata for agent input.
     pub input_schema: JsonValue,
     /// JSON schema metadata for structured agent output.
@@ -111,7 +156,14 @@ struct AgentToolSpec {
 
 struct EdgeAgentToolRuntime {
     decode_args: Arc<dyn Fn(JsonValue) -> Result<Value, ToolError> + Send + Sync>,
-    to_message: Arc<dyn Fn(Value) -> Result<Message, EdgeToolMessageError> + Send + Sync>,
+    render_result:
+        Arc<dyn Fn(Value) -> Result<EdgeRenderedToolResult, EdgeToolMessageError> + Send + Sync>,
+}
+
+struct EdgeRenderedToolResult {
+    message: Message,
+    value: Value,
+    error: bool,
 }
 
 #[derive(Default)]
@@ -127,7 +179,7 @@ impl Toolset {
         T::Input: Sync,
         T::Output: Sync,
     {
-        let definition = match build_tool_definition::<T::Input>() {
+        let definition = match agent_tool_definition::<T::Input>() {
             Ok(definition) => definition,
             Err(err) => {
                 self.tools.push(error_tool_spec(err));
@@ -142,19 +194,40 @@ impl Toolset {
             child,
             Arc::new(|value| {
                 let value = decode_tool_result(value)?;
-                let value = match value {
-                    EdgeToolResult::Success { value } => value,
+                let (value, error) = match value {
+                    EdgeToolResult::Success { value } => (value, false),
                     EdgeToolResult::Error { value } => {
-                        return Ok(Message::tool_output(String::new(), value.to_string()));
+                        let runtime_value =
+                            to_value(value.clone()).map_err(|err| EdgeToolMessageError::Fatal {
+                                expected: "tool error value".into(),
+                                reason: err.to_string(),
+                                raw: value.to_string(),
+                            })?;
+                        return Ok(EdgeRenderedToolResult {
+                            message: Message::tool_output(String::new(), value.to_string()),
+                            value: runtime_value,
+                            error: true,
+                        });
                     }
                 };
-                let output: T::Output =
-                    serde_json::from_value(value).map_err(|err| EdgeToolMessageError::Fatal {
+                let output: T::Output = serde_json::from_value(value.clone()).map_err(|err| {
+                    EdgeToolMessageError::Fatal {
                         expected: T::Output::schema_name(),
                         reason: err.to_string(),
                         raw: "<tool output>".into(),
-                    })?;
-                T::to_message(output).map_err(Into::into)
+                    }
+                })?;
+                let message = T::to_message(output).map_err(EdgeToolMessageError::from)?;
+                let value = to_value(value).map_err(|err| EdgeToolMessageError::Fatal {
+                    expected: "tool output value".into(),
+                    reason: err.to_string(),
+                    raw: "<tool output>".into(),
+                })?;
+                Ok(EdgeRenderedToolResult {
+                    message,
+                    value,
+                    error,
+                })
             }),
         );
         self
@@ -168,7 +241,7 @@ impl Toolset {
         Fut: Future<Output = Result<O, ToolError>> + Send + 'static,
         H: Fn(I, Context) -> Fut + Send + Sync + 'static,
     {
-        let definition = match build_tool_definition::<I>() {
+        let definition = match agent_tool_definition::<I>() {
             Ok(definition) => definition,
             Err(err) => {
                 self.tools.push(error_tool_spec(err));
@@ -179,7 +252,7 @@ impl Toolset {
         self.push_tool_with_message::<I, JsonValue>(
             definition,
             child,
-            Arc::new(decode_handler_tool_message::<O>),
+            Arc::new(decode_handler_tool_result::<O>),
         );
         self
     }
@@ -190,7 +263,7 @@ impl Toolset {
         I: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
         O: ToolOutput + Sync,
     {
-        let definition = match build_tool_definition::<I>() {
+        let definition = match agent_tool_definition::<I>() {
             Ok(definition) => definition,
             Err(err) => {
                 self.tools.push(error_tool_spec(err));
@@ -201,7 +274,7 @@ impl Toolset {
         self.push_tool_with_message::<I, O>(
             definition,
             child,
-            Arc::new(decode_runtime_tool_message::<O>),
+            Arc::new(decode_runtime_tool_result::<O>),
         );
         self
     }
@@ -214,7 +287,9 @@ impl Toolset {
         &mut self,
         definition: ToolDefinition,
         child: Result<CompiledFlow<I, CO>, String>,
-        to_message: Arc<dyn Fn(Value) -> Result<Message, EdgeToolMessageError> + Send + Sync>,
+        render_result: Arc<
+            dyn Fn(Value) -> Result<EdgeRenderedToolResult, EdgeToolMessageError> + Send + Sync,
+        >,
     ) where
         I: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
         CO: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
@@ -231,7 +306,7 @@ impl Toolset {
                 let input: I = serde_json::from_value(value).map_err(ToolError::TypeError)?;
                 to_value(input).map_err(|err| ToolError::Fatal(err.to_string()))
             }),
-            to_message,
+            render_result,
         };
         match child {
             Ok(flow) => {
@@ -287,7 +362,7 @@ where
     I: JsonSchema,
     O: JsonSchema,
 {
-    let (toolset, configure, mut errors) = agent.into_parts();
+    let (toolset, controller, configure, mut errors) = agent.into_parts();
     let tools = toolset.into_tools();
     let input_schema = schema_for::<I>();
     let output_schema = schema_for::<O>();
@@ -316,6 +391,7 @@ where
         version: PAYLOAD_VERSION,
         agent_id: String::new(),
         configure_handler_key: String::new(),
+        control_handler_key: controller.as_ref().map(|_| String::new()),
         input_schema,
         output_schema,
         output_type_name: O::schema_name(),
@@ -327,6 +403,7 @@ where
         registries,
         handler: AgentHandler {
             tools: runtime_tools,
+            controller,
             configure,
         },
         errors,
@@ -340,52 +417,17 @@ where
 /// runtime-owned history and VM transitions.
 pub(crate) struct AgentHandler {
     tools: Vec<Arc<EdgeAgentToolRuntime>>,
+    controller: Option<AgentController>,
     configure: AgentConfigurator,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EdgeAgentCheckpoint {
-    version: u32,
-    phase: EdgeAgentPhase,
-    session_id: String,
-    resolved: ResolvedAgentConfig,
-    turn_offset: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EdgeAgentSavedState {
-    version: u32,
-    session_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-enum EdgeAgentPhase {
-    Dispatch,
-    PendingTool {
-        active: Vec<EdgeActiveToolCall>,
-        waiting: Vec<EdgeWaitingToolCall>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EdgeActiveToolCall {
-    call_id: String,
-    tool_name: String,
-    child_index: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EdgeWaitingToolCall {
-    call_id: String,
-    tool_name: String,
-    child_index: usize,
-    args: Value,
 }
 
 struct PreparedToolCalls {
     child_calls: Vec<ContinuationChildCall>,
     recoverable_messages: Vec<Message>,
+    running_tools: BTreeSet<String>,
+    active: Vec<EdgeActiveToolCall>,
+    waiting: Vec<EdgeWaitingToolCall>,
+    results: Vec<EdgeCompletedToolCall>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -393,370 +435,6 @@ struct PreparedToolCalls {
 enum EdgeToolResult {
     Success { value: JsonValue },
     Error { value: JsonValue },
-}
-
-impl ContinuationHandler for AgentHandler {
-    fn start<'a>(
-        &'a self,
-        payload: &'a Value,
-        state: Option<Value>,
-        inputs: Vec<Value>,
-        ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        async move {
-            let payload = decode_payload(payload)?;
-            let input = single_input(inputs, "agent")?;
-            let config = self
-                .configure
-                .configure(input, ctx.context().clone())
-                .await?;
-            let (resolved, message) = resolve_agent_config(&payload, config, ctx.context()).await?;
-            let session_id = if resolved.keep_alive {
-                restore_agent_state(state)?.unwrap_or_else(|| Uuid::now_v7().to_string())
-            } else {
-                Uuid::now_v7().to_string()
-            };
-            ctx.push_history(&session_id, &payload.agent_id, message)
-                .await?;
-            let turn_offset = ctx.complete_turn_count(&session_id).await;
-            let checkpoint = EdgeAgentCheckpoint {
-                version: CHECKPOINT_VERSION,
-                phase: EdgeAgentPhase::Dispatch,
-                session_id,
-                resolved,
-                turn_offset,
-            };
-            persist_checkpoint(checkpoint)
-        }
-        .boxed()
-    }
-
-    fn advance<'a>(
-        &'a self,
-        payload: &'a Value,
-        checkpoint: Value,
-        event: ContinuationEvent,
-        ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        async move {
-            let payload = decode_payload(payload)?;
-            let mut checkpoint: EdgeAgentCheckpoint = from_value(checkpoint).map_err(|err| {
-                GraphError::SnapshotValidation(format!("failed to decode agent checkpoint: {err}"))
-            })?;
-            if checkpoint.version != CHECKPOINT_VERSION {
-                return Err(GraphError::UnsupportedVersion {
-                    format: "agent checkpoint",
-                    got: checkpoint.version,
-                    expected: CHECKPOINT_VERSION,
-                });
-            }
-            validate_checkpoint(&payload, &checkpoint)?;
-            match event {
-                ContinuationEvent::Poll => self.poll(&payload, &mut checkpoint, ctx).await,
-                ContinuationEvent::ChildResult { call_id, output } => {
-                    self.child_result(&payload, &mut checkpoint, call_id, output, ctx)
-                        .await
-                }
-            }
-        }
-        .boxed()
-    }
-}
-
-impl AgentHandler {
-    async fn poll(
-        &self,
-        payload: &AgentPayload,
-        checkpoint: &mut EdgeAgentCheckpoint,
-        ctx: ContinuationContext,
-    ) -> Result<ContinuationTransition, GraphError> {
-        match &checkpoint.phase {
-            EdgeAgentPhase::Dispatch => self.dispatch(payload, checkpoint, ctx).await,
-            EdgeAgentPhase::PendingTool { .. } => persist_checkpoint(checkpoint.clone()),
-        }
-    }
-
-    async fn dispatch(
-        &self,
-        payload: &AgentPayload,
-        checkpoint: &mut EdgeAgentCheckpoint,
-        ctx: ContinuationContext,
-    ) -> Result<ContinuationTransition, GraphError> {
-        let request_ctx = ctx.context();
-        let resolved = &checkpoint.resolved;
-        let preamble = effective_preamble(payload, resolved);
-        let selected: BTreeSet<&str> = resolved.tools.iter().map(String::as_str).collect();
-
-        let defs: Vec<ToolDefinition> = payload
-            .tools
-            .iter()
-            .filter(|tool| selected.contains(tool.name.as_str()))
-            .map(|tool| ToolDefinition {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                parameters: tool.parameters.clone(),
-            })
-            .collect();
-        let tool_choice = if defs.is_empty() {
-            ToolChoice::Disabled
-        } else {
-            ToolChoice::Auto
-        };
-        let options = ClientOptions {
-            output_type_name: payload.output_type_name.clone(),
-            turn_budget: resolved.turn_budget,
-            turn_budget_message: resolved.turn_budget_message.clone(),
-            provider_config: resolved.provider_config.clone(),
-            ..ClientOptions::default()
-        }
-        .with_input_schema(payload.input_schema.clone())
-        .with_tools(defs)
-        .with_tool_choice(tool_choice)
-        .with_name(payload.agent_id.clone())
-        .with_output_schema(payload.output_schema.clone())
-        .with_preamble(preamble);
-        let client = request_ctx
-            .client_factory()
-            .create(&resolved.model, options)
-            .map_err(|err| GraphError::AgentClient(format!("client creation failed: {err}")))?;
-        ctx.validate_history_for_session(&checkpoint.session_id)
-            .await?;
-        let session_history = ctx.history_for_session(&checkpoint.session_id).await;
-        let mut messages = materialize_messages(&session_history, request_ctx)
-            .await
-            .map_err(|err| GraphError::Invalid(format!("message materialization failed: {err}")))?;
-        let completed_turns = ctx.complete_turn_count(&checkpoint.session_id).await;
-        maybe_inject_edge_turn_budget_message(
-            &*client,
-            &payload.agent_id,
-            &mut messages,
-            checkpoint.turn_offset,
-            completed_turns,
-        );
-        let response = client
-            .execute(&messages)
-            .await
-            .map_err(|err| GraphError::AgentClient(format!("execution failed: {err}")))?;
-        let usage = response.usage;
-        match response.output {
-            ClientOutput::Output(output) => {
-                let content = serde_json::to_string(&output).map_err(|err| {
-                    GraphError::Invalid(format!("failed to serialize agent output: {err}"))
-                })?;
-                let message = match usage {
-                    Some(usage) => Message::assistant(content).with_usage(usage),
-                    None => Message::assistant(content),
-                };
-                let state = completed_agent_state(checkpoint)?;
-                let output = to_value(output).map_err(|err| GraphError::ValueConversion {
-                    target: "agent output".into(),
-                    reason: err.to_string(),
-                })?;
-                let transition = ContinuationTransition {
-                    checkpoint: None,
-                    state,
-                    outputs: vec![output],
-                    writes: Vec::new(),
-                    child_calls: Vec::new(),
-                };
-                ctx.push_history(&checkpoint.session_id, &payload.agent_id, message)
-                    .await?;
-                ctx.compact_history(&checkpoint.session_id).await?;
-                Ok(transition)
-            }
-            ClientOutput::ToolCalls { thought, calls } => {
-                let prepared = self.prepare_tool_calls(payload, checkpoint, calls.clone())?;
-                let atc = Message {
-                    role: Role::AssistantToolCalls {
-                        calls: calls.clone(),
-                    },
-                    content: thought.unwrap_or_default(),
-                    attachments: Vec::new(),
-                    usage,
-                };
-                let mut messages = Vec::with_capacity(1 + prepared.recoverable_messages.len());
-                messages.push(atc);
-                messages.extend(prepared.recoverable_messages);
-                ctx.push_history_batch(&checkpoint.session_id, &payload.agent_id, messages)
-                    .await?;
-                ctx.compact_history(&checkpoint.session_id).await?;
-                let child_calls = prepared.child_calls;
-                if child_calls.is_empty() {
-                    checkpoint.phase = EdgeAgentPhase::Dispatch;
-                    persist_checkpoint(checkpoint.clone())
-                } else {
-                    let active = child_calls
-                        .iter()
-                        .filter_map(|call| {
-                            payload
-                                .tools
-                                .get(call.child_index)
-                                .map(|tool| EdgeActiveToolCall {
-                                    call_id: call.call_id.clone(),
-                                    tool_name: tool.name.clone(),
-                                    child_index: call.child_index,
-                                })
-                        })
-                        .collect();
-                    checkpoint.phase = EdgeAgentPhase::PendingTool {
-                        active,
-                        waiting: pending_waiting(checkpoint),
-                    };
-                    transition_with_children(checkpoint.clone(), child_calls)
-                }
-            }
-        }
-    }
-
-    fn prepare_tool_calls(
-        &self,
-        payload: &AgentPayload,
-        checkpoint: &mut EdgeAgentCheckpoint,
-        calls: Vec<ToolCall>,
-    ) -> Result<PreparedToolCalls, GraphError> {
-        let mut seen = BTreeSet::new();
-        let mut active_tools: BTreeSet<String> = BTreeSet::new();
-        let mut child_calls = Vec::new();
-        let mut waiting = Vec::new();
-        let mut recoverable_messages = Vec::new();
-        for call in calls {
-            if !seen.insert(call.id.clone()) {
-                return Err(GraphError::Invalid(format!(
-                    "agent '{}' returned duplicate tool call id '{}' for tool '{}'",
-                    payload.agent_id, call.id, call.name
-                )));
-            }
-            let Some(tool) = payload.tools.iter().find(|tool| {
-                tool.name == call.name && checkpoint.resolved.tools.contains(&tool.name)
-            }) else {
-                recoverable_messages.push(Message::tool_output(
-                    call.id,
-                    format!(r#"{{"error":"unknown tool '{}'"}}"#, call.name),
-                ));
-                continue;
-            };
-            let runtime = self.tool_runtime(tool.child_index)?;
-            let input = match (runtime.decode_args)(call.args) {
-                Ok(input) => input,
-                Err(err) if !err.is_fatal() => {
-                    recoverable_messages
-                        .push(err.into_error_message(&tool.name).with_call_id(call.id));
-                    continue;
-                }
-                Err(err) => return Err(GraphError::Invalid(err.to_string())),
-            };
-            if active_tools.insert(tool.name.clone()) {
-                child_calls.push(ContinuationChildCall {
-                    child_index: tool.child_index,
-                    call_id: call.id,
-                    input,
-                });
-            } else {
-                waiting.push(EdgeWaitingToolCall {
-                    call_id: call.id,
-                    tool_name: tool.name.clone(),
-                    child_index: tool.child_index,
-                    args: input,
-                });
-            }
-        }
-        checkpoint.phase = EdgeAgentPhase::PendingTool {
-            active: Vec::new(),
-            waiting,
-        };
-        Ok(PreparedToolCalls {
-            child_calls,
-            recoverable_messages,
-        })
-    }
-
-    async fn child_result(
-        &self,
-        payload: &AgentPayload,
-        checkpoint: &mut EdgeAgentCheckpoint,
-        call_id: String,
-        output: Value,
-        ctx: ContinuationContext,
-    ) -> Result<ContinuationTransition, GraphError> {
-        let EdgeAgentPhase::PendingTool { active, waiting } = &mut checkpoint.phase else {
-            return Err(GraphError::Invalid(format!(
-                "agent '{}' received child result while not waiting for tools",
-                payload.agent_id
-            )));
-        };
-        let active_pos = active
-            .iter()
-            .position(|call| call.call_id == call_id)
-            .ok_or_else(|| {
-                GraphError::Invalid(format!(
-                    "agent '{}' received unknown tool child result '{}'",
-                    payload.agent_id, call_id
-                ))
-            })?;
-        let active_call = active.remove(active_pos);
-        let tool = payload
-            .tools
-            .get(active_call.child_index)
-            .ok_or_else(|| GraphError::Invalid("tool child index is invalid".into()))?;
-        let runtime = self.tool_runtime(active_call.child_index)?;
-        let mut message = match (runtime.to_message)(output) {
-            Ok(message) => message,
-            Err(EdgeToolMessageError::Recoverable(err)) if !err.is_fatal() => {
-                err.into_error_message(&tool.name)
-            }
-            Err(EdgeToolMessageError::Recoverable(err)) => {
-                return Err(GraphError::Invalid(err.to_string()));
-            }
-            Err(EdgeToolMessageError::Fatal {
-                expected,
-                reason,
-                raw,
-            }) => {
-                return Err(GraphError::Invalid(format!(
-                    "tool '{}' output decode failed; expected {expected}: {reason}; raw: {raw}",
-                    tool.name
-                )));
-            }
-        };
-        message = message.with_call_id(call_id);
-        ctx.push_history(&checkpoint.session_id, &payload.agent_id, message)
-            .await?;
-        ctx.compact_history(&checkpoint.session_id).await?;
-
-        let mut child_calls = Vec::new();
-        if let Some(waiting_pos) = waiting
-            .iter()
-            .position(|call| call.tool_name == active_call.tool_name)
-        {
-            let next = waiting.remove(waiting_pos);
-            child_calls.push(ContinuationChildCall {
-                child_index: next.child_index,
-                call_id: next.call_id.clone(),
-                input: next.args,
-            });
-            active.push(EdgeActiveToolCall {
-                call_id: next.call_id,
-                tool_name: next.tool_name,
-                child_index: next.child_index,
-            });
-        }
-
-        if active.is_empty() {
-            checkpoint.phase = EdgeAgentPhase::Dispatch;
-        }
-        if child_calls.is_empty() {
-            persist_checkpoint(checkpoint.clone())
-        } else {
-            transition_with_children(checkpoint.clone(), child_calls)
-        }
-    }
-
-    fn tool_runtime(&self, index: usize) -> Result<&EdgeAgentToolRuntime, GraphError> {
-        self.tools
-            .get(index)
-            .map(Arc::as_ref)
-            .ok_or_else(|| GraphError::Invalid(format!("tool runtime {index} is missing")))
-    }
 }
 
 #[cfg(test)]
@@ -794,9 +472,9 @@ mod tests {
         });
         let envelope =
             to_value(EdgeToolResult::Success { value: output }).expect("envelope should encode");
-        let message = decode_handler_tool_message::<MarkerLikeOutput>(envelope)
+        let result = decode_handler_tool_result::<MarkerLikeOutput>(envelope)
             .expect("marker-shaped output should decode");
 
-        assert!(message.content.contains("legitimate"));
+        assert!(result.message.content.contains("legitimate"));
     }
 }

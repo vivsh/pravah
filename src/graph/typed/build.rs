@@ -583,6 +583,9 @@ where
         let key = guard.next_handler_key(&name);
         build.payload.agent_id = key.as_str().to_owned();
         build.payload.configure_handler_key = key.as_str().to_owned();
+        if build.payload.control_handler_key.is_some() {
+            build.payload.control_handler_key = Some(format!("{}::control", key.as_str()));
+        }
         let payload = match to_value(&build.payload) {
             Ok(payload) => payload,
             Err(err) => {

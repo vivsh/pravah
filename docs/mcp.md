@@ -8,7 +8,7 @@ Enable MCP support:
 
 ```toml
 [dependencies]
-pravah = { version = "0.4.8", features = ["mcp"] }
+pravah = { version = "0.4.9", features = ["mcp"] }
 ```
 
 ## Register an MCP Server
@@ -129,6 +129,20 @@ let config = AgentConfig::new(
 The filter may capture invocation-specific values. It receives read-only
 `ToolInfo`, including the tool name, description, and input schema. It cannot
 add undeclared tools or alter their prepared order.
+
+An agent controller may further change the visible subset between model turns:
+
+```rust
+let decision = AgentDecision::redirect()
+    .guidance("Use only policy resources for the next step.")
+    .tools(ToolFilter::new(|tool| tool.name() == "search_policy"));
+```
+
+This selection is limited to tools accepted by the original invocation
+configuration and remains active until another redirect changes it. MCP text
+already resolved for the invocation remains available as system context;
+changing tool visibility neither rereads resources nor rewrites conversation
+history.
 
 Tool names are derived from their Rust input types. For example,
 `SearchKnowledge` becomes `search_knowledge`.

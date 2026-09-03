@@ -9,12 +9,17 @@ use serde::de::DeserializeOwned;
 
 use crate::Context;
 
+use super::control::{AgentDecision, AgentLoop, AgentLoopData};
 use super::{AgentConfig, Toolset};
 use crate::graph::error::GraphError;
 use crate::graph::value::{Value, from_value};
 
 type ConfigureCall =
     dyn Fn(Value, Context) -> BoxFuture<'static, Result<AgentConfig, GraphError>> + Send + Sync;
+
+type ControlCall = dyn Fn(AgentLoopData, Context) -> BoxFuture<'static, Result<AgentDecision, GraphError>>
+    + Send
+    + Sync;
 
 #[derive(Clone)]
 pub(crate) struct AgentConfigurator {
@@ -45,8 +50,25 @@ impl AgentConfigurator {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct AgentController {
+    call: Arc<ControlCall>,
+}
+
+impl AgentController {
+    /// Evaluates one explicit agent-loop intervention boundary.
+    pub(crate) async fn control(
+        &self,
+        data: AgentLoopData,
+        ctx: Context,
+    ) -> Result<AgentDecision, GraphError> {
+        (self.call)(data, ctx).await
+    }
+}
+
 struct AgentDefinition {
     tools: Toolset,
+    controller: Option<AgentController>,
     configure: Option<AgentConfigurator>,
     errors: Vec<String>,
 }
@@ -65,6 +87,7 @@ impl<T> Agent<T> {
         Self {
             definition: AgentDefinition {
                 tools: Toolset::default(),
+                controller: None,
                 configure: None,
                 errors: Vec::new(),
             },
@@ -81,6 +104,53 @@ impl<T> Agent<T> {
             return self;
         }
         self.definition.tools = build(self.definition.tools);
+        self
+    }
+
+    /// Registers an optional asynchronous agent-loop controller.
+    ///
+    /// The controller receives typed invocation input and checkpointed loop
+    /// observations at explicit boundaries. It must be declared before the
+    /// terminal configuration function.
+    pub fn control<Fut, E>(mut self, control: fn(AgentLoop<T>, Context) -> Fut) -> Self
+    where
+        T: 'static + DeserializeOwned + JsonSchema + Send + Sync,
+        Fut: Future<Output = Result<AgentDecision, E>> + Send + 'static,
+        E: Error + Send + Sync + 'static,
+    {
+        if self.definition.configure.is_some() {
+            self.definition
+                .errors
+                .push("agent control must be declared before configure".into());
+        } else if self.definition.controller.is_some() {
+            self.definition
+                .errors
+                .push("agent control may only be declared once".into());
+        } else {
+            self.definition.controller = Some(AgentController {
+                call: Arc::new(move |data, ctx| {
+                    async move {
+                        let input = from_value::<T>(data.input.clone()).map_err(|err| {
+                            GraphError::AgentControl {
+                                agent: data.agent_id.clone(),
+                                reason: format!(
+                                    "failed to decode agent input '{}': {err}",
+                                    T::schema_name()
+                                ),
+                            }
+                        })?;
+                        let agent = data.agent_id.clone();
+                        control(AgentLoop::from_data(input, data), ctx)
+                            .await
+                            .map_err(|err| GraphError::AgentControl {
+                                agent,
+                                reason: err.to_string(),
+                            })
+                    }
+                    .boxed()
+                }),
+            });
+        }
         self
     }
 
@@ -129,9 +199,17 @@ impl<T> Agent<T> {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (Toolset, Option<AgentConfigurator>, Vec<String>) {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Toolset,
+        Option<AgentController>,
+        Option<AgentConfigurator>,
+        Vec<String>,
+    ) {
         (
             self.definition.tools,
+            self.definition.controller,
             self.definition.configure,
             self.definition.errors,
         )

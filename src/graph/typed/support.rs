@@ -24,8 +24,13 @@ pub(super) fn namespace_graph_handlers(graph: &mut UntypedGraph, prefix: &str) {
             | NodeKind::WorkHandler { key }
             | NodeKind::Load { key, .. }
             | NodeKind::Store { key, .. } => namespace_handler_key(key, prefix),
-            NodeKind::Continuation { key, children, .. } => {
+            NodeKind::Continuation {
+                key,
+                payload,
+                children,
+            } => {
                 namespace_handler_key(key, prefix);
+                crate::graph::agent::namespace_payload_handler(payload, key.as_str());
                 for child in children {
                     namespace_graph_handlers(child, prefix);
                 }

@@ -41,6 +41,26 @@ pub enum GraphError {
     #[error("agent configuration is invalid: {0}")]
     AgentConfigValidation(String),
 
+    /// An agent's intervention controller could not evaluate a boundary.
+    #[error("agent control failed for '{agent}': {reason}")]
+    AgentControl { agent: String, reason: String },
+
+    /// An agent controller returned an invalid intervention decision.
+    #[error("agent control decision is invalid: {0}")]
+    AgentControlValidation(String),
+
+    /// An application policy deliberately stopped an agent step.
+    #[error("agent intervention aborted for '{agent}': {reason}")]
+    AgentPolicyAbort { agent: String, reason: String },
+
+    /// External input could not resume a suspended agent intervention.
+    #[error("agent resume decision is invalid: {0}")]
+    AgentResumeValidation(String),
+
+    /// A forced final model turn did not produce structured output.
+    #[error("agent conclusion failed for '{agent}': {reason}")]
+    AgentConclusion { agent: String, reason: String },
+
     /// An LLM client could not be created or executed.
     #[error("agent client operation failed: {0}")]
     AgentClient(String),

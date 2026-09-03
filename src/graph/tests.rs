@@ -764,9 +764,102 @@ impl ContinuationHandler for StaticStartContinuation {
                 outputs: vec![checkpoint],
                 writes: Vec::new(),
                 child_calls: Vec::new(),
+                suspension: None,
             })
         })
     }
+}
+
+struct SuspendOnceContinuation;
+
+impl ContinuationHandler for SuspendOnceContinuation {
+    fn start<'a>(
+        &'a self,
+        _payload: &'a Value,
+        _state: Option<Value>,
+        inputs: Vec<Value>,
+        _ctx: ContinuationContext,
+    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
+        Box::pin(async move {
+            Ok(ContinuationTransition {
+                checkpoint: inputs.into_iter().next(),
+                state: None,
+                outputs: Vec::new(),
+                writes: Vec::new(),
+                child_calls: Vec::new(),
+                suspension: Some(ContinuationSuspension {
+                    resume_type: number_type("Number"),
+                    payload: rv!({"prompt": "replacement number"}),
+                }),
+            })
+        })
+    }
+
+    fn advance<'a>(
+        &'a self,
+        _payload: &'a Value,
+        _checkpoint: Value,
+        event: ContinuationEvent,
+        _ctx: ContinuationContext,
+    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
+        Box::pin(async move {
+            let ContinuationEvent::Resume { input } = event else {
+                return Err(GraphError::Invalid("expected continuation resume".into()));
+            };
+            Ok(ContinuationTransition {
+                checkpoint: None,
+                state: None,
+                outputs: vec![input],
+                writes: Vec::new(),
+                child_calls: Vec::new(),
+                suspension: None,
+            })
+        })
+    }
+}
+
+fn suspension_continuation_graph() -> UntypedGraph {
+    let mut builder = UntypedGraphBuilder::new("continuation_suspension");
+    let input = builder.edge("input", number_type("Number"));
+    let output = builder.edge("output", number_type("Number"));
+    builder.set_entry(input).set_exit(output);
+    builder.node(
+        "continuation",
+        NodeKind::Continuation {
+            key: HandlerKey::new("continuation"),
+            payload: Value::NULL,
+            children: Vec::new(),
+        },
+        vec![input],
+        vec![output],
+    );
+    builder.build().expect("graph should build")
+}
+
+/// Verifies a non-agent continuation can suspend, restore, and receive resume input.
+#[tokio::test]
+async fn continuation_owned_suspension_round_trips_through_snapshot() {
+    let graph = suspension_continuation_graph();
+    let mut registry = HandlerRegistry::new();
+    registry
+        .insert_continuation("continuation", SuspendOnceContinuation)
+        .expect("handler should insert");
+    let prepared = PreparedGraph::new(graph, registry).expect("graph should prepare");
+    let mut runtime = prepared.start(rv!(1)).expect("runtime should build");
+
+    assert_eq!(
+        runtime.next(ctx()).await.expect("continuation should run"),
+        Step::Suspend(rv!({"prompt": "replacement number"}))
+    );
+    let snapshot = runtime.snapshot().expect("snapshot should encode");
+    let mut runtime = prepared.restore(snapshot).expect("snapshot should restore");
+    assert_eq!(
+        runtime
+            .resume(rv!(9), ctx())
+            .await
+            .expect("continuation should resume"),
+        Step::Done(rv!(9))
+    );
 }
 
 async fn run_static_continuation_transition(
@@ -814,6 +907,7 @@ impl ContinuationHandler for AssertNoServiceSmuggling {
                 outputs: vec![rv!(!service_was_smuggled)],
                 writes: Vec::new(),
                 child_calls: Vec::new(),
+                suspension: None,
             })
         })
     }
@@ -864,9 +958,32 @@ async fn continuation_rejects_outputs_with_checkpoint() {
         outputs: vec![rv!(1)],
         writes: Vec::new(),
         child_calls: Vec::new(),
+        suspension: None,
     })
     .await
     .expect_err("outputs plus checkpoint should fail");
+    assert!(matches!(
+        err,
+        GraphError::InvalidContinuationTransition { .. }
+    ));
+}
+
+/// Verifies a continuation suspension cannot combine external pause with output mutation.
+#[tokio::test]
+async fn continuation_rejects_suspension_with_outputs() {
+    let err = run_static_continuation_transition(ContinuationTransition {
+        checkpoint: Some(rv!({"state": true})),
+        state: None,
+        outputs: vec![rv!(1)],
+        writes: Vec::new(),
+        child_calls: Vec::new(),
+        suspension: Some(ContinuationSuspension {
+            resume_type: number_type("Number"),
+            payload: rv!({"prompt": "number"}),
+        }),
+    })
+    .await
+    .expect_err("suspension plus outputs should fail");
     assert!(matches!(
         err,
         GraphError::InvalidContinuationTransition { .. }
@@ -904,6 +1021,7 @@ async fn failed_continuation_write_plan_does_not_partially_write_edges() {
                         value: rv!(1),
                     }],
                     child_calls: Vec::new(),
+                    suspension: None,
                 },
             },
         )
@@ -937,6 +1055,7 @@ impl ContinuationHandler for PollThenComplete {
                 outputs: Vec::new(),
                 writes: Vec::new(),
                 child_calls: Vec::new(),
+                suspension: None,
             })
         })
     }
@@ -958,6 +1077,7 @@ impl ContinuationHandler for PollThenComplete {
                 outputs: vec![rv!(checkpoint.as_i64().unwrap_or_default() + 1)],
                 writes: Vec::new(),
                 child_calls: Vec::new(),
+                suspension: None,
             })
         })
     }
@@ -984,6 +1104,7 @@ impl ContinuationHandler for StartChildThenError {
                     call_id: "child-1".into(),
                     input: inputs.into_iter().next().unwrap_or(Value::NULL),
                 }],
+                suspension: None,
             })
         })
     }
@@ -1027,6 +1148,7 @@ impl ContinuationHandler for StartInvalidChildInput {
                     call_id: "child-1".into(),
                     input: rv!("not a number"),
                 }],
+                suspension: None,
             })
         })
     }
@@ -1912,6 +2034,7 @@ impl ContinuationHandler for AddPayloadContinuation {
                 })],
                 writes: Vec::new(),
                 child_calls: Vec::new(),
+                suspension: None,
             })
         })
     }
@@ -2308,27 +2431,6 @@ fn provider_agent(root: Agent<EdgeProviderConfigAgentInput>) -> Agent<EdgeAgentO
     root.configure(configure_provider_agent)
 }
 
-#[derive(Debug)]
-struct EdgeHistoryRecordError;
-
-impl std::fmt::Display for EdgeHistoryRecordError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("record failed")
-    }
-}
-
-impl std::error::Error for EdgeHistoryRecordError {}
-
-struct FailingEdgeHistoryStore;
-
-impl crate::legacy::HistoryStore for FailingEdgeHistoryStore {
-    type Error = EdgeHistoryRecordError;
-
-    async fn record(&self, _entry: &crate::legacy::HistoryEntry) -> Result<(), Self::Error> {
-        Err(EdgeHistoryRecordError)
-    }
-}
-
 #[tokio::test]
 async fn typed_edge_agent_without_tools_uses_structured_output() {
     let flow = Flow::<EdgeAgentInput>::root()
@@ -2408,6 +2510,438 @@ fn agent_definition_errors_accumulate_until_compile() {
     );
     assert!(repeated.to_string().contains("only be declared once"));
     assert!(late_tools.to_string().contains("before configure"));
+}
+
+/// Verifies controller declarations are unique and must precede terminal configuration.
+#[test]
+fn agent_control_definition_errors_accumulate_until_compile() {
+    let repeated = match compile(repeated_control_flow) {
+        Ok(_) => panic!("control should be declared only once"),
+        Err(err) => err,
+    };
+    let late = match compile(control_after_configure_flow) {
+        Ok(_) => panic!("control after configure should fail"),
+        Err(err) => err,
+    };
+
+    assert!(repeated.to_string().contains("control"));
+    assert!(repeated.to_string().contains("only be declared once"));
+    assert!(late.to_string().contains("control"));
+    assert!(late.to_string().contains("before configure"));
+}
+
+/// Verifies result-aware control narrows and later widens tools in prepared order.
+#[tokio::test]
+async fn adaptive_agent_control_observes_boundaries_and_changes_tool_visibility() {
+    let flow = Flow::<EdgeAgentInput>::root()
+        .agent(adaptive_agent)
+        .finish::<EdgeAgentInput>()
+        .expect("controlled agent should compile");
+    let factory = EdgeScriptedFactory::new()
+        .then_tool_calls(vec![edge_tool_call(
+            "echo-call",
+            "echo_in",
+            serde_json::json!({ "text": "first" }),
+        )])
+        .then_tool_calls(vec![edge_tool_call(
+            "suffix-call",
+            "suffix_in",
+            serde_json::json!({ "text": "second" }),
+        )])
+        .then_output(serde_json::json!({ "text": "done" }));
+    let trace = Arc::new(ControlTrace::default());
+    let mut deps = Deps::default();
+    deps.insert(Arc::clone(&trace));
+    let ctx = ctx().with_deps(deps).with_client_factory(factory.clone());
+    let mut runtime = flow
+        .runtime(EdgeAgentInput { text: "hi".into() })
+        .expect("runtime should build");
+
+    let output = loop {
+        match runtime
+            .next(ctx.clone())
+            .await
+            .expect("agent step should run")
+        {
+            Step::Continue => {}
+            Step::Done(value) => break flow.decode_output(value).expect("output should decode"),
+            Step::Suspend(_) => panic!("controller should not suspend"),
+        }
+    };
+
+    assert_eq!(output.text, "done");
+    let options = factory.options();
+    let exposed = options
+        .iter()
+        .map(|option| {
+            option
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        exposed,
+        vec![
+            vec!["echo_in", "suffix_in"],
+            vec!["suffix_in"],
+            vec!["echo_in", "suffix_in"]
+        ]
+    );
+    let observations = trace.0.lock().unwrap_or_else(|err| err.into_inner());
+    let points = observations
+        .iter()
+        .map(|observation| observation.point)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        points,
+        vec![
+            AgentInterventionPoint::BeforeModel,
+            AgentInterventionPoint::BeforeTools,
+            AgentInterventionPoint::AfterTools,
+            AgentInterventionPoint::BeforeTools,
+            AgentInterventionPoint::AfterTools,
+        ]
+    );
+    assert_eq!(observations[2].model_turns, 1);
+    assert_eq!(observations[4].model_turns, 2);
+    assert_eq!(observations[3].active_tools, vec!["suffix_in"]);
+    assert_eq!(observations[4].result_errors, vec![false]);
+}
+
+/// Verifies inactive calls are not executed and forced conclusion disables every tool.
+#[tokio::test]
+async fn agent_control_recovers_from_hidden_tool_calls_and_forces_conclusion() {
+    let flow = Flow::<EdgeAgentInput>::root()
+        .agent(hidden_tool_agent)
+        .finish::<EdgeAgentInput>()
+        .expect("hidden-tool agent should compile");
+    let factory = EdgeScriptedFactory::new()
+        .then_tool_calls(vec![
+            edge_tool_call(
+                "hidden-call",
+                "suffix_in",
+                serde_json::json!({ "text": "hidden" }),
+            ),
+            edge_tool_call(
+                "valid-call",
+                "echo_in",
+                serde_json::json!({ "text": "valid" }),
+            ),
+        ])
+        .then_output(serde_json::json!({ "text": "concluded" }));
+    let observed = Arc::new(HiddenToolResults::default());
+    let mut deps = Deps::default();
+    deps.insert(Arc::clone(&observed));
+    let ctx = ctx().with_deps(deps).with_client_factory(factory.clone());
+    let mut runtime = flow
+        .runtime(EdgeAgentInput { text: "hi".into() })
+        .expect("runtime should build");
+
+    let output = loop {
+        match runtime
+            .next(ctx.clone())
+            .await
+            .expect("agent step should run")
+        {
+            Step::Continue => {}
+            Step::Done(value) => break flow.decode_output(value).expect("output should decode"),
+            Step::Suspend(_) => panic!("controller should not suspend"),
+        }
+    };
+
+    assert_eq!(output.text, "concluded");
+    assert_eq!(
+        *observed.0.lock().unwrap_or_else(|err| err.into_inner()),
+        vec![("suffix_in".into(), true), ("echo_in".into(), false)]
+    );
+    let options = factory.options();
+    assert_eq!(
+        options[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["echo_in"]
+    );
+    assert!(options[1].tools.is_empty());
+    let calls = factory.calls();
+    assert!(calls[1].iter().any(|message| {
+        matches!(message.role, Role::Tool { .. })
+            && message.content.contains("tool unavailable for this turn")
+    }));
+    assert!(calls[1].iter().any(|message| {
+        matches!(message.role, Role::Tool { .. }) && message.content.contains("VALID")
+    }));
+}
+
+/// Verifies a policy abort is retryable and commits no checkpoint or history changes.
+#[tokio::test]
+async fn agent_policy_abort_leaves_runtime_retryable() {
+    let flow = Flow::<EdgeAgentInput>::root()
+        .agent(aborting_agent)
+        .finish::<EdgeAgentInput>()
+        .expect("aborting agent should compile");
+    let mut runtime = flow
+        .runtime(EdgeAgentInput { text: "hi".into() })
+        .expect("runtime should build");
+    let ctx = ctx();
+    assert_eq!(
+        runtime
+            .next(ctx.clone())
+            .await
+            .expect("configure should run"),
+        Step::Continue
+    );
+    let before = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
+        .expect("snapshot should encode as JSON");
+
+    let err = runtime
+        .next(ctx)
+        .await
+        .expect_err("policy should abort the boundary");
+    assert!(matches!(err, GraphError::AgentPolicyAbort { .. }));
+    let after = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
+        .expect("snapshot should encode as JSON");
+    assert_eq!(before, after);
+}
+
+/// Verifies forced conclusion rejects invalid structured output before history mutation.
+#[tokio::test]
+async fn forced_agent_conclusion_validates_output_before_commit() {
+    let flow = Flow::<EdgeAgentInput>::root()
+        .agent(concluding_agent)
+        .finish::<EdgeAgentInput>()
+        .expect("concluding agent should compile");
+    let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "wrong": true }));
+    let ctx = ctx().with_client_factory(factory);
+    let mut runtime = flow
+        .runtime(EdgeAgentInput { text: "hi".into() })
+        .expect("runtime should build");
+    assert_eq!(
+        runtime
+            .next(ctx.clone())
+            .await
+            .expect("configure should run"),
+        Step::Continue
+    );
+    assert_eq!(
+        runtime
+            .next(ctx.clone())
+            .await
+            .expect("conclusion decision should commit"),
+        Step::Continue
+    );
+    let before = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
+        .expect("snapshot should encode as JSON");
+
+    let err = runtime
+        .next(ctx)
+        .await
+        .expect_err("invalid conclusion output should fail");
+    assert!(matches!(err, GraphError::AgentConclusion { .. }));
+    let after = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
+        .expect("snapshot should encode as JSON");
+    assert_eq!(before, after);
+}
+
+/// Verifies an agent suspension survives JSON and CBOR restore and resumes at its owner.
+#[tokio::test]
+async fn agent_controller_suspension_restores_and_accepts_typed_resume() {
+    let flow = Flow::<EdgeAgentInput>::root()
+        .agent(suspending_agent)
+        .finish::<EdgeAgentInput>()
+        .expect("suspending agent should compile");
+    let factory = EdgeScriptedFactory::new()
+        .then_tool_calls(vec![edge_tool_call(
+            "echo-call",
+            "echo_in",
+            serde_json::json!({ "text": "hello" }),
+        )])
+        .then_output(serde_json::json!({ "text": "done" }));
+    let ctx = ctx().with_client_factory(factory);
+    let mut runtime = flow
+        .runtime(EdgeAgentInput { text: "hi".into() })
+        .expect("runtime should build");
+
+    let payload = loop {
+        match runtime
+            .next(ctx.clone())
+            .await
+            .expect("agent step should run")
+        {
+            Step::Continue => {}
+            Step::Suspend(payload) => break payload,
+            Step::Done(_) => panic!("agent should suspend before its tool"),
+        }
+    };
+    let suspension: AgentSuspension = from_value(payload).expect("agent suspension should decode");
+    assert_eq!(suspension.point(), AgentInterventionPoint::BeforeTools);
+    assert_eq!(suspension.payload(), &rv!({ "reason": "approval" }));
+
+    let snapshot = runtime.snapshot().expect("snapshot should encode");
+    let json = serde_json::to_vec(&snapshot).expect("snapshot should encode as JSON");
+    let restored_json: Snapshot =
+        serde_json::from_slice(&json).expect("snapshot should decode from JSON");
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&restored_json, &mut cbor).expect("snapshot should encode as CBOR");
+    let restored_cbor: Snapshot =
+        ciborium::from_reader(cbor.as_slice()).expect("snapshot should decode from CBOR");
+    let mut runtime = flow
+        .prepared()
+        .restore(restored_cbor)
+        .expect("snapshot should restore");
+
+    let before_invalid = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
+        .expect("snapshot should encode as JSON");
+    let invalid = AgentResume::Redirect {
+        guidance: None,
+        tools: Some(vec!["echo_in".into(), "echo_in".into()]),
+    };
+    let err = runtime
+        .resume(
+            to_value(invalid).expect("resume should encode"),
+            ctx.clone(),
+        )
+        .await
+        .expect_err("duplicate resume tools should fail");
+    assert!(matches!(err, GraphError::AgentResumeValidation(_)));
+    let after_invalid = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
+        .expect("snapshot should encode as JSON");
+    assert_eq!(before_invalid, after_invalid);
+
+    assert_eq!(
+        runtime
+            .resume(
+                to_value(AgentResume::Continue).expect("resume should encode"),
+                ctx.clone(),
+            )
+            .await
+            .expect("resume should succeed"),
+        Step::Continue
+    );
+    let output = loop {
+        match runtime
+            .next(ctx.clone())
+            .await
+            .expect("agent step should run")
+        {
+            Step::Continue => {}
+            Step::Done(value) => break flow.decode_output(value).expect("output should decode"),
+            Step::Suspend(_) => panic!("committed boundary should not be reevaluated"),
+        }
+    };
+    assert_eq!(output.text, "done");
+}
+
+/// Verifies JSON invocation routes an `AgentResume` value to a controlled agent.
+#[tokio::test]
+async fn json_invoker_resumes_agent_controller_suspension() {
+    let flow = Flow::<EdgeAgentInput>::root()
+        .agent(suspending_agent)
+        .finish::<EdgeAgentInput>()
+        .expect("suspending agent should compile");
+    let (graph, registry) = flow.into_parts();
+    let invoker = JsonInvoker::new(graph, registry).expect("invoker should prepare");
+    let factory = EdgeScriptedFactory::new()
+        .then_tool_calls(vec![edge_tool_call(
+            "echo-call",
+            "echo_in",
+            serde_json::json!({ "text": "hello" }),
+        )])
+        .then_output(serde_json::json!({ "text": "done" }));
+    let ctx = ctx().with_client_factory(factory);
+    let mut response = invoker
+        .invoke(
+            JsonRequest::Start {
+                version: JSON_WIRE_VERSION,
+                input: serde_json::json!({"text": "hi"}),
+            },
+            ctx.clone(),
+        )
+        .await
+        .expect("agent should start");
+
+    let snapshot = advance_json_until_agent_suspend(&invoker, response, ctx.clone()).await;
+
+    response = invoker
+        .invoke(
+            JsonRequest::Resume {
+                version: JSON_WIRE_VERSION,
+                snapshot,
+                input: serde_json::to_value(AgentResume::Continue)
+                    .expect("resume should encode as JSON"),
+            },
+            ctx.clone(),
+        )
+        .await
+        .expect("agent should resume");
+    let output = advance_json_until_done(&invoker, response, ctx).await;
+    assert_eq!(output, serde_json::json!({"text": "done"}));
+}
+
+/// Advances stateless JSON requests until the controlled agent suspends.
+async fn advance_json_until_agent_suspend(
+    invoker: &JsonInvoker,
+    mut response: JsonResponse,
+    ctx: Context,
+) -> Snapshot {
+    loop {
+        match response {
+            JsonResponse::Continue { snapshot, .. } => {
+                response = invoker
+                    .invoke(
+                        JsonRequest::Next {
+                            version: JSON_WIRE_VERSION,
+                            snapshot,
+                        },
+                        ctx.clone(),
+                    )
+                    .await
+                    .expect("agent should advance");
+            }
+            JsonResponse::Suspend {
+                payload,
+                resume_type,
+                snapshot,
+                ..
+            } => {
+                let suspension: AgentSuspension = serde_json::from_value(payload)
+                    .expect("agent suspension should decode from JSON");
+                assert_eq!(suspension.point(), AgentInterventionPoint::BeforeTools);
+                assert_eq!(resume_type, AgentResume::schema_name());
+                return snapshot;
+            }
+            JsonResponse::Done { .. } => panic!("agent should suspend before completion"),
+        }
+    }
+}
+
+/// Advances resumed stateless JSON requests until the agent completes.
+async fn advance_json_until_done(
+    invoker: &JsonInvoker,
+    mut response: JsonResponse,
+    ctx: Context,
+) -> JsonValue {
+    loop {
+        match response {
+            JsonResponse::Continue { snapshot, .. } => {
+                response = invoker
+                    .invoke(
+                        JsonRequest::Next {
+                            version: JSON_WIRE_VERSION,
+                            snapshot,
+                        },
+                        ctx.clone(),
+                    )
+                    .await
+                    .expect("agent should advance after resume");
+            }
+            JsonResponse::Done { output, .. } => return output,
+            JsonResponse::Suspend { .. } => panic!("committed boundary should not suspend again"),
+        }
+    }
 }
 
 /// Verifies activation is checkpointed once and memory remains outside conversation history.
@@ -2526,60 +3060,6 @@ async fn typed_edge_agent_provider_config_reaches_client_options() {
     );
 }
 
-#[tokio::test]
-async fn graph_runtime_inject_message_appends_at_dispatch_boundary() {
-    let flow = Flow::<EdgeAgentInput>::root()
-        .agent(edge_agent)
-        .finish::<EdgeAgentInput>()
-        .expect("agent flow should compile");
-    let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
-        .expect("runtime should build");
-
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    runtime
-        .inject_message("extra context")
-        .await
-        .expect("inject should succeed at dispatch boundary");
-
-    let snapshot = runtime.snapshot().expect("snapshot should build");
-    assert!(
-        snapshot
-            .history()
-            .entries()
-            .iter()
-            .any(|entry| entry.message.content == "extra context")
-    );
-}
-
-#[tokio::test]
-async fn graph_runtime_inject_message_store_failure_does_not_commit() {
-    let flow = Flow::<EdgeAgentInput>::root()
-        .agent(edge_agent)
-        .finish::<EdgeAgentInput>()
-        .expect("agent flow should compile");
-    let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
-        .expect("runtime should build");
-
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    runtime = runtime.with_store(FailingEdgeHistoryStore);
-    let err = runtime
-        .inject_message("extra context")
-        .await
-        .expect_err("injected message record should fail");
-    assert!(matches!(err, GraphError::HistoryPersistence(_)));
-    let snapshot = runtime.snapshot().expect("snapshot should build");
-    assert!(
-        snapshot
-            .history()
-            .entries()
-            .iter()
-            .all(|entry| entry.message.content != "extra context"),
-        "failed injected record must not commit history"
-    );
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct EchoIn {
     text: String,
@@ -2638,6 +3118,185 @@ fn edge_agent_with_duplicate_tools(root: Agent<EdgeAgentInput>) -> Agent<EdgeAge
     root.tools(duplicate_tools).configure(configure_edge_agent)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ControlObservation {
+    point: AgentInterventionPoint,
+    active_tools: Vec<String>,
+    result_errors: Vec<bool>,
+    model_turns: u64,
+}
+
+#[derive(Default)]
+struct ControlTrace(Mutex<Vec<ControlObservation>>);
+
+async fn adaptive_controller(
+    loop_: AgentLoop<EdgeAgentInput>,
+    ctx: Context,
+) -> Result<AgentDecision, GraphError> {
+    let observation = ControlObservation {
+        point: loop_.point(),
+        active_tools: loop_
+            .active_tools()
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect(),
+        result_errors: loop_
+            .results()
+            .iter()
+            .map(AgentToolResult::is_error)
+            .collect(),
+        model_turns: loop_.metrics().model_turns(),
+    };
+    ctx.require::<ControlTrace>()
+        .map_err(|err| GraphError::AgentControl {
+            agent: loop_.agent_id().to_owned(),
+            reason: err.to_string(),
+        })?
+        .0
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(observation);
+    let result = match (loop_.point(), loop_.control_state().and_then(Value::as_u64)) {
+        (AgentInterventionPoint::AfterTools, None) => AgentDecision::redirect()
+            .guidance("Use the suffix tool next")
+            .tools(ToolFilter::new(|tool| tool.name() == "suffix_in"))
+            .with_state(Value::from(1_u64)),
+        (AgentInterventionPoint::AfterTools, Some(1)) => AgentDecision::redirect()
+            .tools(ToolFilter::all())
+            .with_state(Value::from(2_u64)),
+        _ => AgentDecision::continue_(),
+    };
+    Ok(result)
+}
+
+fn adaptive_agent(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
+    root.tools(two_tools)
+        .control(adaptive_controller)
+        .configure(configure_edge_agent)
+}
+
+async fn suspend_before_tools_controller(
+    loop_: AgentLoop<EdgeAgentInput>,
+    _ctx: Context,
+) -> Result<AgentDecision, GraphError> {
+    if loop_.point() == AgentInterventionPoint::BeforeTools {
+        Ok(AgentDecision::suspend(rv!({ "reason": "approval" })))
+    } else {
+        Ok(AgentDecision::continue_())
+    }
+}
+
+fn suspending_agent(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
+    root.tools(echo_tools)
+        .control(suspend_before_tools_controller)
+        .configure(configure_edge_agent)
+}
+
+#[derive(Default)]
+struct HiddenToolResults(Mutex<Vec<(String, bool)>>);
+
+async fn hidden_tool_controller(
+    loop_: AgentLoop<EdgeAgentInput>,
+    ctx: Context,
+) -> Result<AgentDecision, GraphError> {
+    if loop_.point() != AgentInterventionPoint::AfterTools {
+        return Ok(AgentDecision::continue_());
+    }
+    let results: Vec<(String, bool)> = loop_
+        .results()
+        .iter()
+        .map(|result| (result.tool_name().to_owned(), result.is_error()))
+        .collect();
+    ctx.require::<HiddenToolResults>()
+        .map_err(|err| GraphError::AgentControl {
+            agent: loop_.agent_id().to_owned(),
+            reason: err.to_string(),
+        })?
+        .0
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .extend(results);
+    Ok(AgentDecision::conclude(
+        "Return the structured answer from the available evidence",
+    ))
+}
+
+async fn configure_echo_only_agent(
+    input: EdgeAgentInput,
+    ctx: Context,
+) -> Result<AgentConfig, GraphError> {
+    configure_edge_agent(input, ctx)
+        .await
+        .map(|config| config.tool_filter(ToolFilter::new(|tool| tool.name() == "echo_in")))
+}
+
+fn hidden_tool_agent(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
+    root.tools(two_tools)
+        .control(hidden_tool_controller)
+        .configure(configure_echo_only_agent)
+}
+
+async fn abort_controller(
+    _loop: AgentLoop<EdgeAgentInput>,
+    _ctx: Context,
+) -> Result<AgentDecision, GraphError> {
+    Ok(AgentDecision::abort(
+        "application policy declined this turn",
+    ))
+}
+
+fn aborting_agent(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
+    root.control(abort_controller)
+        .configure(configure_edge_agent)
+}
+
+async fn conclude_controller(
+    _loop: AgentLoop<EdgeAgentInput>,
+    _ctx: Context,
+) -> Result<AgentDecision, GraphError> {
+    Ok(AgentDecision::conclude(
+        "Return the final structured answer",
+    ))
+}
+
+fn concluding_agent(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
+    root.control(conclude_controller)
+        .configure(configure_edge_agent)
+}
+
+async fn continue_controller(
+    _loop: AgentLoop<EdgeAgentInput>,
+    _ctx: Context,
+) -> Result<AgentDecision, GraphError> {
+    Ok(AgentDecision::continue_())
+}
+
+async fn continue_output_controller(
+    _loop: AgentLoop<EdgeAgentOutput>,
+    _ctx: Context,
+) -> Result<AgentDecision, GraphError> {
+    Ok(AgentDecision::continue_())
+}
+
+fn repeated_control_agent(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
+    root.control(continue_controller)
+        .control(continue_controller)
+        .configure(configure_edge_agent)
+}
+
+fn control_after_configure_agent(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
+    root.configure(configure_edge_agent)
+        .control(continue_output_controller)
+}
+
+fn repeated_control_flow(root: Flow<EdgeAgentInput>) -> Flow<EdgeAgentOutput> {
+    root.agent(repeated_control_agent)
+}
+
+fn control_after_configure_flow(root: Flow<EdgeAgentInput>) -> Flow<EdgeAgentOutput> {
+    root.agent(control_after_configure_agent)
+}
+
 async fn configure_filtered_agent(
     input: EdgeAgentInput,
     _ctx: Context,
@@ -2684,13 +3343,12 @@ async fn typed_edge_agent_tool_handler_round_trips_through_same_vm() {
         .expect("runtime should build");
     let ctx = ctx().with_client_factory(factory.clone());
 
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    let done = match runtime.next(ctx).await.unwrap() {
-        Step::Done(value) => flow.decode_output(value).unwrap(),
-        other => panic!("expected done, got {other:?}"),
+    let done = loop {
+        match runtime.next(ctx.clone()).await.unwrap() {
+            Step::Continue => {}
+            Step::Done(value) => break flow.decode_output(value).unwrap(),
+            other => panic!("expected continue or done, got {other:?}"),
+        }
     };
 
     assert_eq!(
@@ -2805,6 +3463,8 @@ async fn typed_edge_agent_multiple_tool_calls_are_queued_on_single_vm_stack() {
         .expect("runtime should build");
     let ctx = ctx().with_client_factory(factory.clone());
 
+    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
     assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
     assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
     assert_eq!(runtime.state().frames.len(), 2);
@@ -3114,7 +3774,7 @@ fn agent_rejects_obsolete_payload_version() {
         panic!("agent should compile to continuation");
     };
     let mut encoded = serde_json::to_value(&*payload).expect("payload should encode");
-    encoded["version"] = serde_json::json!(1);
+    encoded["version"] = serde_json::json!(2);
     *payload = to_value(encoded).expect("payload should enter runtime domain");
     let err = match test_runtime(graph, rv!({"text": "hello"}), registry) {
         Ok(_) => panic!("obsolete payload should fail preparation"),
@@ -3124,8 +3784,30 @@ fn agent_rejects_obsolete_payload_version() {
     assert!(matches!(err, GraphError::GraphValidation(_)));
     assert!(
         err.to_string()
-            .contains("unsupported agent payload version 1")
+            .contains("unsupported agent payload version 2")
     );
+}
+
+/// Verifies preparation checks controller payload presence against its runtime handler.
+#[test]
+fn agent_rejects_missing_registered_controller() {
+    let flow = Flow::<EdgeAgentInput>::root()
+        .agent(edge_agent)
+        .finish::<EdgeAgentInput>()
+        .expect("agent flow should compile");
+    let (mut graph, registry) = flow.into_parts();
+    let NodeKind::Continuation { key, payload, .. } = &mut graph.nodes[0].kind else {
+        panic!("agent should compile to continuation");
+    };
+    let mut encoded = serde_json::to_value(&*payload).expect("payload should encode");
+    encoded["control_handler_key"] = serde_json::json!(format!("{}::control", key.as_str()));
+    *payload = to_value(encoded).expect("payload should enter runtime domain");
+
+    let err = match PreparedGraph::new(graph, registry) {
+        Ok(_) => panic!("missing controller should fail preparation"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, GraphError::MissingHandler(_)));
 }
 
 /// Verifies an agent payload cannot substitute its configure-handler identity.
@@ -3183,7 +3865,7 @@ async fn snapshot_rejects_obsolete_agent_checkpoint_version() {
     let frame = snapshot.state.frame_mut(0).expect("root frame");
     let checkpoint = &mut Arc::make_mut(&mut frame.checkpoints)[0].value;
     let mut encoded = serde_json::to_value(&*checkpoint).expect("checkpoint should encode");
-    encoded["version"] = serde_json::json!(1);
+    encoded["version"] = serde_json::json!(3);
     *checkpoint = to_value(encoded).expect("checkpoint should enter runtime domain");
 
     assert!(matches!(
@@ -3263,6 +3945,12 @@ fn edge_agent_with_echo_flow(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutp
     root.tools(echo_flow_tools).configure(configure_edge_agent)
 }
 
+fn controlled_agent_with_echo_flow(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
+    root.tools(echo_flow_tools)
+        .control(continue_controller)
+        .configure(configure_edge_agent)
+}
+
 /// Verifies two agent nodes can embed the same tool flow without registry collisions.
 #[test]
 fn typed_flow_reuses_tool_flow_across_agents() {
@@ -3278,6 +3966,33 @@ fn typed_flow_reuses_tool_flow_across_agents() {
 
     assert!(flow.is_ok(), "repeated agent tool flows should compile");
 }
+
+/// Verifies reused controlled agents receive independent controller identities.
+#[test]
+fn typed_flow_reuses_controlled_agent_with_namespaced_handlers() {
+    let root = Flow::<EdgeAgentInput>::root();
+    let (left, right) = root.split(|input| (input.clone(), input));
+    let left = left.agent(controlled_agent_with_echo_flow);
+    let right = right.agent(controlled_agent_with_echo_flow);
+    let flow = left
+        .merge(right, |(left, right)| EdgeAgentOutput {
+            text: format!("{} {}", left.text, right.text),
+        })
+        .finish::<EdgeAgentInput>();
+
+    assert!(flow.is_ok(), "reused controlled agents should compile");
+}
+
+#[derive(Debug)]
+struct EdgeHistoryRecordError;
+
+impl std::fmt::Display for EdgeHistoryRecordError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("record failed")
+    }
+}
+
+impl std::error::Error for EdgeHistoryRecordError {}
 
 #[derive(Clone)]
 struct FailAtHistoryRecord {
@@ -3320,6 +4035,8 @@ async fn agent_history_batch_failure_does_not_commit_a_prefix() {
         .expect("runtime should build")
         .with_store(store);
     let ctx = ctx().with_client_factory(factory);
+    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
     assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
 
     let err = runtime

@@ -100,11 +100,7 @@ pub(super) fn compile_nodes(
                 payload: Arc::new(payload.clone()),
                 children: Arc::from(children.continuation.clone().into_boxed_slice()),
             },
-            NodeKind::Suspend {
-                resume_type,
-                payload,
-            } => CompiledNodeKind::Suspend {
-                resume_type: Arc::from(resume_type.as_str()),
+            NodeKind::Suspend { payload, .. } => CompiledNodeKind::Suspend {
                 payload: Arc::new(payload.clone()),
             },
             NodeKind::Subflow { .. } => CompiledNodeKind::Subflow {
@@ -155,7 +151,10 @@ pub(super) fn compile_nodes(
             kind,
             CompiledNodeKind::Continuation { .. } | CompiledNodeKind::Each { .. }
         );
-        let can_suspend = matches!(kind, CompiledNodeKind::Suspend { .. });
+        let can_suspend = matches!(
+            kind,
+            CompiledNodeKind::Suspend { .. } | CompiledNodeKind::Continuation { .. }
+        );
         nodes.push(CompiledNode {
             id: node.id,
             name: Arc::from(node.name.as_str()),
