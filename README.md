@@ -23,7 +23,7 @@ agent loop.
 
 ```toml
 [dependencies]
-pravah = "0.4.12"
+pravah = "0.4.13"
 ```
 
 ## Flow, Agent, and Chat
@@ -54,14 +54,14 @@ fn approval(root: Flow<Request>) -> Flow<Decision> {
     let attempts = root.local(AttemptCount::default());
 
     root
-        .store(attempts.clone(), |_, mut count| {
+        .store(&attempts, |_, mut count| {
             count.value += 1;
             count
         })
         .map(prepare_request)
         .flow(collect_evidence)
         .agent(reviewer)
-        .load(attempts, |recommendation, count| ApprovalRequest {
+        .load(&attempts, |recommendation, count| ApprovalRequest {
             recommendation,
             attempt: count.value,
         })
@@ -111,10 +111,10 @@ collections, local state, reusable child flows, agents, and suspension points.
 Inputs and outputs remain application types throughout the workflow.
 
 Here, a typed local records the attempt count without changing the value moving
-through the flow. The cloned value is the lightweight `TypedVar` handle, which
-allows the later `load` to reference the same local; `Request` itself does not
-need to implement `Clone`. Pravah prepares the request, gathers evidence, asks
-an agent for a recommendation, and then suspends with an `ApprovalRequest`.
+through the flow. Both `store` and `load` borrow its `TypedVar` handle, and
+`Request` does not need to implement `Clone`. Pravah prepares the request,
+gathers evidence, asks an agent for a recommendation, and then suspends with an
+`ApprovalRequest`.
 
 `Request` is the application's input, while `execution` is one active run of
 the reusable compiled workflow. Its explicit step loop lets the application

@@ -307,14 +307,14 @@ where
     }
 
     /// Reads a typed variable and computes the next edge value.
-    pub fn load<T, S, O, H>(&self, input: TypedEdge<T>, var: TypedVar<S>, func: H) -> TypedEdge<O>
+    pub fn load<T, S, O, H>(&self, input: TypedEdge<T>, var: &TypedVar<S>, func: H) -> TypedEdge<O>
     where
         T: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
         S: 'static + Serialize + DeserializeOwned + JsonSchema,
         O: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
         H: Fn(T, S) -> O + Send + Sync + 'static,
     {
-        if !self.same_graph(&input) || !self.same_var_graph(&var) {
+        if !self.same_graph(&input) || !self.same_var_graph(var) {
             push_error(
                 &self.state,
                 "load: input edge and variable must belong to this typed builder",
@@ -325,13 +325,13 @@ where
     }
 
     /// Updates a typed variable while passing the input edge value through.
-    pub fn store<T, S, H>(&self, input: TypedEdge<T>, var: TypedVar<S>, func: H) -> TypedEdge<T>
+    pub fn store<T, S, H>(&self, input: TypedEdge<T>, var: &TypedVar<S>, func: H) -> TypedEdge<T>
     where
         T: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
         S: 'static + Serialize + DeserializeOwned + JsonSchema,
         H: Fn(T, S) -> S + Send + Sync + 'static,
     {
-        if !self.same_graph(&input) || !self.same_var_graph(&var) {
+        if !self.same_graph(&input) || !self.same_var_graph(var) {
             push_error(
                 &self.state,
                 "store: input edge and variable must belong to this typed builder",
@@ -669,7 +669,7 @@ where
     /// Loads a typed variable and computes the next flow value.
     pub fn load<S, O>(
         self,
-        var: TypedVar<S>,
+        var: &TypedVar<S>,
         func: impl Fn(T, S) -> O + Send + Sync + 'static,
     ) -> Flow<O>
     where
@@ -679,7 +679,7 @@ where
         self.load_named::<S, O, _>(format!("load_{}", S::schema_name()), var, func)
     }
 
-    fn load_named<S, O, H>(self, name: impl Into<String>, var: TypedVar<S>, func: H) -> Flow<O>
+    fn load_named<S, O, H>(self, name: impl Into<String>, var: &TypedVar<S>, func: H) -> Flow<O>
     where
         S: 'static + Serialize + DeserializeOwned + JsonSchema,
         O: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
@@ -706,7 +706,7 @@ where
     /// Stores a typed variable and passes this input onward.
     pub fn store<S>(
         self,
-        var: TypedVar<S>,
+        var: &TypedVar<S>,
         func: impl Fn(T, S) -> S + Send + Sync + 'static,
     ) -> Self
     where
@@ -715,7 +715,7 @@ where
         self.store_named::<S, _>(format!("store_{}", S::schema_name()), var, func)
     }
 
-    fn store_named<S, H>(self, name: impl Into<String>, var: TypedVar<S>, func: H) -> Self
+    fn store_named<S, H>(self, name: impl Into<String>, var: &TypedVar<S>, func: H) -> Self
     where
         S: 'static + Serialize + DeserializeOwned + JsonSchema,
         H: Fn(T, S) -> S + Send + Sync + 'static,

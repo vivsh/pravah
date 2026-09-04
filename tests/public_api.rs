@@ -18,7 +18,7 @@ struct Counter(i64);
 
 fn workflow(root: Flow<Request>) -> Flow<Response> {
     let counter = root.local(Counter(0));
-    root.store(counter, |request, counter| {
+    root.store(&counter, |request, counter| {
         Counter(request.value + counter.0)
     })
     .map(|request| Response {

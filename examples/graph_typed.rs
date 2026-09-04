@@ -79,7 +79,7 @@ fn batch(root: Flow<BatchFlow>) -> Flow<Vec<Amount>> {
 fn amount(root: Flow<Amount>) -> Flow<Amount> {
     let bonus = root.local(Bonus { value: 10 });
 
-    root.load(bonus.clone(), |mut amount, bonus| {
+    root.load(&bonus, |mut amount, bonus| {
         amount.value += bonus.value;
         amount
     })
@@ -87,7 +87,7 @@ fn amount(root: Flow<Amount>) -> Flow<Amount> {
         value: amount.value,
     })
     .flow(add_three)
-    .store(bonus, |amount, _old_bonus| Bonus {
+    .store(&bonus, |amount, _old_bonus| Bonus {
         value: amount.value,
     })
     .map(|mut amount| {

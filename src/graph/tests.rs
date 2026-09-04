@@ -1878,11 +1878,11 @@ async fn typed_variable_handles_drive_load_and_store() {
     let root = Flow::<TypedAmount>::root();
     let bonus = root.local(TypedBonus { value: 3 });
     let flow = root
-        .load(bonus.clone(), |mut amount, bonus| {
+        .load(&bonus, |mut amount, bonus| {
             amount.value += bonus.value;
             amount
         })
-        .store(bonus, |amount, _bonus| TypedBonus {
+        .store(&bonus, |amount, _bonus| TypedBonus {
             value: amount.value,
         })
         .finish::<TypedAmount>()
@@ -1906,7 +1906,7 @@ async fn typed_load_can_change_output_type() {
     let root = Flow::<TypedAmount>::root();
     let bonus = root.local(TypedBonus { value: 5 });
     let flow = root
-        .load(bonus, |amount, bonus| LeftAmount {
+        .load(&bonus, |amount, bonus| LeftAmount {
             value: amount.value + bonus.value,
         })
         .finish::<TypedAmount>()
@@ -1931,7 +1931,7 @@ fn typed_variable_handle_from_other_builder_fails_at_finish() {
     let root = builder.root();
     let other = TypedGraphBuilder::<TypedAmount>::new();
     let foreign = other.local(TypedBonus { value: 1 });
-    let output = builder.load(root, foreign, |amount: TypedAmount, _bonus: TypedBonus| {
+    let output = builder.load(root, &foreign, |amount: TypedAmount, _bonus: TypedBonus| {
         amount
     });
     let err = match builder.finish(output) {
