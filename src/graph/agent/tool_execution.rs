@@ -168,22 +168,6 @@ pub(super) fn take_active_call(
     Ok(active.remove(position))
 }
 
-/// Converts a recoverable output-rendering failure into controller-visible data.
-pub(super) fn recoverable_rendered_result(
-    err: ToolError,
-    tool_name: &str,
-) -> Result<EdgeRenderedToolResult, GraphError> {
-    let value = to_value(err.to_json(tool_name)).map_err(|encode| GraphError::ValueConversion {
-        target: "recoverable tool output error".into(),
-        reason: encode.to_string(),
-    })?;
-    Ok(EdgeRenderedToolResult {
-        message: err.into_error_message(tool_name),
-        value,
-        error: true,
-    })
-}
-
 /// Records one completed call and prepares the next queued call for that tool.
 pub(super) fn complete_active_call(
     checkpoint: &mut EdgeAgentCheckpoint,

@@ -15,8 +15,8 @@ use crate::clients::{
 use crate::commons::{Agent, AgentConfig};
 use crate::context::Context;
 use crate::legacy::FlowRuntime;
+use crate::legacy::ToolOutput;
 use crate::testing::{ScriptedFactory, mock_tool_call};
-use crate::tools::ToolOutput;
 
 #[derive(Debug)]
 struct TestHistoryError(&'static str);

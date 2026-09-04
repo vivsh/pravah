@@ -19,7 +19,7 @@ mod enabled {
         self, Agent, AgentConfig, Flow, GraphError, McpResourceRef, McpServer, Step, ToolFilter,
         Toolset,
     };
-    use pravah::tools::{ToolError, ToolOutput};
+    use pravah::tools::ToolError;
     use pravah::{Context, FlowConf};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
@@ -52,8 +52,6 @@ mod enabled {
         matches: Vec<String>,
     }
 
-    impl ToolOutput for SearchResult {}
-
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     struct AddNumbers {
         left: f64,
@@ -65,14 +63,10 @@ mod enabled {
         value: f64,
     }
 
-    impl ToolOutput for Sum {}
-
     struct SearchIndex(Vec<String>);
 
     fn knowledge_tools(tools: Toolset) -> Toolset {
-        tools
-            .tool_handler(search_knowledge)
-            .tool_handler(add_numbers)
+        tools.tool(search_knowledge).tool(add_numbers)
     }
 
     async fn search_knowledge(

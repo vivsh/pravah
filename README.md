@@ -30,7 +30,7 @@ Applications provide those facilities and decide when to call the runtime.
 
 ```toml
 [dependencies]
-pravah = "0.4.9"
+pravah = "0.4.10"
 ```
 
 The repository contains the `pravah` crate for explicit, resumable agent and

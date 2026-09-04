@@ -95,7 +95,7 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for ToolError {
     }
 }
 
-/// Constrains what types may be used as tool output.
+/// Compatibility-only contract for custom legacy tool output rendering.
 ///
 /// The default implementation serializes `self` as JSON. Override `to_message`
 /// to attach binary data or produce a custom text payload.
@@ -107,7 +107,7 @@ pub trait ToolOutput: Serialize + DeserializeOwned + JsonSchema + Send + 'static
     }
 }
 
-/// Stateless tool that can be registered with `FlowBuilder::tool`.
+/// Compatibility-only stateless tool registered through the legacy builder.
 pub trait Tool {
     type Input: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
     type Output: Serialize + DeserializeOwned + JsonSchema + Send + 'static;

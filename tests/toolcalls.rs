@@ -1,12 +1,13 @@
 //! Integration tests for agent tool-call dispatch.
 
 use pravah::clients::{ClientError, Role};
+use pravah::legacy::ToolOutput;
 use pravah::legacy::{
     Agent, AgentConfig, AgentError, Flow, FlowError, FlowRuntime, FlowStep, Node, PhaseKind,
     Toolbox,
 };
 use pravah::testing::{CapturingHistoryStore, ScriptedFactory, mock_tool_call};
-use pravah::tools::{ToolError, ToolOutput};
+use pravah::tools::ToolError;
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

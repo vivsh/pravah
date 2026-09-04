@@ -29,7 +29,7 @@ use crate::{
         materialize_messages,
     },
     context::Context,
-    tools::{SuspendedValue, ToolDefinition},
+    tools::{ToolDefinition, base::SuspendedValue},
 };
 
 /// Step result returned by the runtime.

@@ -3,9 +3,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::context::Context;
+use crate::legacy::ToolOutput;
 use crate::legacy::errors::FlowError;
 use crate::legacy::{Flow, Node};
-use crate::tools::ToolOutput;
 
 /// One option shown to the human.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

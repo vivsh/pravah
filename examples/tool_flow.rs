@@ -16,8 +16,8 @@
 
 mod support;
 
+use pravah::legacy::ToolOutput;
 use pravah::legacy::{Agent, AgentConfig, Flow, FlowRuntime, FlowStep, Node};
-use pravah::tools::ToolOutput;
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

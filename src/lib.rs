@@ -1,4 +1,3 @@
-mod api;
 pub mod chat;
 pub mod clients;
 mod commons;

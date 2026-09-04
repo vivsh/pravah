@@ -8,7 +8,7 @@ Enable MCP support:
 
 ```toml
 [dependencies]
-pravah = { version = "0.4.9", features = ["mcp"] }
+pravah = { version = "0.4.10", features = ["mcp"] }
 ```
 
 ## Register an MCP Server
@@ -98,8 +98,8 @@ use pravah::graph::{Agent, Toolset};
 
 fn review_tools(tools: Toolset) -> Toolset {
     tools
-        .tool::<ReadFile>()
-        .tool_handler(search_knowledge)
+        .tool(read_file)
+        .tool(search_knowledge)
         .flow(verify_claim)
 }
 

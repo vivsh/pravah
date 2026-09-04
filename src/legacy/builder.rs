@@ -21,8 +21,9 @@ use crate::{
     clients::Message,
     commons::{Agent, make_agent_message},
     context::Context,
+    legacy::{SuspendedValue, Tool, ToolOutput},
+    tools::ToolError,
     tools::base::pascal_to_snake,
-    tools::{SuspendedValue, Tool, ToolError, ToolOutput},
 };
 
 const TOOL_OUTPUT_PREVIEW_LIMIT: usize = 512;

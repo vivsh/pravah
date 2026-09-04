@@ -13,7 +13,7 @@ use crate::clients::{
 };
 use crate::deps::Deps;
 use crate::graph::{Chat, CompiledFlow, Flow, Runtime, Snapshot, Step, compile};
-use crate::tools::{ToolError, ToolOutput};
+use crate::tools::ToolError;
 use crate::{Context, FlowConf};
 
 use super::*;
@@ -43,16 +43,16 @@ struct LookupResult {
     text: String,
 }
 
-impl ToolOutput for LookupResult {}
-
 fn lookup_tools(tools: Toolset) -> Toolset {
-    tools.tool_handler(|input: LookupRequest, _ctx| async move {
-        if input.query == "recoverable" {
-            return Err(ToolError::Validation("try another query".into()));
-        }
-        Ok(LookupResult {
-            text: input.query.to_uppercase(),
-        })
+    tools.tool(lookup)
+}
+
+async fn lookup(input: LookupRequest, _ctx: Context) -> Result<LookupResult, ToolError> {
+    if input.query == "recoverable" {
+        return Err(ToolError::Validation("try another query".into()));
+    }
+    Ok(LookupResult {
+        text: input.query.to_uppercase(),
     })
 }
 

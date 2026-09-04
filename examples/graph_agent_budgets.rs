@@ -11,7 +11,7 @@ mod example {
     use pravah::clients::Message;
     use pravah::graph::{Agent, AgentConfig, Flow, Step, Toolset, compile};
     use pravah::testing::{ScriptedFactory, mock_tool_call};
-    use pravah::tools::{ToolError, ToolOutput};
+    use pravah::tools::ToolError;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
@@ -38,10 +38,8 @@ mod example {
         evidence: String,
     }
 
-    impl ToolOutput for SearchResult {}
-
     fn research_tools(tools: Toolset) -> Toolset {
-        tools.tool_handler(search)
+        tools.tool(search)
     }
 
     async fn search(input: SearchRequest, _ctx: Context) -> Result<SearchResult, ToolError> {

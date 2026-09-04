@@ -65,7 +65,7 @@ prepared with the workflow:
 use pravah::graph::{ToolFilter, Toolset};
 
 fn review_tools(tools: Toolset) -> Toolset {
-    tools.tool::<ReadFile>().flow(verify_claim)
+    tools.tool(read_file).flow(verify_claim)
 }
 
 async fn configure_reviewer(
@@ -88,12 +88,18 @@ async fn configure_reviewer(
 select from the declared toolset. Selected tools keep their prepared order.
 Duplicate tool definitions fail graph compilation.
 
-Use:
+Use `Toolset::tool(tool_fn)` for a standalone asynchronous function and
+`Toolset::flow(flow_fn)` for a reusable graph flow. Tool functions have this
+shape:
 
-- `Toolset::tool::<T>()` for a `pravah::tools::Tool` implementation;
-- `Toolset::flow(flow_fn)` for a reusable graph flow whose output implements
-  `ToolOutput`;
-- `Toolset::tool_handler(...)` for a small asynchronous handler.
+```rust
+async fn read_file(
+    request: ReadFileRequest,
+    ctx: Context,
+) -> Result<ReadFileResult, ToolError> {
+    // ...
+}
+```
 
 Tool names and input schemas come from their Rust input types. Recoverable
 `ToolError` values are returned to the model as tagged tool results;
@@ -190,7 +196,7 @@ example including suspension and typed resume.
 Enable the `mcp` feature to use Streamable HTTP resource servers:
 
 ```toml
-pravah = { version = "0.4.9", features = ["mcp"] }
+pravah = { version = "0.4.10", features = ["mcp"] }
 ```
 
 Register credentials and headers on the runtime `Context`, not in the graph or
@@ -290,7 +296,7 @@ let message = Message::user("Describe this image.")
 ```
 
 File attachments are resolved against `Context::working_dir` before provider
-dispatch. Tool outputs may attach content through `ToolOutput::to_message`.
+dispatch. Graph tool outputs are rendered as typed JSON results.
 
 ## Direct Client Usage
 

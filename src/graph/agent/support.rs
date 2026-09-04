@@ -100,20 +100,25 @@ pub(super) fn error_tool_spec(err: String) -> AgentToolSpec {
         registry: HandlerRegistry::new(),
         runtime: Arc::new(EdgeAgentToolRuntime {
             decode_args: Arc::new(|_| Err(ToolError::Fatal("invalid tool".into()))),
-            render_result: Arc::new(|_| Err(ToolError::Fatal("invalid tool".into()).into())),
+            render_result: Arc::new(|_| {
+                Err(EdgeToolMessageError::Fatal {
+                    expected: "valid tool".into(),
+                    reason: "invalid tool".into(),
+                    raw: "<invalid tool>".into(),
+                })
+            }),
         }),
     }
 }
 
-/// Lowers a small asynchronous tool handler into the canonical child graph.
-pub(super) fn build_tool_handler_flow<I, O, Fut, H>(
-    func: H,
+/// Lowers a standalone asynchronous tool function into a child graph.
+pub(super) fn build_function_tool_flow<I, O, Fut>(
+    func: fn(I, Context) -> Fut,
 ) -> Result<CompiledFlow<I, JsonValue>, String>
 where
     I: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
     O: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
     Fut: Future<Output = Result<O, ToolError>> + Send + 'static,
-    H: Fn(I, Context) -> Fut + Send + Sync + 'static,
 {
     let builder = crate::graph::TypedGraphBuilder::<I>::new();
     let root = builder.root();
@@ -147,9 +152,12 @@ pub(super) fn decode_tool_result(value: Value) -> Result<EdgeToolResult, EdgeToo
 }
 
 /// Decodes one handler-backed tool envelope into history and runtime values.
-pub(super) fn decode_handler_tool_result<O: ToolOutput>(
+pub(super) fn decode_handler_tool_result<O>(
     value: Value,
-) -> Result<EdgeRenderedToolResult, EdgeToolMessageError> {
+) -> Result<EdgeRenderedToolResult, EdgeToolMessageError>
+where
+    O: Serialize + DeserializeOwned + JsonSchema,
+{
     match decode_tool_result(value)? {
         EdgeToolResult::Success { value } => {
             let message = decode_json_tool_message::<O>(value.clone())?;
@@ -180,16 +188,17 @@ pub(super) fn decode_handler_tool_result<O: ToolOutput>(
     }
 }
 
-/// Renders a JSON tool value through its declared `ToolOutput` contract.
-pub(super) fn decode_json_tool_message<O: ToolOutput>(
-    value: JsonValue,
-) -> Result<Message, EdgeToolMessageError> {
+/// Validates and renders one JSON-backed typed tool output.
+pub(super) fn decode_json_tool_message<O>(value: JsonValue) -> Result<Message, EdgeToolMessageError>
+where
+    O: Serialize + DeserializeOwned + JsonSchema,
+{
     match serde_json::from_value::<O>(value.clone()) {
-        Ok(output) => output.to_message().map_err(Into::into),
+        Ok(output) => default_tool_message(&output),
         Err(first) => {
             if let JsonValue::String(text) = &value {
                 match serde_json::from_str::<O>(text) {
-                    Ok(output) => return output.to_message().map_err(Into::into),
+                    Ok(output) => return default_tool_message(&output),
                     Err(second) => {
                         return Err(EdgeToolMessageError::Fatal {
                             expected: O::schema_name(),
@@ -209,16 +218,19 @@ pub(super) fn decode_json_tool_message<O: ToolOutput>(
 }
 
 /// Renders a typed runtime tool value without losing recoverable error tags.
-pub(super) fn decode_runtime_tool_result<O: ToolOutput>(
+pub(super) fn decode_runtime_tool_result<O>(
     value: Value,
-) -> Result<EdgeRenderedToolResult, EdgeToolMessageError> {
-    let message = match from_value::<O>(value.clone()) {
-        Ok(output) => output.to_message().map_err(EdgeToolMessageError::from)?,
+) -> Result<EdgeRenderedToolResult, EdgeToolMessageError>
+where
+    O: Serialize + DeserializeOwned + JsonSchema,
+{
+    let output = match from_value::<O>(value.clone()) {
+        Ok(output) => output,
         Err(first) => {
             if let Some(text) = value.as_str()
                 && let Ok(output) = serde_json::from_str::<O>(text)
             {
-                output.to_message().map_err(EdgeToolMessageError::from)?
+                output
             } else {
                 return Err(EdgeToolMessageError::Fatal {
                     expected: O::schema_name(),
@@ -228,11 +240,24 @@ pub(super) fn decode_runtime_tool_result<O: ToolOutput>(
             }
         }
     };
+    let message = default_tool_message(&output)?;
     Ok(EdgeRenderedToolResult {
         message,
         value,
         error: false,
     })
+}
+
+/// Serializes one typed tool output into the default model-facing JSON message.
+fn default_tool_message<O: Serialize + JsonSchema>(
+    output: &O,
+) -> Result<Message, EdgeToolMessageError> {
+    let content = serde_json::to_string(output).map_err(|error| EdgeToolMessageError::Fatal {
+        expected: O::schema_name(),
+        reason: error.to_string(),
+        raw: "<tool output>".into(),
+    })?;
+    Ok(Message::tool_output(String::new(), content))
 }
 
 /// Decodes and validates the current serialized agent payload version.

@@ -13,7 +13,7 @@ use pravah::graph::{
     self, Agent, AgentConfig, AgentDecision, AgentInterventionPoint, AgentLoop, AgentResume,
     AgentToolResult, Flow, GraphError, Step, ToolFilter, Toolset, Value, to_value,
 };
-use pravah::tools::{ToolError, ToolOutput};
+use pravah::tools::ToolError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -41,8 +41,6 @@ struct SearchResult {
     pages: Vec<String>,
 }
 
-impl ToolOutput for SearchResult {}
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FetchRequest {
     page: String,
@@ -55,11 +53,9 @@ struct FetchResult {
     approval_required: bool,
 }
 
-impl ToolOutput for FetchResult {}
-
 /// Declares the complete candidate tool surface prepared with the agent.
 fn research_tools(tools: Toolset) -> Toolset {
-    tools.tool_handler(search).tool_handler(fetch)
+    tools.tool(search).tool(fetch)
 }
 
 async fn search(input: SearchRequest, _ctx: Context) -> Result<SearchResult, ToolError> {

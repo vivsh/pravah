@@ -1,11 +1,12 @@
 //! Integration tests for parallel and queued tool dispatch.
 
 use pravah::clients::ClientError;
+use pravah::legacy::ToolOutput;
 use pravah::legacy::{
     Agent, AgentConfig, AgentError, Flow, FlowError, FlowRuntime, FlowStep, Node, Toolbox,
 };
 use pravah::testing::{ScriptedFactory, mock_tool_call};
-use pravah::tools::{ToolError, ToolOutput};
+use pravah::tools::ToolError;
 use pravah::{Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

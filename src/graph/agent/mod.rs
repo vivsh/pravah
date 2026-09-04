@@ -13,7 +13,7 @@ use crate::clients::{
     materialize_messages,
 };
 use crate::context::Context;
-use crate::tools::{Tool, ToolError, ToolOutput};
+use crate::tools::ToolError;
 
 use super::error::GraphError;
 use super::model::UntypedGraph;
@@ -173,73 +173,15 @@ pub struct Toolset {
 }
 
 impl Toolset {
-    /// Registers a `Tool` implementation as an agent tool.
-    pub fn tool<T: Tool>(mut self) -> Self
-    where
-        T::Input: Sync,
-        T::Output: Sync,
-    {
-        let definition = match agent_tool_definition::<T::Input>() {
-            Ok(definition) => definition,
-            Err(err) => {
-                self.tools.push(error_tool_spec(err));
-                return self;
-            }
-        };
-        let child = build_tool_handler_flow::<T::Input, T::Output, _, _>(|input, ctx| async move {
-            T::call(input, ctx).await
-        });
-        self.push_tool_with_message::<T::Input, JsonValue>(
-            definition,
-            child,
-            Arc::new(|value| {
-                let value = decode_tool_result(value)?;
-                let (value, error) = match value {
-                    EdgeToolResult::Success { value } => (value, false),
-                    EdgeToolResult::Error { value } => {
-                        let runtime_value =
-                            to_value(value.clone()).map_err(|err| EdgeToolMessageError::Fatal {
-                                expected: "tool error value".into(),
-                                reason: err.to_string(),
-                                raw: value.to_string(),
-                            })?;
-                        return Ok(EdgeRenderedToolResult {
-                            message: Message::tool_output(String::new(), value.to_string()),
-                            value: runtime_value,
-                            error: true,
-                        });
-                    }
-                };
-                let output: T::Output = serde_json::from_value(value.clone()).map_err(|err| {
-                    EdgeToolMessageError::Fatal {
-                        expected: T::Output::schema_name(),
-                        reason: err.to_string(),
-                        raw: "<tool output>".into(),
-                    }
-                })?;
-                let message = T::to_message(output).map_err(EdgeToolMessageError::from)?;
-                let value = to_value(value).map_err(|err| EdgeToolMessageError::Fatal {
-                    expected: "tool output value".into(),
-                    reason: err.to_string(),
-                    raw: "<tool output>".into(),
-                })?;
-                Ok(EdgeRenderedToolResult {
-                    message,
-                    value,
-                    error,
-                })
-            }),
-        );
-        self
-    }
-
-    /// Registers an inline async tool handler.
-    pub fn tool_handler<I, O, Fut, H>(mut self, func: H) -> Self
+    /// Registers a non-capturing asynchronous function as an agent tool.
+    ///
+    /// The input type defines the stable tool identity and schema. Definition
+    /// errors accumulate and surface when the containing graph is compiled.
+    pub fn tool<I, O, Fut>(mut self, func: fn(I, Context) -> Fut) -> Self
     where
         I: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
-        O: ToolOutput + Sync,
+        O: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
         Fut: Future<Output = Result<O, ToolError>> + Send + 'static,
-        H: Fn(I, Context) -> Fut + Send + Sync + 'static,
     {
         let definition = match agent_tool_definition::<I>() {
             Ok(definition) => definition,
@@ -248,7 +190,7 @@ impl Toolset {
                 return self;
             }
         };
-        let child = build_tool_handler_flow::<I, O, Fut, H>(func);
+        let child = build_function_tool_flow::<I, O, Fut>(func);
         self.push_tool_with_message::<I, JsonValue>(
             definition,
             child,
@@ -258,10 +200,13 @@ impl Toolset {
     }
 
     /// Registers a function-defined flow as an agent tool.
+    ///
+    /// The flow is prepared as a child graph and uses its input type as the
+    /// stable model-facing tool identity.
     pub fn flow<I, O>(mut self, flow: fn(super::Flow<I>) -> super::Flow<O>) -> Self
     where
         I: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
-        O: ToolOutput + Sync,
+        O: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
     {
         let definition = match agent_tool_definition::<I>() {
             Ok(definition) => definition,
@@ -325,18 +270,11 @@ impl Toolset {
 
 #[derive(Debug)]
 enum EdgeToolMessageError {
-    Recoverable(ToolError),
     Fatal {
         expected: String,
         reason: String,
         raw: String,
     },
-}
-
-impl From<ToolError> for EdgeToolMessageError {
-    fn from(value: ToolError) -> Self {
-        Self::Recoverable(value)
-    }
 }
 
 /// Fully compiled agent continuation pieces.
@@ -450,8 +388,6 @@ mod tests {
         __pravah_edge_tool_error: bool,
         value: JsonValue,
     }
-
-    impl ToolOutput for MarkerLikeOutput {}
 
     /// Verifies diagnostic previews truncate Unicode only at character boundaries.
     #[test]

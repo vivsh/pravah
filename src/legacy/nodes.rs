@@ -12,8 +12,8 @@ use crate::legacy::errors::FlowError;
 use crate::{
     clients::{Message, schema::sanitize_strict},
     context::Context,
-    tools::base::pascal_to_snake,
-    tools::{SuspendedValue, ToolDefinition, ToolError},
+    tools::base::{SuspendedValue, pascal_to_snake},
+    tools::{ToolDefinition, ToolError},
 };
 
 pub(crate) type ToolMessageFn =

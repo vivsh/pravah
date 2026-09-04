@@ -12,7 +12,7 @@ use crate::{
         state::{AgentContinuation, Callable, FlowState},
         store::{DynHistoryStore, NoopHistoryStore},
     },
-    tools::SuspendedValue,
+    tools::base::SuspendedValue,
 };
 
 use schemars::JsonSchema;

@@ -13,7 +13,7 @@ use crate::clients::{
     Client, ClientError, ClientFactory, ClientOptions, ClientOutput, ClientResponse, Message,
     ModelUrl, Provider, Role, ToolCall,
 };
-use crate::tools::ToolOutput;
+use crate::tools::ToolError;
 use crate::{Context, FlowConf, deps::Deps};
 
 use super::state::ReturnTarget;
@@ -3070,8 +3070,6 @@ struct EchoOut {
     text: String,
 }
 
-impl ToolOutput for EchoOut {}
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct SuffixIn {
     text: String,
@@ -3082,28 +3080,28 @@ struct SuffixOut {
     text: String,
 }
 
-impl ToolOutput for SuffixOut {}
+async fn echo_tool(input: EchoIn, _ctx: Context) -> Result<EchoOut, ToolError> {
+    Ok(EchoOut {
+        text: input.text.to_uppercase(),
+    })
+}
+
+async fn suffix_tool(input: SuffixIn, _ctx: Context) -> Result<SuffixOut, ToolError> {
+    Ok(SuffixOut {
+        text: format!("{}!", input.text),
+    })
+}
 
 fn echo_tools(tools: Toolset) -> Toolset {
-    tools.tool_handler(|input: EchoIn, _ctx| async move {
-        Ok(EchoOut {
-            text: input.text.to_uppercase(),
-        })
-    })
+    tools.tool(echo_tool)
 }
 
 fn two_tools(tools: Toolset) -> Toolset {
-    echo_tools(tools).tool_handler(|input: SuffixIn, _ctx| async move {
-        Ok(SuffixOut {
-            text: format!("{}!", input.text),
-        })
-    })
+    echo_tools(tools).tool(suffix_tool)
 }
 
 fn duplicate_tools(tools: Toolset) -> Toolset {
-    tools
-        .tool_handler(|input: EchoIn, _ctx| async move { Ok(EchoOut { text: input.text }) })
-        .tool_handler(|input: EchoIn, _ctx| async move { Ok(EchoOut { text: input.text }) })
+    tools.tool(echo_tool).tool(echo_tool)
 }
 
 fn edge_agent_with_echo(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
@@ -3325,8 +3323,9 @@ fn failing_agent(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
     root.configure(configure_failing_agent)
 }
 
+/// Verifies a standalone tool function executes through the shared graph VM.
 #[tokio::test]
-async fn typed_edge_agent_tool_handler_round_trips_through_same_vm() {
+async fn typed_edge_agent_tool_function_round_trips_through_same_vm() {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(edge_agent_with_echo)
         .finish::<EdgeAgentInput>()

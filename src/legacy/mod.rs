@@ -29,7 +29,7 @@ mod validation;
 pub use crate::clients::{ClientFactory, ClientFactoryLayer};
 pub use crate::commons::{Agent, AgentConfig};
 pub use crate::context::Context;
-pub use crate::tools::SuspendedValue;
+pub use crate::tools::base::{SuspendedValue, Tool, ToolOutput};
 pub use builder::FlowBuilder;
 pub use compactor::{CompactionResult, HistoryCompactor, NoopCompactor, SlidingWindowCompactor};
 pub use diagram::FlowGraphDiagram;

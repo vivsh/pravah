@@ -202,7 +202,7 @@ impl Flow for ArticleRequest {
 ```
 
 The tool name seen by the model is derived from `F`'s schema name. `F::Output`
-must implement `ToolOutput`. For a custom non-flow handler, use
+must implement `pravah::legacy::ToolOutput`. For a custom non-flow handler, use
 `agent_with(|toolbox| toolbox.tool_handler(...))` instead, or use
 `tool_with::<I, O>(|tool| ...)` to build an inline tool subgraph.
 

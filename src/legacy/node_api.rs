@@ -12,7 +12,8 @@ use super::nary::{MergeInputs, SplitOutputs};
 use crate::commons::Agent;
 use crate::context::Context;
 use crate::legacy::errors::FlowError;
-use crate::tools::{Tool, ToolError, ToolOutput};
+use crate::legacy::{Tool, ToolOutput};
+use crate::tools::ToolError;
 
 /// A typed handle to a position in a flow graph under construction.
 ///

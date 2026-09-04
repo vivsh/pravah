@@ -602,12 +602,6 @@ impl AgentHandler {
         let runtime = self.tool_runtime(active.child_index)?;
         match (runtime.render_result)(output) {
             Ok(result) => Ok(result),
-            Err(EdgeToolMessageError::Recoverable(err)) if !err.is_fatal() => {
-                recoverable_rendered_result(err, &tool.name)
-            }
-            Err(EdgeToolMessageError::Recoverable(err)) => {
-                Err(GraphError::Invalid(err.to_string()))
-            }
             Err(EdgeToolMessageError::Fatal {
                 expected,
                 reason,
