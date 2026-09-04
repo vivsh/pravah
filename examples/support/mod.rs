@@ -1,17 +1,13 @@
 //! Shared error handling for runnable examples.
 
-use pravah::ChatError;
+use pravah::GraphError;
 use pravah::clients::ClientError;
-use pravah::graph::GraphError;
 use pravah::legacy::FlowError;
 use thiserror::Error;
 
 /// Structured failures that can be reported by the example programs.
 #[derive(Debug, Error)]
 pub(crate) enum ExampleError {
-    /// A chat operation failed.
-    #[error(transparent)]
-    Chat(#[from] ChatError),
     /// A provider client operation failed.
     #[error(transparent)]
     Client(#[from] ClientError),

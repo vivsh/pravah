@@ -12,7 +12,7 @@ use super::registry::RuntimeServices;
 use super::runtime::{Runtime, Snapshot};
 use super::state::Step;
 use super::typed::{CompiledFlow, Flow};
-use super::value::{from_value, to_value};
+use super::value::from_value;
 
 /// One assistant response produced by graph chat.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +34,7 @@ impl<O> ChatTurn<O> {
 /// retain the same model-visible conversation session.
 pub struct Chat<I, O> {
     agent: fn(Agent<I>) -> Agent<O>,
+    context: Context,
     runtime: Option<Runtime>,
     services: RuntimeServices,
     _marker: PhantomData<fn(I) -> O>,
@@ -44,25 +45,28 @@ where
     I: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
     O: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
 {
-    /// Creates a chat session from a function-defined agent.
-    pub fn new(agent: fn(Agent<I>) -> Agent<O>) -> Self {
+    /// Creates a chat session with a function-defined agent and fixed context.
+    pub fn new(agent: fn(Agent<I>) -> Agent<O>, context: Context) -> Self {
         Self {
             agent,
+            context,
             runtime: None,
             services: RuntimeServices::new(),
             _marker: PhantomData,
         }
     }
 
-    /// Restores a chat using the same agent definition as the saved snapshot.
+    /// Restores a chat and binds fresh runtime-only context to the session.
     pub fn from_snapshot(
         agent: fn(Agent<I>) -> Agent<O>,
         snapshot: Snapshot,
+        context: Context,
     ) -> Result<Self, GraphError> {
         let flow = build_chat_flow(agent)?;
-        let runtime = flow.prepared().restore(snapshot)?;
+        let runtime = flow.restore(snapshot, context.clone())?;
         Ok(Self {
             agent,
+            context,
             runtime: Some(runtime),
             services: RuntimeServices::new(),
             _marker: PhantomData,
@@ -72,12 +76,14 @@ where
     /// Replaces the history compactor used by the chat runtime.
     pub fn with_compactor(mut self, compactor: impl HistoryCompactor + 'static) -> Self {
         self.services = self.services.with_compactor(compactor);
+        self.refresh_runtime_services();
         self
     }
 
     /// Replaces the history store used to record chat messages.
     pub fn with_store(mut self, store: impl HistoryStore + 'static) -> Self {
         self.services = self.services.with_store(store);
+        self.refresh_runtime_services();
         self
     }
 
@@ -89,28 +95,23 @@ where
             .snapshot()
     }
 
-    /// Sends one input and returns the next assistant response.
-    pub async fn send(&mut self, input: I, ctx: Context) -> Result<ChatTurn<O>, GraphError> {
-        let input = to_value(input).map_err(|err| GraphError::ValueConversion {
-            target: "chat input".into(),
-            reason: err.to_string(),
-        })?;
+    /// Sends one input using the session context and returns the next response.
+    pub async fn send(&mut self, input: I) -> Result<ChatTurn<O>, GraphError> {
         if self.runtime.is_none() {
             let flow = build_chat_flow(self.agent)?;
             self.runtime = Some(
-                flow.prepared()
-                    .start(input)?
+                flow.start(input, self.context.clone())?
                     .with_runtime_services(self.services.clone()),
             );
         } else {
-            let step = self.runtime_mut()?.resume(input, ctx.clone()).await?;
+            let step = self.runtime_mut()?.resume(input).await?;
             if let Some(turn) = decode_chat_step(step)? {
                 return Ok(turn);
             }
         }
 
         loop {
-            let step = self.runtime_mut()?.next(ctx.clone()).await?;
+            let step = self.runtime_mut()?.next().await?;
             if let Some(turn) = decode_chat_step(step)? {
                 return Ok(turn);
             }
@@ -121,6 +122,12 @@ where
         self.runtime
             .as_mut()
             .ok_or_else(|| GraphError::Invalid("chat runtime disappeared".into()))
+    }
+
+    fn refresh_runtime_services(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            self.runtime = Some(runtime.with_runtime_services(self.services.clone()));
+        }
     }
 }
 

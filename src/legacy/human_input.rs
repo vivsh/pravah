@@ -67,7 +67,7 @@ impl ToolOutput for HumanOutput {}
 ///
 /// ```rust,ignore
 /// use std::sync::Arc;
-/// use pravah::{Context, CliMode};
+/// use pravah::{Context, legacy::CliMode};
 /// use pravah::deps::Deps;
 ///
 /// let mut deps = Deps::default();

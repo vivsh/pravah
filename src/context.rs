@@ -38,7 +38,11 @@ struct ContextInner {
     mcp_servers: Arc<BTreeMap<String, McpServer>>,
 }
 
-/// Shared execution context passed to every step and tool.
+/// Runtime-only dependencies and policy bound to a workflow execution.
+///
+/// Graph workflows attach a context when they start or restore. Tools and
+/// handlers receive shared clones while the context itself remains outside
+/// snapshots.
 /// Cloning is cheap because the inner state is reference-counted.
 #[derive(Clone)]
 pub struct Context(Arc<ContextInner>);

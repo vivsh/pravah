@@ -1,20 +1,21 @@
 # Graph Workflows
 
-`pravah::graph` is the primary workflow API. Typed Rust workflows, untyped
-graphs, and JSON invocations all use the same runtime.
+The crate root exposes Pravah's primary typed workflow API. The complete
+`pravah::graph` namespace also provides untyped graphs and JSON invocation;
+every authoring path uses the same runtime.
 
 ## Author With Functions
 
 A flow is an ordinary function from one typed flow value to another:
 
 ```rust
-use pravah::graph::{self, GraphError, Flow};
+use pravah::{Flow, GraphError, compile};
 
 fn approval(root: Flow<Request>) -> Flow<Decision> {
     root.map(prepare).agent(reviewer).suspend::<Decision>()
 }
 
-let flow = graph::compile(approval)?;
+let flow = compile(approval)?;
 # Ok::<(), GraphError>(())
 ```
 
@@ -24,11 +25,14 @@ sites. Agent definitions use the same shape; see [clients.md](clients.md).
 
 ## Drive One Step at a Time
 
-Create a runtime, then keep its control loop in application code:
+Bind runtime-only dependencies when the workflow starts, then keep its control
+loop in application code:
 
 ```rust
+let mut runtime = flow.start(input, ctx)?;
+
 loop {
-    match runtime.next(ctx.clone()).await? {
+    match runtime.next().await? {
         Step::Continue => {}
         Step::Suspend(payload) => {
             save(runtime.snapshot()?);
@@ -53,15 +57,14 @@ stable API contract. Pravah does not spawn a background execution loop.
 fingerprint, and runtime-owned history. The graph remains a separately
 serialized artifact. Store the complete snapshot as one versioned value.
 
-Prepare the original graph and `HandlerRegistry`, then restore through that
-`PreparedGraph`:
+Typed workflows restore through the same compiled flow and attach a fresh
+runtime-only context:
 
 ```rust
-let prepared = PreparedGraph::new(graph, registry)?;
-let mut runtime = prepared.restore(snapshot)?;
+let mut runtime = flow.restore(snapshot, ctx)?;
 ```
 
-Install runtime-only client and MCP registrations on `Context` again after
+Install runtime-only client and MCP registrations on `Context` again during
 restoration. Reattach history stores and compactors to the runtime when used.
 Closures, credentials, live clients, and service handles are deliberately
 absent from snapshots. Resolved agent configuration, memory, selected tools,
@@ -84,8 +87,9 @@ at explicit model and tool boundaries and can redirect guidance and tool
 visibility, request a final tool-disabled answer, suspend for application
 input, or abort the current step. Controller observations, metrics, state, and
 committed boundaries survive snapshots. Controller suspension uses the same
-`Runtime::resume` entry point as an ordinary suspend node, with `AgentResume`
-as its fixed resume value.
+typed `Runtime::resume` entry point as an ordinary suspend node, with
+`AgentResume` as its fixed resume value. Dynamic graph callers use
+`Runtime::resume_value` with an existing Pravah `Value`.
 
 Every serialized format has an explicit version. During the `0.4.x` line,
 incompatible versions are rejected and are not migrated automatically. Drain
@@ -129,4 +133,4 @@ batch can be retried safely.
 
 `pravah::legacy` remains available for compatibility. It receives fixes needed
 to keep existing applications working, while new workflow capabilities target
-`pravah::graph`.
+the modern typed API and its underlying `pravah::graph` runtime.

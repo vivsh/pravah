@@ -521,14 +521,14 @@ mod tests {
         let (url, cancellation) = spawn_resource_server().await;
         let flow = compile(resource_flow).unwrap();
         let mut runtime = flow
-            .runtime(ResourceInput {
-                question: "question".into(),
-            })
+            .start(
+                ResourceInput {
+                    question: "question".into(),
+                },
+                test_context(url),
+            )
             .unwrap();
-        assert_eq!(
-            runtime.next(test_context(url)).await.unwrap(),
-            Step::Continue
-        );
+        assert_eq!(runtime.next().await.unwrap(), Step::Continue);
         let snapshot = runtime.snapshot().unwrap();
         let encoded = serde_json::to_string(&snapshot).unwrap();
         assert!(encoded.contains("text for docs://a-first"));
@@ -536,11 +536,10 @@ mod tests {
 
         let factory =
             ScriptedFactory::new().then_output(serde_json::json!({ "answer": "from checkpoint" }));
-        let mut restored = flow.prepared().restore(snapshot).unwrap();
-        let step = restored
-            .next(Context::default().with_client_factory(factory))
-            .await
+        let mut restored = flow
+            .restore(snapshot, Context::default().with_client_factory(factory))
             .unwrap();
+        let step = restored.next().await.unwrap();
         let Step::Done(value) = step else {
             panic!("restored agent should complete");
         };

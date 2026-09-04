@@ -2,7 +2,7 @@ use super::*;
 use crate::graph::Value;
 
 impl Runtime {
-    pub(super) async fn step_inner(&mut self, ctx: Context) -> Result<Step, GraphError> {
+    pub(super) async fn step_inner(&mut self) -> Result<Step, GraphError> {
         let frame_index = self
             .state
             .frames
@@ -33,7 +33,7 @@ impl Runtime {
                 .ok_or_else(|| GraphError::Invalid("active frame disappeared".into()))?;
             if has_continuation(frame, node.id)? {
                 if matches!(node.kind, CompiledNodeKind::Continuation { .. }) {
-                    return self.poll_continuation(frame_index, node.clone(), ctx).await;
+                    return self.poll_continuation(frame_index, node.clone()).await;
                 }
                 if node.can_continue {
                     continue;
@@ -51,7 +51,7 @@ impl Runtime {
             if !inputs_ready_with_new_epoch(frame, node)? {
                 continue;
             }
-            return self.execute_node(frame_index, node.clone(), ctx).await;
+            return self.execute_node(frame_index, node.clone()).await;
         }
 
         let frame = self
@@ -73,7 +73,6 @@ impl Runtime {
         &mut self,
         frame_index: usize,
         node: CompiledNode,
-        ctx: Context,
     ) -> Result<Step, GraphError> {
         match &node.kind {
             CompiledNodeKind::Builtin { op } => {
@@ -103,7 +102,9 @@ impl Runtime {
                     .registry
                     .work(key)
                     .ok_or_else(|| GraphError::MissingHandler(key.as_str().into()))?;
-                let outputs = handler.call(inputs, ctx).await?;
+                let outputs = handler
+                    .call(inputs, self.runtime_context.context.clone())
+                    .await?;
                 self.write_outputs(frame_index, &node, outputs)?;
                 self.complete_node(frame_index, &node)?;
                 Ok(Step::Continue)
@@ -166,7 +167,7 @@ impl Runtime {
                     .registry
                     .continuation(key)
                     .ok_or_else(|| GraphError::MissingHandler(key.as_str().into()))?;
-                let ctx = self.continuation_context(ctx);
+                let ctx = self.continuation_context();
                 let transition = handler.start(payload.as_ref(), state, inputs, ctx).await?;
                 let suspension =
                     self.apply_continuation_transition(frame_index, &node, transition)?;

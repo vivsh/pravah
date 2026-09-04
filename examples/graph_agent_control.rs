@@ -7,13 +7,14 @@ mod support;
 
 use std::env;
 
-use pravah::Context;
 use pravah::clients::Message;
-use pravah::graph::{
-    self, Agent, AgentConfig, AgentDecision, AgentInterventionPoint, AgentLoop, AgentResume,
-    AgentToolResult, Flow, GraphError, Step, ToolFilter, Toolset, Value, to_value,
-};
+use pravah::graph::{Value, to_value};
 use pravah::tools::ToolError;
+use pravah::{
+    Agent, AgentConfig, AgentDecision, AgentInterventionPoint, AgentLoop, AgentResume,
+    AgentToolResult, CompiledFlow, Context, Flow, GraphError, Runtime, Step, ToolFilter, Toolset,
+    compile,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -173,43 +174,35 @@ async fn run() -> Result<(), ExampleError> {
             .unwrap_or_else(|| "What does the approval policy require?".into()),
         model: env::var("PRAVAH_MODEL_URL").unwrap_or_else(|_| "openai:///gpt-5-mini".into()),
     };
-    let flow = graph::compile(research)?;
-    let mut runtime = flow.runtime(request)?;
-    drive(&flow, &mut runtime, Context::default()).await
+    let flow = compile(research)?;
+    let mut runtime = flow.start(request, Context::default())?;
+    drive(&flow, &mut runtime).await
 }
 
 /// Drives the workflow and routes controller suspensions to the application.
 async fn drive(
-    flow: &graph::CompiledFlow<ResearchRequest, ResearchAnswer>,
-    runtime: &mut graph::Runtime,
-    ctx: Context,
+    flow: &CompiledFlow<ResearchRequest, ResearchAnswer>,
+    runtime: &mut Runtime,
 ) -> Result<(), ExampleError> {
     loop {
-        match runtime.next(ctx.clone()).await? {
+        match runtime.next().await? {
             Step::Continue => {}
             Step::Done(value) => {
                 println!("{:#?}", flow.decode_output(value)?);
                 return Ok(());
             }
-            Step::Suspend(payload) => resume_approved(runtime, ctx.clone(), payload).await?,
+            Step::Suspend(payload) => resume_approved(runtime, payload).await?,
         }
     }
 }
 
 /// Demonstrates an application-selected typed resume decision.
-async fn resume_approved(
-    runtime: &mut graph::Runtime,
-    ctx: Context,
-    payload: Value,
-) -> Result<(), ExampleError> {
+async fn resume_approved(runtime: &mut Runtime, payload: Value) -> Result<(), ExampleError> {
     println!("agent requested intervention: {payload}");
     let resume = AgentResume::Conclude {
         guidance: "Approval granted. Return the answer using the collected evidence.".into(),
     };
-    let value = to_value(resume).map_err(|error| {
-        ExampleError::unexpected(format!("failed to encode agent resume: {error}"))
-    })?;
-    match runtime.resume(value, ctx).await? {
+    match runtime.resume(resume).await? {
         Step::Continue => Ok(()),
         other => Err(ExampleError::unexpected(format!(
             "agent resume returned {other:?}"

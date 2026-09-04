@@ -1,53 +1,56 @@
-//! Simple multi-turn chat using [`Chat`].
+//! Graph-backed typed chat with snapshot restoration between turns.
 //!
-//! Demonstrates: builder, two turns, snapshot/restore, third turn confirming history continuity.
-//!
-//! Requires a provider API key: set `GEMINI_API_KEY` or change the URL to another provider.
+//! Requires `GEMINI_API_KEY`, or change the model URL in `configure_tutor`.
 
-use pravah::{Chat, ChatError, Context, FlowConf};
+use pravah::clients::Message;
+use pravah::{Agent, AgentConfig, Chat, Context, GraphError};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct Question {
+    text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct Answer {
+    text: String,
+}
+
+fn tutor(root: Agent<Question>) -> Agent<Answer> {
+    root.configure(configure_tutor)
+}
+
+/// Configures one typed conversational turn while retaining session history.
+async fn configure_tutor(question: Question, _ctx: Context) -> Result<AgentConfig, GraphError> {
+    Ok(AgentConfig::new(
+        "gemini:///gemini-2.5-flash-lite",
+        "You are a concise Rust tutor. Keep answers to two sentences.",
+        Message::user(question.text),
+    )
+    .keep_alive())
+}
 
 #[tokio::main]
-async fn main() -> Result<(), ChatError> {
+async fn main() -> Result<(), GraphError> {
     dotenvy::dotenv().ok();
-    let ctx = Context::new(FlowConf::default());
+    let ctx = Context::default();
+    let mut chat = Chat::new(tutor, ctx);
 
-    let mut session: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
-        .preamble("You are a concise Rust tutor. Keep answers to two sentences.")
-        .build()?;
-
-    println!("--- turn 1 ---");
-    let t1 = session
-        .send(ctx.clone(), "What is ownership in Rust?")
+    let first = chat
+        .send(Question {
+            text: "What is ownership in Rust?".into(),
+        })
         .await?;
-    println!("{}", t1.text());
-    if let Some(u) = t1.usage {
-        println!("(tokens: in={:?} out={:?})", u.input, u.output);
-    }
+    println!("{}", first.output.text);
 
-    println!("\n--- turn 2 ---");
-    let t2 = session
-        .send(
-            ctx.clone(),
-            "Give me one short example of the rule you just described.",
-        )
+    let snapshot = chat.snapshot()?;
+    let mut restored = Chat::from_snapshot(tutor, snapshot, Context::default())?;
+    let second = restored
+        .send(Question {
+            text: "Give me one short example of that rule.".into(),
+        })
         .await?;
-    println!("{}", t2.text());
-
-    // Take a snapshot and restore to a fresh session.
-    let snap = session.snapshot();
-    println!("\n--- restored from snapshot ---");
-    let mut restored = Chat::from_snapshot(snap)?;
-
-    let t3 = restored
-        .send(
-            ctx.clone(),
-            "Summarise everything we discussed in one sentence.",
-        )
-        .await?;
-    println!("{}", t3.text());
-
-    println!("\nsession_id: {}", restored.session_id());
-    println!("history entries: {}", restored.history().entries().len());
-
+    println!("{}", second.output.text);
     Ok(())
 }

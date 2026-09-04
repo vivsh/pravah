@@ -147,11 +147,11 @@ async fn main() -> Result<(), GraphError> {
     println!("serialized graph:\n{graph_json}\n");
 
     let prepared = PreparedGraph::new(graph, registry()?)?;
-    let mut runtime = prepared.start(Value::from(5_i64))?;
     let ctx = Context::new(FlowConf::default());
+    let mut runtime = prepared.start(Value::from(5_i64), ctx)?;
 
     loop {
-        match runtime.next(ctx.clone()).await? {
+        match runtime.next().await? {
             Step::Continue => {
                 println!(
                     "continue; active frame depth = {}",

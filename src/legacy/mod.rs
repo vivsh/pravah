@@ -4,6 +4,7 @@
 //! does not gain new workflow capabilities.
 
 mod builder;
+mod chat;
 pub mod compactor;
 pub mod diagram;
 mod errors;
@@ -31,6 +32,7 @@ pub use crate::commons::{Agent, AgentConfig};
 pub use crate::context::Context;
 pub use crate::tools::base::{SuspendedValue, Tool, ToolOutput};
 pub use builder::FlowBuilder;
+pub use chat::{Chat, ChatBuilder, ChatError, ChatSnapshot, ChatTurn, ChatType, ChatWireKind};
 pub use compactor::{CompactionResult, HistoryCompactor, NoopCompactor, SlidingWindowCompactor};
 pub use diagram::FlowGraphDiagram;
 pub use errors::{AgentError, BuildError, FlowError};

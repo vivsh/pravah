@@ -5,7 +5,6 @@ impl Runtime {
         &mut self,
         frame_index: usize,
         node: CompiledNode,
-        ctx: Context,
     ) -> Result<Step, GraphError> {
         let CompiledNodeKind::Continuation { key, payload, .. } = &node.kind else {
             return Err(GraphError::Invalid(format!(
@@ -25,7 +24,7 @@ impl Runtime {
             .registry
             .continuation(key)
             .ok_or_else(|| GraphError::MissingHandler(key.as_str().into()))?;
-        let ctx = self.continuation_context(ctx);
+        let ctx = self.continuation_context();
         let transition = handler
             .advance(payload.as_ref(), checkpoint, event, ctx)
             .await?;
@@ -381,7 +380,6 @@ impl Runtime {
         frame_index: usize,
         node: CompiledNode,
         input: Value,
-        ctx: Context,
     ) -> Result<Step, GraphError> {
         let CompiledNodeKind::Continuation { key, payload, .. } = &node.kind else {
             return Err(GraphError::Invalid(format!(
@@ -405,7 +403,7 @@ impl Runtime {
                 payload.as_ref(),
                 checkpoint,
                 ContinuationEvent::Resume { input },
-                self.continuation_context(ctx),
+                self.continuation_context(),
             )
             .await?;
         let suspension = self.apply_continuation_transition(frame_index, &node, transition)?;

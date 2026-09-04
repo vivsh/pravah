@@ -7,20 +7,20 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::compactor::{DynHistoryCompactor, HistoryCompactor, NoopCompactor};
+use super::history::{FlowHistory, HistoryEntry};
+use super::memory::{DynMemoryFactory, MemoryFactory, MemoryQuery, NoopMemoryFactory};
+use super::store::{DynHistoryStore, HistoryStore, NoopHistoryStore};
 use crate::clients::{
     Client, ClientError, ClientOptions, ClientOutput, Message, ResponseFormat, Role, TokenUsage,
     materialize_messages,
 };
 use crate::context::Context;
-use crate::legacy::compactor::{DynHistoryCompactor, HistoryCompactor, NoopCompactor};
-use crate::legacy::memory::{DynMemoryFactory, MemoryFactory, MemoryQuery, NoopMemoryFactory};
-use crate::legacy::store::{DynHistoryStore, HistoryStore, NoopHistoryStore};
-use crate::legacy::{FlowHistory, HistoryEntry};
 
 /// Agent-id label used when pushing messages into [`FlowHistory`].
 const CHAT_AGENT_ID: &str = "chat";
 
-/// Error returned by [`Chat`] operations.
+/// Error returned by compatibility-only [`Chat`] operations.
 #[derive(Debug, Error)]
 pub enum ChatError {
     #[error(transparent)]
@@ -303,17 +303,17 @@ impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
     }
 }
 
-/// Stateful single-conversation chat session backed by [`FlowHistory`].
+/// Compatibility-only single-conversation chat backed by [`FlowHistory`].
 ///
 /// `Chat<String, String>` is plain text chat. Any non-`String` input or output
 /// type switches the session into JSON mode for that side.
 ///
 /// One instance owns exactly one conversation. For multi-user or multi-agent
-/// scenarios use [`FlowRuntime`](crate::legacy::FlowRuntime).
+/// scenarios use [`FlowRuntime`](super::FlowRuntime).
 ///
 /// **Supported:** text and typed JSON sessions, plus multimodal input via
 /// [`send_message`](Chat::send_message) on `Chat<String, Output>`.
-/// **Not supported:** tool calls. Use [`Flow`](crate::legacy::Flow) for that.
+/// **Not supported:** tool calls. Use [`Flow`](super::Flow) for that.
 pub struct Chat<Input = String, Output = String>
 where
     Input: ChatType,
@@ -480,7 +480,7 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
 
     /// Clones session entries to satisfy the compactor's borrowing contract.
     /// The clone is O(n) in history length; a
-    /// [`SlidingWindowCompactor`](crate::legacy::SlidingWindowCompactor) keeps
+    /// [`SlidingWindowCompactor`](super::SlidingWindowCompactor) keeps
     /// n small.
     async fn compact_history(&mut self) {
         let owned: Vec<HistoryEntry> = self

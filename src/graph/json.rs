@@ -116,32 +116,32 @@ impl JsonInvoker {
                 let input = boundary_to_runtime(input, "start input")?;
                 let mut runtime = self
                     .prepared
-                    .start(input)?
+                    .start(input, ctx)?
                     .with_runtime_services(self.services.clone());
-                let step = runtime.next(ctx).await?;
+                let step = runtime.next().await?;
                 (runtime, step)
             }
             JsonRequest::Next { snapshot, .. } => {
-                let mut runtime = self.restore(snapshot)?;
-                let step = runtime.next(ctx).await?;
+                let mut runtime = self.restore(snapshot, ctx)?;
+                let step = runtime.next().await?;
                 (runtime, step)
             }
             JsonRequest::Resume {
                 snapshot, input, ..
             } => {
-                let mut runtime = self.restore(snapshot)?;
+                let mut runtime = self.restore(snapshot, ctx)?;
                 validate_external_value(runtime.suspension_type_spec()?, &input, "resume input")?;
                 let input = boundary_to_runtime(input, "resume input")?;
-                let step = runtime.resume(input, ctx).await?;
+                let step = runtime.resume_value(input).await?;
                 (runtime, step)
             }
         };
         response_from_step(&mut runtime, step)
     }
 
-    fn restore(&self, snapshot: Snapshot) -> Result<Runtime, GraphError> {
+    fn restore(&self, snapshot: Snapshot, ctx: Context) -> Result<Runtime, GraphError> {
         self.prepared
-            .restore(snapshot)
+            .restore(snapshot, ctx)
             .map(|runtime| runtime.with_runtime_services(self.services.clone()))
     }
 }

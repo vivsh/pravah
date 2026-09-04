@@ -419,10 +419,9 @@ fn test_context(factory: RecordedFactory, trace: Option<Arc<BudgetTrace>>) -> Co
 async fn run_to_output(
     flow: &CompiledFlow<BudgetRequest, BudgetAnswer>,
     runtime: &mut Runtime,
-    ctx: Context,
 ) -> Result<BudgetAnswer, GraphError> {
     loop {
-        match runtime.next(ctx.clone()).await? {
+        match runtime.next().await? {
             Step::Continue => {}
             Step::Done(value) => return flow.decode_output(value),
             Step::Suspend(_) => {
@@ -449,8 +448,10 @@ async fn budgets_share_tool_visibility_and_conclusion_control() {
     let factory = RecordedFactory::new(responses);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(Arc::clone(&trace)));
-    let mut runtime = flow.runtime(BudgetRequest { text: "run".into() }).unwrap();
-    let output = run_to_output(&flow, &mut runtime, ctx).await.unwrap();
+    let mut runtime = flow
+        .start(BudgetRequest { text: "run".into() }, ctx)
+        .unwrap();
+    let output = run_to_output(&flow, &mut runtime).await.unwrap();
 
     assert_eq!(
         output,
@@ -519,9 +520,11 @@ async fn agent_only_budget_forces_one_tool_disabled_conclusion() {
         output_response("turn ceiling"),
     ]);
     let ctx = test_context(factory.clone(), None);
-    let mut runtime = flow.runtime(BudgetRequest { text: "run".into() }).unwrap();
+    let mut runtime = flow
+        .start(BudgetRequest { text: "run".into() }, ctx)
+        .unwrap();
 
-    let output = run_to_output(&flow, &mut runtime, ctx).await.unwrap();
+    let output = run_to_output(&flow, &mut runtime).await.unwrap();
     assert_eq!(output.text, "turn ceiling");
     let options = factory.options();
     assert_eq!(options[0].tools.len(), 1);
@@ -537,9 +540,11 @@ async fn tool_only_budget_leaves_model_turns_unrestricted() {
         output_response("tool ceiling"),
     ]);
     let ctx = test_context(factory.clone(), None);
-    let mut runtime = flow.runtime(BudgetRequest { text: "run".into() }).unwrap();
+    let mut runtime = flow
+        .start(BudgetRequest { text: "run".into() }, ctx)
+        .unwrap();
 
-    let output = run_to_output(&flow, &mut runtime, ctx).await.unwrap();
+    let output = run_to_output(&flow, &mut runtime).await.unwrap();
     assert_eq!(output.text, "tool ceiling");
     let options = factory.options();
     assert_eq!(options[0].tools.len(), 1);
@@ -558,9 +563,11 @@ async fn last_budgeted_turn_may_complete_naturally() {
     let factory = RecordedFactory::new([output_response("natural")]);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(trace));
-    let mut runtime = flow.runtime(BudgetRequest { text: "run".into() }).unwrap();
+    let mut runtime = flow
+        .start(BudgetRequest { text: "run".into() }, ctx)
+        .unwrap();
 
-    let output = run_to_output(&flow, &mut runtime, ctx).await.unwrap();
+    let output = run_to_output(&flow, &mut runtime).await.unwrap();
     assert_eq!(output.text, "natural");
     assert_eq!(factory.options().len(), 1);
     assert!(
@@ -581,12 +588,15 @@ async fn budget_conclusion_preserves_exit_tool_output() {
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(trace));
     let mut runtime = flow
-        .runtime(BudgetRequest {
-            text: "exit".into(),
-        })
+        .start(
+            BudgetRequest {
+                text: "exit".into(),
+            },
+            ctx,
+        )
         .unwrap();
 
-    let output = run_to_output(&flow, &mut runtime, ctx).await.unwrap();
+    let output = run_to_output(&flow, &mut runtime).await.unwrap();
     assert_eq!(output.text, "exit done");
     assert!(factory.options()[1].tools.is_empty());
     assert!(factory.options()[1].output_schema.is_some());
@@ -607,9 +617,11 @@ async fn rejected_proposal_does_not_consume_tool_budget() {
         output_response("done"),
     ]);
     let ctx = test_context(factory.clone(), None);
-    let mut runtime = flow.runtime(BudgetRequest { text: "run".into() }).unwrap();
+    let mut runtime = flow
+        .start(BudgetRequest { text: "run".into() }, ctx)
+        .unwrap();
 
-    let output = run_to_output(&flow, &mut runtime, ctx).await.unwrap();
+    let output = run_to_output(&flow, &mut runtime).await.unwrap();
     assert_eq!(output.text, "done");
     let options = factory.options();
     assert_eq!(options[0].tools.len(), 1);
@@ -628,24 +640,18 @@ async fn keep_alive_agent_resets_budgets_for_each_invocation() {
         output_response("second answer"),
     ]);
     let ctx = test_context(factory.clone(), None);
-    let mut chat = Chat::new(keep_alive_budget_agent);
+    let mut chat = Chat::new(keep_alive_budget_agent, ctx);
 
     let first = chat
-        .send(
-            BudgetRequest {
-                text: "first".into(),
-            },
-            ctx.clone(),
-        )
+        .send(BudgetRequest {
+            text: "first".into(),
+        })
         .await
         .unwrap();
     let second = chat
-        .send(
-            BudgetRequest {
-                text: "second".into(),
-            },
-            ctx,
-        )
+        .send(BudgetRequest {
+            text: "second".into(),
+        })
         .await
         .unwrap();
     assert_eq!(first.output.text, "first answer");
@@ -678,9 +684,9 @@ async fn activation_validates_only_effective_budget_errors() {
     let factory = RecordedFactory::new([output_response("filtered")]);
     let ctx = test_context(factory.clone(), None);
     let mut runtime = filtered
-        .runtime(BudgetRequest { text: "run".into() })
+        .start(BudgetRequest { text: "run".into() }, ctx)
         .unwrap();
-    let output = run_to_output(&filtered, &mut runtime, ctx).await.unwrap();
+    let output = run_to_output(&filtered, &mut runtime).await.unwrap();
     assert_eq!(output.text, "filtered");
     assert!(factory.options()[0].tools.is_empty());
 
@@ -691,10 +697,13 @@ async fn activation_validates_only_effective_budget_errors() {
 async fn assert_invalid_budget_configuration() {
     let invalid = compile(invalid_budget_flow).expect("invalid config is runtime data");
     let mut runtime = invalid
-        .runtime(BudgetRequest { text: "run".into() })
+        .start(
+            BudgetRequest { text: "run".into() },
+            Context::new(FlowConf::default()),
+        )
         .unwrap();
     let error = runtime
-        .next(Context::new(FlowConf::default()))
+        .next()
         .await
         .expect_err("invalid budget configuration should fail");
     let message = error.to_string();
@@ -714,8 +723,10 @@ async fn budget_state_restores_without_reconfiguration() {
     ]);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(Arc::clone(&trace)));
-    let mut runtime = flow.runtime(BudgetRequest { text: "run".into() }).unwrap();
-    advance_through_after_tools(&mut runtime, ctx.clone(), &trace).await;
+    let mut runtime = flow
+        .start(BudgetRequest { text: "run".into() }, ctx.clone())
+        .unwrap();
+    advance_through_after_tools(&mut runtime, &trace).await;
 
     let snapshot = runtime.snapshot().unwrap();
     let json = serde_json::to_vec(&snapshot).unwrap();
@@ -723,8 +734,8 @@ async fn budget_state_restores_without_reconfiguration() {
     let mut cbor = Vec::new();
     ciborium::into_writer(&from_json, &mut cbor).unwrap();
     let restored_snapshot = ciborium::from_reader(cbor.as_slice()).unwrap();
-    let mut restored = flow.prepared().restore(restored_snapshot).unwrap();
-    let output = run_to_output(&flow, &mut restored, ctx).await.unwrap();
+    let mut restored = flow.restore(restored_snapshot, ctx).unwrap();
+    let output = run_to_output(&flow, &mut restored).await.unwrap();
 
     assert_eq!(output.text, "restored");
     assert!(factory.options()[1].tools.is_empty());
@@ -737,8 +748,10 @@ async fn restore_rejects_malformed_budget_state() {
     let factory = RecordedFactory::new([output_response("unused")]);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory, Some(trace));
-    let mut runtime = flow.runtime(BudgetRequest { text: "run".into() }).unwrap();
-    runtime.next(ctx).await.unwrap();
+    let mut runtime = flow
+        .start(BudgetRequest { text: "run".into() }, ctx.clone())
+        .unwrap();
+    runtime.next().await.unwrap();
     let mut snapshot = runtime.snapshot().unwrap();
     let frame = snapshot.state.frame_mut(0).unwrap();
     let checkpoint = &mut Arc::make_mut(&mut frame.checkpoints)[0].value;
@@ -746,7 +759,7 @@ async fn restore_rejects_malformed_budget_state() {
     encoded["budget"]["tools"][0]["remaining"] = json!(2);
     *checkpoint = to_value(encoded).unwrap();
 
-    let error = match flow.prepared().restore(snapshot) {
+    let error = match flow.restore(snapshot, ctx) {
         Ok(_) => panic!("remaining calls above the limit must fail"),
         Err(error) => error,
     };
@@ -768,12 +781,12 @@ async fn history_failure_leaves_budget_admission_retryable() {
         fail_at: 2,
     };
     let mut runtime = flow
-        .runtime(BudgetRequest { text: "run".into() })
+        .start(BudgetRequest { text: "run".into() }, ctx)
         .unwrap()
         .with_store(store);
 
-    await_history_failure(&mut runtime, ctx.clone()).await;
-    let output = run_to_output(&flow, &mut runtime, ctx).await.unwrap();
+    await_history_failure(&mut runtime).await;
+    let output = run_to_output(&flow, &mut runtime).await.unwrap();
     assert_eq!(output.text, "retried");
     let unavailable = factory.messages()[1]
         .iter()
@@ -783,9 +796,9 @@ async fn history_failure_leaves_budget_admission_retryable() {
 }
 
 /// Advances until the injected persistence error reaches the caller.
-async fn await_history_failure(runtime: &mut Runtime, ctx: Context) {
+async fn await_history_failure(runtime: &mut Runtime) {
     loop {
-        match runtime.next(ctx.clone()).await {
+        match runtime.next().await {
             Ok(Step::Continue) => {}
             Err(GraphError::HistoryPersistence(_)) => return,
             Ok(other) => panic!("expected retryable history failure, got {other:?}"),
@@ -795,9 +808,9 @@ async fn await_history_failure(runtime: &mut Runtime, ctx: Context) {
 }
 
 /// Advances until the controller has observed the complete accepted tool batch.
-async fn advance_through_after_tools(runtime: &mut Runtime, ctx: Context, trace: &BudgetTrace) {
+async fn advance_through_after_tools(runtime: &mut Runtime, trace: &BudgetTrace) {
     loop {
-        runtime.next(ctx.clone()).await.unwrap();
+        runtime.next().await.unwrap();
         let reached = trace
             .0
             .lock()

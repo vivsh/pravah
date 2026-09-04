@@ -1,4 +1,3 @@
-pub mod chat;
 pub mod clients;
 mod commons;
 pub mod context;
@@ -11,6 +10,12 @@ pub mod testing;
 pub mod tools;
 pub mod utils;
 
-pub use chat::{Chat, ChatBuilder, ChatError, ChatSnapshot, ChatTurn, ChatType, ChatWireKind};
 pub use context::{Context, FlowConf};
-pub use legacy::{Choice, CliMode, HumanInput, HumanOutput};
+pub use graph::{
+    Agent, AgentConfig, AgentDecision, AgentDirective, AgentInterventionPoint, AgentLoop,
+    AgentLoopMetrics, AgentResume, AgentSuspension, AgentToolProposal, AgentToolResult, Chat,
+    ChatTurn, CompiledFlow, EitherFlow, Flow, GraphError, McpResourceRef, Runtime, Snapshot, Step,
+    Suspension, ToolFilter, ToolInfo, Toolset, TypedMark, TypedVar, compile,
+};
+#[cfg(feature = "mcp")]
+pub use graph::{McpError, McpResourceInfo, McpServer};

@@ -34,7 +34,7 @@ fn test_runtime<T: Serialize>(
         target: "test input".into(),
         reason: err.to_string(),
     })?;
-    PreparedGraph::new(graph, registry)?.start(input)
+    PreparedGraph::new(graph, registry)?.start(input, ctx())
 }
 
 fn any_type(name: &str) -> TypeSpec {
@@ -122,8 +122,8 @@ async fn runtime_executes_one_node_per_next() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(2), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Done(rv!(6)));
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(6)));
 }
 
 #[tokio::test]
@@ -157,18 +157,19 @@ async fn mark_goto_reenters_edge_with_new_generation() {
         test_runtime(graph, rv!(1), HandlerRegistry::new()).expect("runtime should build");
 
     assert_eq!(
-        runtime.next(ctx()).await.unwrap(),
+        runtime.next().await.unwrap(),
         Step::Suspend(rv!({"need": "number"}))
     );
-    assert_eq!(runtime.resume(rv!(2), ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.resume_value(rv!(2)).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
     assert_eq!(runtime.state().frames[0].values[input.0], Some(rv!(2)));
     assert_eq!(
-        runtime.next(ctx()).await.unwrap(),
+        runtime.next().await.unwrap(),
         Step::Suspend(rv!({"need": "number"}))
     );
 }
 
+/// Verifies typed resume validation leaves a suspension unchanged and retryable.
 #[tokio::test]
 async fn typed_mark_goto_is_string_free_and_builder_checked() {
     let root = Flow::<i64>::root();
@@ -176,12 +177,16 @@ async fn typed_mark_goto_is_string_free_and_builder_checked() {
     let _loop_edge = root.clone().suspend::<i64>().goto(start);
     let exit = root.map(|value| value);
     let flow = exit.finish::<i64>().expect("typed mark/goto graph builds");
-    let mut runtime = flow.runtime(1).expect("runtime should build");
+    let mut runtime = flow.start(1, ctx()).expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Suspend(rv!(1)));
-    assert_eq!(runtime.resume(rv!(3), ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Suspend(rv!(3)));
+    assert_eq!(runtime.next().await.unwrap(), Step::Suspend(rv!(1)));
+    let before = serde_json::to_vec(&runtime.snapshot().unwrap()).unwrap();
+    assert!(runtime.resume("not a number").await.is_err());
+    let after = serde_json::to_vec(&runtime.snapshot().unwrap()).unwrap();
+    assert_eq!(before, after);
+    assert_eq!(runtime.resume(3_i64).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Suspend(rv!(3)));
 }
 
 #[test]
@@ -318,15 +323,15 @@ async fn subflow_pushes_frame_and_returns_to_parent_edge() {
         .expect("handler should insert");
     let mut runtime = test_runtime(parent, rv!(4), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
     assert_eq!(runtime.state().frames.len(), 2);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
     assert_eq!(
         runtime.state().frames.len(),
         1,
         "child exit should cascade to parent"
     );
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Done(rv!(10)));
+    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(10)));
 }
 
 #[tokio::test]
@@ -385,10 +390,10 @@ async fn multi_consumer_subflow_input_is_not_moved_from_parent_edge() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Done(rv!([5, 10])));
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!([5, 10])));
 }
 
 #[tokio::test]
@@ -442,8 +447,8 @@ async fn local_load_and_store_are_pure_vm_state_nodes() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Done(rv!(15)));
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(15)));
     let root = runtime.state().frames.first();
     assert!(root.is_none(), "done pops the root frame");
 }
@@ -480,7 +485,7 @@ async fn failed_store_output_validation_does_not_mutate_variable() {
     let mut runtime = test_runtime(graph, rv!(5), registry).expect("runtime should build");
 
     let err = runtime
-        .next(ctx())
+        .next()
         .await
         .expect_err("passthrough output schema should fail");
     match err {
@@ -512,16 +517,16 @@ async fn suspend_node_resume_preserves_frame_stack() {
     let mut runtime = test_runtime(graph, rv!(7), registry).expect("runtime should build");
 
     assert_eq!(
-        runtime.next(ctx()).await.unwrap(),
+        runtime.next().await.unwrap(),
         Step::Suspend(rv!({"need": "resume"}))
     );
     assert_eq!(runtime.state().frames.len(), 1);
     assert!(
-        runtime.next(ctx()).await.is_err(),
+        runtime.next().await.is_err(),
         "next while suspended must fail"
     );
     assert_eq!(
-        runtime.resume(rv!(5), ctx()).await.unwrap(),
+        runtime.resume_value(rv!(5)).await.unwrap(),
         Step::Done(rv!(5))
     );
 }
@@ -544,11 +549,8 @@ async fn snapshot_rejects_suspension_graph_frame_mismatch() {
     let graph = builder.build().expect("graph should build");
     let registry = HandlerRegistry::new();
     let prepared = PreparedGraph::new(graph, registry).expect("graph should prepare");
-    let mut runtime = prepared.start(rv!(7)).expect("runtime should build");
-    assert!(matches!(
-        runtime.next(ctx()).await.unwrap(),
-        Step::Suspend(_)
-    ));
+    let mut runtime = prepared.start(rv!(7), ctx()).expect("runtime should build");
+    assert!(matches!(runtime.next().await.unwrap(), Step::Suspend(_)));
 
     let mut snapshot = runtime.snapshot().expect("snapshot should build");
     snapshot
@@ -557,7 +559,7 @@ async fn snapshot_rejects_suspension_graph_frame_mismatch() {
         .as_mut()
         .expect("snapshot should be suspended")
         .frame_depth = 999;
-    let err = match prepared.restore(snapshot) {
+    let err = match prepared.restore(snapshot, ctx()) {
         Ok(_) => panic!("bad suspension graph should be rejected"),
         Err(err) => err,
     };
@@ -600,9 +602,9 @@ async fn snapshot_rejects_continuation_inbox_without_checkpoint() {
         .insert_continuation("continuation", StartChildThenError)
         .expect("handler should insert");
     let prepared = PreparedGraph::new(graph, registry).expect("graph should prepare");
-    let mut runtime = prepared.start(rv!(5)).expect("runtime should build");
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
+    let mut runtime = prepared.start(rv!(5), ctx()).expect("runtime should build");
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
 
     let mut snapshot = runtime.snapshot().expect("snapshot should build");
     let frame = snapshot
@@ -611,7 +613,7 @@ async fn snapshot_rejects_continuation_inbox_without_checkpoint() {
         .expect("parent frame should remain");
     assert_eq!(frame.continuation_inboxes[0].values.len(), 1);
     frame.checkpoints = Arc::default();
-    let err = match prepared.restore(snapshot) {
+    let err = match prepared.restore(snapshot, ctx()) {
         Ok(_) => panic!("inbox without checkpoint should be rejected"),
         Err(err) => err,
     };
@@ -656,13 +658,15 @@ async fn snapshot_restore_round_trips_edge_vm_state() {
         )
         .expect("handler should insert");
     let prepared = PreparedGraph::new(graph, registry).expect("graph should prepare");
-    let mut runtime = prepared.start(rv!(3)).expect("runtime should build");
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
+    let mut runtime = prepared.start(rv!(3), ctx()).expect("runtime should build");
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
 
     let snapshot = runtime.snapshot().expect("snapshot should build");
-    let mut restored = prepared.restore(snapshot).expect("snapshot should restore");
+    let mut restored = prepared
+        .restore(snapshot, ctx())
+        .expect("snapshot should restore");
 
-    assert_eq!(restored.next(ctx()).await.unwrap(), Step::Done(rv!(8)));
+    assert_eq!(restored.next().await.unwrap(), Step::Done(rv!(8)));
 }
 
 #[tokio::test]
@@ -687,7 +691,7 @@ async fn handler_output_schema_mismatch_is_fatal() {
     let mut runtime = test_runtime(graph, rv!(1), registry).expect("runtime should build");
 
     let err = runtime
-        .next(ctx())
+        .next()
         .await
         .expect_err("schema mismatch should fail");
     assert!(matches!(err, GraphError::Schema { .. }));
@@ -845,17 +849,19 @@ async fn continuation_owned_suspension_round_trips_through_snapshot() {
         .insert_continuation("continuation", SuspendOnceContinuation)
         .expect("handler should insert");
     let prepared = PreparedGraph::new(graph, registry).expect("graph should prepare");
-    let mut runtime = prepared.start(rv!(1)).expect("runtime should build");
+    let mut runtime = prepared.start(rv!(1), ctx()).expect("runtime should build");
 
     assert_eq!(
-        runtime.next(ctx()).await.expect("continuation should run"),
+        runtime.next().await.expect("continuation should run"),
         Step::Suspend(rv!({"prompt": "replacement number"}))
     );
     let snapshot = runtime.snapshot().expect("snapshot should encode");
-    let mut runtime = prepared.restore(snapshot).expect("snapshot should restore");
+    let mut runtime = prepared
+        .restore(snapshot, ctx())
+        .expect("snapshot should restore");
     assert_eq!(
         runtime
-            .resume(rv!(9), ctx())
+            .resume_value(rv!(9))
             .await
             .expect("continuation should resume"),
         Step::Done(rv!(9))
@@ -885,7 +891,7 @@ async fn run_static_continuation_transition(
         .insert_continuation("continuation", StaticStartContinuation { transition })
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(1), registry).expect("runtime should build");
-    runtime.next(ctx()).await
+    runtime.next().await
 }
 
 struct AssertNoServiceSmuggling;
@@ -946,7 +952,7 @@ async fn continuation_context_does_not_smuggle_runtime_services_into_context() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!({}), registry).expect("runtime should build");
 
-    let step = runtime.next(ctx()).await.expect("continuation should run");
+    let step = runtime.next().await.expect("continuation should run");
     assert_eq!(step, Step::Done(rv!(true)));
 }
 
@@ -1029,7 +1035,7 @@ async fn failed_continuation_write_plan_does_not_partially_write_edges() {
     let mut runtime = test_runtime(graph, rv!(0), registry).expect("runtime should build");
 
     let err = runtime
-        .next(ctx())
+        .next()
         .await
         .expect_err("duplicate continuation write should fail");
     assert!(err.to_string().contains("written more than once"));
@@ -1201,9 +1207,9 @@ async fn continuation_child_result_error_preserves_checkpoint_and_inbox() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
     assert_eq!(runtime.state().frames.len(), 2);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
     assert_eq!(runtime.state().frames.len(), 1);
     let frame = runtime
         .state()
@@ -1214,7 +1220,7 @@ async fn continuation_child_result_error_preserves_checkpoint_and_inbox() {
     assert_eq!(frame.continuation_inboxes[0].len(), 1);
 
     let err = runtime
-        .next(ctx())
+        .next()
         .await
         .expect_err("child-result poll should fail");
     assert!(err.to_string().contains("child result handling failed"));
@@ -1265,7 +1271,7 @@ async fn failed_continuation_child_preflight_does_not_mutate_parent_state() {
     let mut runtime = test_runtime(graph, rv!(5), registry).expect("runtime should build");
 
     let err = runtime
-        .next(ctx())
+        .next()
         .await
         .expect_err("invalid child input should fail before parent mutation");
     assert!(matches!(err, GraphError::Schema { .. }));
@@ -1305,8 +1311,8 @@ async fn continuation_checkpoint_only_polls_later() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(4), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Done(rv!(5)));
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(5)));
 }
 
 #[test]
@@ -1472,9 +1478,9 @@ async fn inherit_is_visible_in_child_frame() {
         .expect("handler should insert");
     let mut runtime = test_runtime(parent, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Done(rv!(15)));
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(15)));
 }
 
 #[tokio::test]
@@ -1549,8 +1555,8 @@ async fn child_inherit_uses_default_when_parent_variable_is_missing() {
         .expect("handler should insert");
     let mut runtime = test_runtime(parent, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Done(rv!(12)));
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(12)));
 }
 
 #[tokio::test]
@@ -1631,8 +1637,8 @@ async fn child_inherit_copies_parent_variable_when_available() {
         .expect("handler should insert");
     let mut runtime = test_runtime(parent, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Done(rv!(15)));
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(15)));
 }
 
 #[tokio::test]
@@ -1730,7 +1736,7 @@ async fn child_inherit_writes_do_not_update_parent_frame() {
     let mut runtime = test_runtime(parent, rv!(5), registry).expect("runtime should build");
 
     let done = loop {
-        match runtime.next(ctx()).await.unwrap() {
+        match runtime.next().await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             other => panic!("expected continue or done, got {other:?}"),
@@ -1742,6 +1748,109 @@ async fn child_inherit_writes_do_not_update_parent_frame() {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct TypedAmount {
     value: i64,
+}
+
+struct ContextDelta(i64);
+
+/// Builds a test context carrying one invocation-specific arithmetic dependency.
+fn context_with_delta(delta: i64) -> Context {
+    let mut deps = Deps::default();
+    deps.insert(Arc::new(ContextDelta(delta)));
+    ctx().with_deps(deps)
+}
+
+/// Applies the dependency attached to the runtime context.
+async fn add_context_delta(
+    mut amount: TypedAmount,
+    ctx: Context,
+) -> Result<TypedAmount, GraphError> {
+    let delta = ctx
+        .require::<ContextDelta>()
+        .map_err(|err| GraphError::Invalid(err.to_string()))?;
+    amount.value += delta.0;
+    Ok(amount)
+}
+
+/// Builds two work steps that must observe one bound context.
+fn context_bound_amount(root: Flow<TypedAmount>) -> Flow<TypedAmount> {
+    root.work(add_context_delta).work(add_context_delta)
+}
+
+/// Builds a flow that can be snapshotted before its context-dependent work.
+fn context_restore_amount(root: Flow<TypedAmount>) -> Flow<TypedAmount> {
+    root.map(|mut amount| {
+        amount.value += 1;
+        amount
+    })
+    .work(add_context_delta)
+}
+
+/// Verifies one bound context is observed by every work step in an execution.
+#[tokio::test]
+async fn typed_execution_binds_context_across_steps() {
+    let flow = compile(context_bound_amount).unwrap();
+    let mut first = flow
+        .start(TypedAmount { value: 1 }, context_with_delta(2))
+        .unwrap();
+    let mut second = flow
+        .start(TypedAmount { value: 1 }, context_with_delta(3))
+        .unwrap();
+
+    assert_eq!(first.next().await.unwrap(), Step::Continue);
+    let Step::Done(first) = first.next().await.unwrap() else {
+        panic!("first execution should complete");
+    };
+    assert_eq!(flow.decode_output(first).unwrap().value, 5);
+    assert_eq!(second.next().await.unwrap(), Step::Continue);
+    let Step::Done(second) = second.next().await.unwrap() else {
+        panic!("second execution should complete");
+    };
+    assert_eq!(flow.decode_output(second).unwrap().value, 7);
+}
+
+/// Verifies restoration attaches fresh runtime dependencies without serializing them.
+#[tokio::test]
+async fn typed_restore_rebinds_context_and_snapshots_exclude_it() {
+    let flow = compile(context_restore_amount).unwrap();
+    let mut runtime = flow
+        .start(TypedAmount { value: 1 }, context_with_delta(2))
+        .unwrap();
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    let snapshot = runtime.snapshot().unwrap();
+    let encoded = serde_json::to_vec(&snapshot).unwrap();
+    let mut restored = flow.restore(snapshot, context_with_delta(10)).unwrap();
+    let Step::Done(output) = restored.next().await.unwrap() else {
+        panic!("restored execution should complete");
+    };
+
+    assert_eq!(flow.decode_output(output).unwrap().value, 12);
+    assert!(!String::from_utf8_lossy(&encoded).contains("ContextDelta"));
+}
+
+/// Verifies runtime context does not affect JSON or CBOR snapshot bytes.
+#[test]
+fn snapshot_encoding_is_independent_of_bound_context() {
+    let flow = compile(context_bound_amount).unwrap();
+    let first = flow
+        .start(TypedAmount { value: 1 }, context_with_delta(2))
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    let second = flow
+        .start(TypedAmount { value: 1 }, context_with_delta(9))
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    let mut first_cbor = Vec::new();
+    let mut second_cbor = Vec::new();
+    ciborium::into_writer(&first, &mut first_cbor).unwrap();
+    ciborium::into_writer(&second, &mut second_cbor).unwrap();
+
+    assert_eq!(
+        serde_json::to_vec(&first).unwrap(),
+        serde_json::to_vec(&second).unwrap()
+    );
+    assert_eq!(first_cbor, second_cbor);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1779,10 +1888,10 @@ async fn typed_variable_handles_drive_load_and_store() {
         .finish::<TypedAmount>()
         .expect("flow should compile");
     let mut runtime = flow
-        .runtime(TypedAmount { value: 4 })
+        .start(TypedAmount { value: 4 }, ctx())
         .expect("runtime should build");
     let done = loop {
-        match runtime.next(ctx()).await.unwrap() {
+        match runtime.next().await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -1803,10 +1912,10 @@ async fn typed_load_can_change_output_type() {
         .finish::<TypedAmount>()
         .expect("flow should compile");
     let mut runtime = flow
-        .runtime(TypedAmount { value: 4 })
+        .start(TypedAmount { value: 4 }, ctx())
         .expect("runtime should build");
     let done = loop {
-        match runtime.next(ctx()).await.unwrap() {
+        match runtime.next().await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -1858,12 +1967,12 @@ async fn typed_fluent_api_supports_current_style_map_split_merge() {
         .expect("flow should finish");
 
     let mut runtime = flow
-        .runtime(TypedAmount { value: 3 })
+        .start(TypedAmount { value: 3 }, ctx())
         .expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    let done = runtime.next(ctx()).await.unwrap();
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    let done = runtime.next().await.unwrap();
     let Step::Done(value) = done else {
         panic!("expected done, got {done:?}");
     };
@@ -1897,11 +2006,11 @@ async fn typed_fluent_api_supports_nary_split_merge() {
         .expect("flow should finish");
 
     let mut runtime = flow
-        .runtime(TypedAmount { value: 2 })
+        .start(TypedAmount { value: 2 }, ctx())
         .expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
-    let done = runtime.next(ctx()).await.unwrap();
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    let done = runtime.next().await.unwrap();
     let Step::Done(value) = done else {
         panic!("expected done, got {done:?}");
     };
@@ -1943,10 +2052,10 @@ async fn typed_fluent_api_supports_either_branch() {
     let flow = compile(typed_choice).expect("flow should compile");
 
     let mut runtime = flow
-        .runtime(TypedChoice { value: -7 })
+        .start(TypedChoice { value: -7 }, ctx())
         .expect("runtime should build");
     let done = loop {
-        match runtime.next(ctx()).await.unwrap() {
+        match runtime.next().await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -1956,10 +2065,10 @@ async fn typed_fluent_api_supports_either_branch() {
     assert_eq!(output.value, 7);
 
     let mut runtime = flow
-        .runtime(TypedChoice { value: 8 })
+        .start(TypedChoice { value: 8 }, ctx())
         .expect("runtime should build");
     let done = loop {
-        match runtime.next(ctx()).await.unwrap() {
+        match runtime.next().await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -1993,12 +2102,15 @@ fn typed_batch(root: Flow<TypedBatch>) -> Flow<Vec<TypedAmount>> {
 async fn typed_fluent_api_supports_each() {
     let flow = compile(typed_batch).expect("flow should compile");
     let mut runtime = flow
-        .runtime(TypedBatch {
-            values: vec![TypedItem { value: 1 }, TypedItem { value: 2 }],
-        })
+        .start(
+            TypedBatch {
+                values: vec![TypedItem { value: 1 }, TypedItem { value: 2 }],
+            },
+            ctx(),
+        )
         .expect("runtime should build");
     let done = loop {
-        match runtime.next(ctx()).await.unwrap() {
+        match runtime.next().await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -2085,11 +2197,11 @@ async fn typed_builder_builds_map_work_and_continuation_without_fluent_api() {
         .finish(continued)
         .expect("typed builder should finish");
     let mut runtime = flow
-        .runtime(TypedAmount { value: 3 })
+        .start(TypedAmount { value: 3 }, ctx())
         .expect("runtime should build");
 
     let done = loop {
-        match runtime.next(ctx()).await.unwrap() {
+        match runtime.next().await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -2153,11 +2265,11 @@ async fn external_facade_can_wrap_typed_builder_without_edge_node() {
         .finish()
         .expect("external facade should finish");
     let mut runtime = flow
-        .runtime(TypedAmount { value: 1 })
+        .start(TypedAmount { value: 1 }, ctx())
         .expect("runtime should build");
 
     let done = loop {
-        match runtime.next(ctx()).await.unwrap() {
+        match runtime.next().await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -2438,13 +2550,13 @@ async fn typed_edge_agent_without_tools_uses_structured_output() {
         .finish::<EdgeAgentInput>()
         .expect("agent flow should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
-    let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
-        .expect("runtime should build");
     let ctx = ctx().with_client_factory(factory.clone());
+    let mut runtime = flow
+        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    let done = match runtime.next(ctx).await.unwrap() {
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    let done = match runtime.next().await.unwrap() {
         Step::Done(value) => flow.decode_output(value).unwrap(),
         other => panic!("expected done, got {other:?}"),
     };
@@ -2554,15 +2666,11 @@ async fn adaptive_agent_control_observes_boundaries_and_changes_tool_visibility(
     deps.insert(Arc::clone(&trace));
     let ctx = ctx().with_deps(deps).with_client_factory(factory.clone());
     let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
+        .start(EdgeAgentInput { text: "hi".into() }, ctx)
         .expect("runtime should build");
 
     let output = loop {
-        match runtime
-            .next(ctx.clone())
-            .await
-            .expect("agent step should run")
-        {
+        match runtime.next().await.expect("agent step should run") {
             Step::Continue => {}
             Step::Done(value) => break flow.decode_output(value).expect("output should decode"),
             Step::Suspend(_) => panic!("controller should not suspend"),
@@ -2636,15 +2744,11 @@ async fn agent_control_recovers_from_hidden_tool_calls_and_forces_conclusion() {
     deps.insert(Arc::clone(&observed));
     let ctx = ctx().with_deps(deps).with_client_factory(factory.clone());
     let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
+        .start(EdgeAgentInput { text: "hi".into() }, ctx)
         .expect("runtime should build");
 
     let output = loop {
-        match runtime
-            .next(ctx.clone())
-            .await
-            .expect("agent step should run")
-        {
+        match runtime.next().await.expect("agent step should run") {
             Step::Continue => {}
             Step::Done(value) => break flow.decode_output(value).expect("output should decode"),
             Step::Suspend(_) => panic!("controller should not suspend"),
@@ -2684,21 +2788,17 @@ async fn agent_policy_abort_leaves_runtime_retryable() {
         .finish::<EdgeAgentInput>()
         .expect("aborting agent should compile");
     let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
+        .start(EdgeAgentInput { text: "hi".into() }, ctx())
         .expect("runtime should build");
-    let ctx = ctx();
     assert_eq!(
-        runtime
-            .next(ctx.clone())
-            .await
-            .expect("configure should run"),
+        runtime.next().await.expect("configure should run"),
         Step::Continue
     );
     let before = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
         .expect("snapshot should encode as JSON");
 
     let err = runtime
-        .next(ctx)
+        .next()
         .await
         .expect_err("policy should abort the boundary");
     assert!(matches!(err, GraphError::AgentPolicyAbort { .. }));
@@ -2717,18 +2817,15 @@ async fn forced_agent_conclusion_validates_output_before_commit() {
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "wrong": true }));
     let ctx = ctx().with_client_factory(factory);
     let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
+        .start(EdgeAgentInput { text: "hi".into() }, ctx)
         .expect("runtime should build");
     assert_eq!(
-        runtime
-            .next(ctx.clone())
-            .await
-            .expect("configure should run"),
+        runtime.next().await.expect("configure should run"),
         Step::Continue
     );
     assert_eq!(
         runtime
-            .next(ctx.clone())
+            .next()
             .await
             .expect("conclusion decision should commit"),
         Step::Continue
@@ -2737,7 +2834,7 @@ async fn forced_agent_conclusion_validates_output_before_commit() {
         .expect("snapshot should encode as JSON");
 
     let err = runtime
-        .next(ctx)
+        .next()
         .await
         .expect_err("invalid conclusion output should fail");
     assert!(matches!(err, GraphError::AgentConclusion { .. }));
@@ -2762,15 +2859,11 @@ async fn agent_controller_suspension_restores_and_accepts_typed_resume() {
         .then_output(serde_json::json!({ "text": "done" }));
     let ctx = ctx().with_client_factory(factory);
     let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
+        .start(EdgeAgentInput { text: "hi".into() }, ctx.clone())
         .expect("runtime should build");
 
     let payload = loop {
-        match runtime
-            .next(ctx.clone())
-            .await
-            .expect("agent step should run")
-        {
+        match runtime.next().await.expect("agent step should run") {
             Step::Continue => {}
             Step::Suspend(payload) => break payload,
             Step::Done(_) => panic!("agent should suspend before its tool"),
@@ -2789,8 +2882,7 @@ async fn agent_controller_suspension_restores_and_accepts_typed_resume() {
     let restored_cbor: Snapshot =
         ciborium::from_reader(cbor.as_slice()).expect("snapshot should decode from CBOR");
     let mut runtime = flow
-        .prepared()
-        .restore(restored_cbor)
+        .restore(restored_cbor, ctx)
         .expect("snapshot should restore");
 
     let before_invalid = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
@@ -2800,10 +2892,7 @@ async fn agent_controller_suspension_restores_and_accepts_typed_resume() {
         tools: Some(vec!["echo_in".into(), "echo_in".into()]),
     };
     let err = runtime
-        .resume(
-            to_value(invalid).expect("resume should encode"),
-            ctx.clone(),
-        )
+        .resume(invalid)
         .await
         .expect_err("duplicate resume tools should fail");
     assert!(matches!(err, GraphError::AgentResumeValidation(_)));
@@ -2813,20 +2902,13 @@ async fn agent_controller_suspension_restores_and_accepts_typed_resume() {
 
     assert_eq!(
         runtime
-            .resume(
-                to_value(AgentResume::Continue).expect("resume should encode"),
-                ctx.clone(),
-            )
+            .resume(AgentResume::Continue)
             .await
             .expect("resume should succeed"),
         Step::Continue
     );
     let output = loop {
-        match runtime
-            .next(ctx.clone())
-            .await
-            .expect("agent step should run")
-        {
+        match runtime.next().await.expect("agent step should run") {
             Step::Continue => {}
             Step::Done(value) => break flow.decode_output(value).expect("output should decode"),
             Step::Suspend(_) => panic!("committed boundary should not be reevaluated"),
@@ -2954,10 +3036,10 @@ async fn agent_configuration_runs_once_across_snapshot_restore() {
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
     let ctx = ctx().with_deps(deps).with_client_factory(factory.clone());
     let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
+        .start(EdgeAgentInput { text: "hi".into() }, ctx.clone())
         .expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
     assert_eq!(calls.0.load(Ordering::SeqCst), 1);
     let snapshot = runtime
         .snapshot()
@@ -2977,10 +3059,9 @@ async fn agent_configuration_runs_once_across_snapshot_restore() {
     let snapshot =
         ciborium::from_reader(cbor.as_slice()).expect("snapshot should decode from CBOR");
     let mut restored = flow
-        .prepared()
-        .restore(snapshot)
+        .restore(snapshot, ctx)
         .expect("configured runtime should restore");
-    assert!(matches!(restored.next(ctx).await.unwrap(), Step::Done(_)));
+    assert!(matches!(restored.next().await.unwrap(), Step::Done(_)));
     assert_eq!(calls.0.load(Ordering::SeqCst), 1);
     let preamble = factory.options()[0]
         .preamble
@@ -2994,11 +3075,11 @@ async fn graph_chat_uses_one_runtime_across_turns() {
     let factory = EdgeScriptedFactory::new()
         .then_output(serde_json::json!({ "text": "first" }))
         .then_output(serde_json::json!({ "text": "second" }));
-    let mut chat = Chat::<EdgeAgentInput, EdgeAgentOutput>::new(edge_chat_agent);
     let ctx = ctx().with_client_factory(factory.clone());
+    let mut chat = Chat::<EdgeAgentInput, EdgeAgentOutput>::new(edge_chat_agent, ctx);
 
     let first = chat
-        .send(EdgeAgentInput { text: "hi".into() }, ctx.clone())
+        .send(EdgeAgentInput { text: "hi".into() })
         .await
         .expect("first chat turn should run");
     assert_eq!(
@@ -3009,12 +3090,9 @@ async fn graph_chat_uses_one_runtime_across_turns() {
     );
 
     let second = chat
-        .send(
-            EdgeAgentInput {
-                text: "again".into(),
-            },
-            ctx,
-        )
+        .send(EdgeAgentInput {
+            text: "again".into(),
+        })
         .await
         .expect("second chat turn should run");
     assert_eq!(
@@ -3034,6 +3112,38 @@ async fn graph_chat_uses_one_runtime_across_turns() {
     );
 }
 
+/// Verifies services attached after chat restoration are applied to its runtime.
+#[tokio::test]
+async fn restored_graph_chat_uses_reattached_history_store() {
+    let factory = EdgeScriptedFactory::new()
+        .then_output(serde_json::json!({ "text": "first" }))
+        .then_output(serde_json::json!({ "text": "second" }));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = FailAtHistoryRecord {
+        calls: Arc::clone(&calls),
+        fail_at: usize::MAX,
+    };
+    let ctx = ctx().with_client_factory(factory);
+    let mut chat = Chat::new(edge_chat_agent, ctx.clone()).with_store(store.clone());
+
+    chat.send(EdgeAgentInput { text: "hi".into() })
+        .await
+        .expect("first chat turn should run");
+    let recorded_before_restore = calls.load(Ordering::SeqCst);
+    let snapshot = chat.snapshot().expect("chat should snapshot");
+    let mut restored = Chat::from_snapshot(edge_chat_agent, snapshot, ctx)
+        .expect("chat should restore")
+        .with_store(store);
+
+    restored
+        .send(EdgeAgentInput {
+            text: "again".into(),
+        })
+        .await
+        .expect("restored chat turn should run");
+    assert!(calls.load(Ordering::SeqCst) > recorded_before_restore);
+}
+
 #[tokio::test]
 async fn typed_edge_agent_provider_config_reaches_client_options() {
     let flow = Flow::<EdgeProviderConfigAgentInput>::root()
@@ -3041,13 +3151,13 @@ async fn typed_edge_agent_provider_config_reaches_client_options() {
         .finish::<EdgeProviderConfigAgentInput>()
         .expect("agent flow should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
-    let mut runtime = flow
-        .runtime(EdgeProviderConfigAgentInput { text: "hi".into() })
-        .expect("runtime should build");
     let ctx = ctx().with_client_factory(factory.clone());
+    let mut runtime = flow
+        .start(EdgeProviderConfigAgentInput { text: "hi".into() }, ctx)
+        .expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    assert!(matches!(runtime.next(ctx).await.unwrap(), Step::Done(_)));
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert!(matches!(runtime.next().await.unwrap(), Step::Done(_)));
 
     let options = factory.options();
     let provider_config = options
@@ -3337,13 +3447,13 @@ async fn typed_edge_agent_tool_function_round_trips_through_same_vm() {
             serde_json::json!({ "text": "hi" }),
         )])
         .then_output(serde_json::json!({ "text": "done" }));
-    let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
-        .expect("runtime should build");
     let ctx = ctx().with_client_factory(factory.clone());
+    let mut runtime = flow
+        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .expect("runtime should build");
 
     let done = loop {
-        match runtime.next(ctx.clone()).await.unwrap() {
+        match runtime.next().await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break flow.decode_output(value).unwrap(),
             other => panic!("expected continue or done, got {other:?}"),
@@ -3374,15 +3484,18 @@ async fn typed_edge_agent_filters_tools_in_prepared_order() {
         .finish::<EdgeAgentInput>()
         .expect("filtered agent should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
-    let mut runtime = flow
-        .runtime(EdgeAgentInput {
-            text: "suffix_in".into(),
-        })
-        .expect("runtime should build");
     let ctx = ctx().with_client_factory(factory.clone());
+    let mut runtime = flow
+        .start(
+            EdgeAgentInput {
+                text: "suffix_in".into(),
+            },
+            ctx,
+        )
+        .expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    assert!(matches!(runtime.next(ctx).await.unwrap(), Step::Done(_)));
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert!(matches!(runtime.next().await.unwrap(), Step::Done(_)));
     let options = factory.options();
     let names = options[0]
         .tools
@@ -3400,14 +3513,11 @@ async fn typed_edge_agent_configuration_failure_does_not_mutate_runtime() {
         .finish::<EdgeAgentInput>()
         .expect("failing agent definition should compile");
     let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
+        .start(EdgeAgentInput { text: "hi".into() }, ctx())
         .expect("runtime should build");
     let before = serde_json::to_value(runtime.snapshot().unwrap()).unwrap();
 
-    let err = runtime
-        .next(ctx())
-        .await
-        .expect_err("configuration should fail");
+    let err = runtime.next().await.expect_err("configuration should fail");
     let after = serde_json::to_value(runtime.snapshot().unwrap()).unwrap();
 
     assert!(matches!(err, GraphError::AgentConfiguration { .. }));
@@ -3422,16 +3532,16 @@ async fn typed_edge_agent_provider_is_resolved_at_dispatch() {
         .finish::<EdgeAgentInput>()
         .expect("agent flow should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
-    let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
-        .expect("runtime should build");
     let ctx = ctx().with_client_factory(factory.clone());
+    let mut runtime = flow
+        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .expect("runtime should build");
     assert!(factory.creates().is_empty());
 
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
     assert!(factory.creates().is_empty());
 
-    let done = match runtime.next(ctx).await.unwrap() {
+    let done = match runtime.next().await.unwrap() {
         Step::Done(value) => flow.decode_output(value).unwrap(),
         other => panic!("expected done, got {other:?}"),
     };
@@ -3457,19 +3567,19 @@ async fn typed_edge_agent_multiple_tool_calls_are_queued_on_single_vm_stack() {
             edge_tool_call("c2", "suffix_in", serde_json::json!({ "text": "bye" })),
         ])
         .then_output(serde_json::json!({ "text": "done" }));
-    let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
-        .expect("runtime should build");
     let ctx = ctx().with_client_factory(factory.clone());
+    let mut runtime = flow
+        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .expect("runtime should build");
 
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
     assert_eq!(runtime.state().frames.len(), 2);
 
     let done = loop {
-        match runtime.next(ctx.clone()).await.unwrap() {
+        match runtime.next().await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break flow.decode_output(value).unwrap(),
             other => panic!("expected continue or done, got {other:?}"),
@@ -3510,13 +3620,13 @@ async fn typed_edge_agent_same_tool_calls_run_in_deterministic_queue_order() {
             edge_tool_call("c2", "echo_in", serde_json::json!({ "text": "two" })),
         ])
         .then_output(serde_json::json!({ "text": "done" }));
-    let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
-        .expect("runtime should build");
     let ctx = ctx().with_client_factory(factory.clone());
+    let mut runtime = flow
+        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .expect("runtime should build");
 
     let done = loop {
-        match runtime.next(ctx.clone()).await.unwrap() {
+        match runtime.next().await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break flow.decode_output(value).unwrap(),
             other => panic!("expected continue or done, got {other:?}"),
@@ -3580,11 +3690,11 @@ fn repeated_flow(root: Flow<RepeatedFlowInput>) -> Flow<i64> {
 async fn typed_flow_reuses_same_subflow_with_namespaced_handlers() {
     let flow = compile(repeated_flow).expect("repeated subflow should compile");
     let mut runtime = flow
-        .runtime(RepeatedFlowInput(1))
+        .start(RepeatedFlowInput(1), ctx())
         .expect("runtime should build");
 
     loop {
-        match runtime.next(ctx()).await.expect("step should succeed") {
+        match runtime.next().await.expect("step should succeed") {
             Step::Continue => {}
             Step::Done(value) => {
                 assert_eq!(flow.decode_output(value).unwrap(), 3);
@@ -3715,8 +3825,8 @@ async fn snapshot_rejects_corrupted_frame_return_chain() {
     );
     let graph = parent_builder.build().expect("parent should build");
     let prepared = PreparedGraph::new(graph, HandlerRegistry::new()).expect("graph should prepare");
-    let mut runtime = prepared.start(rv!(1)).expect("runtime should build");
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
+    let mut runtime = prepared.start(rv!(1), ctx()).expect("runtime should build");
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
     let snapshot = runtime.snapshot().expect("snapshot should build");
 
     let mut wrong_root = snapshot.clone();
@@ -3728,7 +3838,7 @@ async fn snapshot_rejects_corrupted_frame_return_chain() {
         parent_edge: parent_out,
     });
     assert!(matches!(
-        prepared.restore(wrong_root),
+        prepared.restore(wrong_root, ctx()),
         Err(GraphError::SnapshotValidation(_))
     ));
 
@@ -3755,7 +3865,7 @@ async fn snapshot_rejects_corrupted_frame_return_chain() {
             .expect("child frame")
             .return_target = Some(target);
         assert!(matches!(
-            prepared.restore(wrong_child),
+            prepared.restore(wrong_child, ctx()),
             Err(GraphError::SnapshotValidation(_))
         ));
     }
@@ -3857,9 +3967,9 @@ async fn snapshot_rejects_obsolete_agent_checkpoint_version() {
         .finish::<EdgeAgentInput>()
         .expect("agent flow should compile");
     let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
+        .start(EdgeAgentInput { text: "hi".into() }, ctx())
         .expect("runtime should build");
-    assert_eq!(runtime.next(ctx()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
     let mut snapshot = runtime.snapshot().expect("snapshot should build");
     let frame = snapshot.state.frame_mut(0).expect("root frame");
     let checkpoint = &mut Arc::make_mut(&mut frame.checkpoints)[0].value;
@@ -3868,7 +3978,7 @@ async fn snapshot_rejects_obsolete_agent_checkpoint_version() {
     *checkpoint = to_value(encoded).expect("checkpoint should enter runtime domain");
 
     assert!(matches!(
-        flow.prepared().restore(snapshot),
+        flow.restore(snapshot, ctx()),
         Err(GraphError::UnsupportedVersion { .. })
     ));
 }
@@ -4029,17 +4139,17 @@ async fn agent_history_batch_failure_does_not_commit_a_prefix() {
         calls: Arc::clone(&calls),
         fail_at: 2,
     };
+    let ctx = ctx().with_client_factory(factory);
     let mut runtime = flow
-        .runtime(EdgeAgentInput { text: "hi".into() })
+        .start(EdgeAgentInput { text: "hi".into() }, ctx)
         .expect("runtime should build")
         .with_store(store);
-    let ctx = ctx().with_client_factory(factory);
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next(ctx.clone()).await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
 
     let err = runtime
-        .next(ctx)
+        .next()
         .await
         .expect_err("second message in tool-call batch should fail");
     assert!(matches!(err, GraphError::HistoryPersistence(_)));

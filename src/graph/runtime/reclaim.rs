@@ -172,19 +172,13 @@ mod tests {
     async fn multiple_readers_release_after_last_successful_reader() {
         let prepared = prepare_two_reader_graph();
         let mut runtime = prepared
-            .start(Value::from(7_i64))
+            .start(Value::from(7_i64), Context::default())
             .expect("runtime should start");
 
-        runtime
-            .next(Context::default())
-            .await
-            .expect("first reader");
+        runtime.next().await.expect("first reader");
         assert!(runtime.state.frames[0].values[0].is_some());
 
-        runtime
-            .next(Context::default())
-            .await
-            .expect("second reader");
+        runtime.next().await.expect("second reader");
         assert!(runtime.state.frames[0].values[0].is_none());
     }
 
@@ -193,19 +187,15 @@ mod tests {
     async fn restore_rebuilds_reader_counters() {
         let prepared = prepare_two_reader_graph();
         let mut runtime = prepared
-            .start(Value::from(7_i64))
+            .start(Value::from(7_i64), Context::default())
             .expect("runtime should start");
-        runtime
-            .next(Context::default())
-            .await
-            .expect("first reader");
+        runtime.next().await.expect("first reader");
         let snapshot = runtime.snapshot().expect("snapshot should build");
-        let mut restored = prepared.restore(snapshot).expect("snapshot should restore");
+        let mut restored = prepared
+            .restore(snapshot, Context::default())
+            .expect("snapshot should restore");
 
-        restored
-            .next(Context::default())
-            .await
-            .expect("second reader");
+        restored.next().await.expect("second reader");
         assert!(restored.state.frames[0].values[0].is_none());
     }
 
@@ -214,13 +204,10 @@ mod tests {
     async fn failed_instruction_does_not_release_input() {
         let prepared = prepare_failing_unpack_graph();
         let mut runtime = prepared
-            .start(Value::array([Value::from(1_i64)]))
+            .start(Value::array([Value::from(1_i64)]), Context::default())
             .expect("runtime should start");
 
-        runtime
-            .next(Context::default())
-            .await
-            .expect_err("unpack should fail");
+        runtime.next().await.expect_err("unpack should fail");
         assert!(runtime.state.frames[0].values[0].is_some());
         assert_eq!(runtime.state.frames[0].node_epochs[0], 0);
     }
@@ -230,12 +217,12 @@ mod tests {
     async fn write_epoch_overflow_preserves_retry_state() {
         let prepared = prepare_two_reader_graph();
         let mut runtime = prepared
-            .start(Value::from(7_i64))
+            .start(Value::from(7_i64), Context::default())
             .expect("runtime should start");
         runtime.state.frames[0].write_epoch = u64::MAX;
 
         let error = runtime
-            .next(Context::default())
+            .next()
             .await
             .expect_err("write should reject epoch overflow");
         assert!(error.to_string().contains("epoch overflowed"));

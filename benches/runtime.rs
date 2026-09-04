@@ -287,11 +287,14 @@ async fn run_agent_once(
     flow: &CompiledFlow<AgentFixture, AgentAnswer>,
     ctx: Context,
 ) -> Result<(), GraphError> {
-    let mut runtime = flow.runtime(AgentFixture {
-        prompt: "benchmark".into(),
-    })?;
+    let mut runtime = flow.start(
+        AgentFixture {
+            prompt: "benchmark".into(),
+        },
+        ctx,
+    )?;
     loop {
-        match runtime.next(ctx.clone()).await? {
+        match runtime.next().await? {
             Step::Continue => {}
             Step::Done(output) => {
                 black_box(flow.decode_output(output)?);
@@ -417,8 +420,8 @@ async fn report_prepare_each_start(
         let start = Instant::now();
         for _ in 0..iterations {
             let prepared = PreparedGraph::new(graph.clone(), HandlerRegistry::new())?;
-            let mut runtime = prepared.start(Value::from(7_i64))?;
-            while matches!(runtime.next(context()).await?, Step::Continue) {}
+            let mut runtime = prepared.start(Value::from(7_i64), context())?;
+            while matches!(runtime.next().await?, Step::Continue) {}
             black_box(runtime);
         }
         samples.push(ns_per_iteration(start.elapsed(), iterations));
@@ -591,9 +594,9 @@ async fn report_vm(
     for _ in 0..VM_SAMPLES {
         let start = Instant::now();
         for _ in 0..iterations {
-            let mut runtime = prepared.start(Value::from(7_i64))?;
+            let mut runtime = prepared.start(Value::from(7_i64), context())?;
             loop {
-                match runtime.next(context()).await? {
+                match runtime.next().await? {
                     Step::Continue => {}
                     Step::Done(output) => {
                         black_box(output);
@@ -618,11 +621,12 @@ async fn report_snapshot_restore(
     iterations: usize,
     prepared: &PreparedGraph,
 ) -> Result<(), GraphError> {
-    let mut runtime = prepared.start(Value::from(7_i64))?;
-    let _ = runtime.next(context()).await?;
+    let ctx = context();
+    let mut runtime = prepared.start(Value::from(7_i64), ctx.clone())?;
+    let _ = runtime.next().await?;
     let snapshot = runtime.snapshot()?;
     report_allocations("vm/snapshot_clone_restore", || {
-        prepared.restore(snapshot.clone())
+        prepared.restore(snapshot.clone(), ctx.clone())
     });
     let encoded = serde_json::to_vec(&snapshot).map_err(|error| GraphError::JsonEncode {
         target: "benchmark snapshot".into(),
@@ -630,13 +634,13 @@ async fn report_snapshot_restore(
     })?;
     report_allocations("vm/snapshot_decode_restore", || {
         let decoded: Snapshot = serde_json::from_slice(&encoded).expect("snapshot should decode");
-        prepared.restore(decoded)
+        prepared.restore(decoded, ctx.clone())
     });
     let mut samples = Vec::with_capacity(VM_SAMPLES);
     for _ in 0..VM_SAMPLES {
         let start = Instant::now();
         for _ in 0..iterations {
-            black_box(prepared.restore(snapshot.clone())?);
+            black_box(prepared.restore(snapshot.clone(), ctx.clone())?);
         }
         samples.push(ns_per_iteration(start.elapsed(), iterations));
     }

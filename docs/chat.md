@@ -1,32 +1,20 @@
 # Chat
 
-Pravah provides a graph-backed typed chat loop and a direct single-client chat
-helper. For graph construction, typed agents, tools, and runtime semantics,
-start with [graph.md](graph.md) and [clients.md](clients.md).
+`pravah::Chat` provides a typed multi-turn conversation backed by the
+same agent and durable workflow facilities as other graph workflows.
 
-## When To Use Chat
+Use it when a conversation needs dynamic agent configuration, typed tools,
+budgets, application-controlled history persistence, or snapshot restoration.
+The older direct-client chat helper is available only through
+`pravah::legacy::Chat` for existing applications.
 
-Use `pravah::graph::Chat` when the conversation needs the function-defined
-agent API, dynamic configuration, prepared tools, or serializable VM state.
-Use `pravah::Chat` for a direct single-model conversation without a workflow
-graph.
+## Define A Chat Agent
 
-Use `Chat` when you want:
-
-- a plain-text or JSON multi-turn conversation
-- persistent history without managing it yourself
-- snapshot and restore within a single session
-- multimodal input (images, files) without a flow graph
-
-The compatibility-only [`FlowRuntime`](legacy.md) remains documented for
-existing applications.
-
-## Graph-Backed Typed Chat
+A chat begins with an ordinary function-defined agent:
 
 ```rust
 use pravah::clients::Message;
-use pravah::graph::{Agent, AgentConfig, Chat};
-use pravah::Context;
+use pravah::{Agent, AgentConfig, Chat, Context, GraphError};
 
 fn tutor(root: Agent<Question>) -> Agent<Answer> {
     root.configure(configure_tutor)
@@ -35,7 +23,7 @@ fn tutor(root: Agent<Question>) -> Agent<Answer> {
 async fn configure_tutor(
     question: Question,
     _ctx: Context,
-) -> Result<AgentConfig, AppError> {
+) -> Result<AgentConfig, GraphError> {
     Ok(AgentConfig::new(
         "openai:///gpt-5",
         "You are a concise Rust tutor.",
@@ -44,191 +32,123 @@ async fn configure_tutor(
     .keep_alive())
 }
 
-let mut chat = Chat::new(tutor);
-let turn = chat.send(Question::new("What is ownership?"), ctx).await?;
-println!("{}", turn.output.text);
+let mut chat = Chat::new(tutor, Context::default());
 ```
 
-Enable `keep_alive` when later sends should retain the model-visible session.
-`Chat::snapshot()` captures the graph VM and history. Restore with
-`Chat::from_snapshot(tutor, snapshot)` and supply runtime-only services through
-the new `Context`.
+`Question` and `Answer` are application types implementing `Serialize`,
+`DeserializeOwned`, and `JsonSchema`. Enable `keep_alive` when later calls to
+`send` should retain the same model-visible conversation.
 
-## Direct Chat Usage
+The configuration function runs for each new chat input. It may select the
+model, instructions, initial user message, memory, tools, resources, and
+budgets from the input and `Context`.
+
+## Send Typed Messages
 
 ```rust
-use pravah::{Chat, Context, FlowConf};
+let first = chat
+    .send(Question::new("What is ownership?"))
+    .await?;
+println!("{}", first.output.text);
 
-let ctx = Context::new(FlowConf::default());
-
-let mut chat: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
-    .preamble("You are a concise Rust tutor.")
-    .build()?;
-
-let t1 = chat.send(ctx.clone(), "What is ownership?").await?;
-println!("{}", t1.text());
-
-let t2 = chat.send(ctx.clone(), "Give me a short example.").await?;
-println!("{}", t2.text());
+let second = chat
+    .send(Question::new("Show a short example."))
+    .await?;
+println!("{}", second.output.text);
 ```
 
-`Chat` defaults to `Chat<String, String>` — plain text in, plain text out.
-Token usage is available on each turn when the provider reports it:
+`send` drives the workflow until the agent produces one typed response. The
+chat retains one runtime across turns; callers do not need to operate the
+stepwise execution loop directly.
+
+Provider clients come from the session-bound `Context`. `Context::default()`
+uses Rath's default client factory, while `Context::with_client_factory`
+installs an application-specific factory. A chat uses the same context for
+every turn until it is snapshotted and restored with a new context.
+
+## Tools And Budgets
+
+Chat agents use the same toolset and configuration APIs as any graph agent:
 
 ```rust
-if let Some(usage) = t1.usage {
-    println!("in={:?} out={:?}", usage.input, usage.output);
+fn support_agent(root: Agent<SupportQuestion>) -> Agent<SupportAnswer> {
+    root
+        .tools(support_tools)
+        .configure(configure_support)
+}
+
+fn support_tools(root: Toolset) -> Toolset {
+    root.tool(find_account).flow(verify_resolution)
+}
+
+async fn configure_support(
+    question: SupportQuestion,
+    _ctx: Context,
+) -> Result<AgentConfig, GraphError> {
+    Ok(AgentConfig::new(
+        "openai:///gpt-5",
+        "Resolve the request using only relevant account information.",
+        Message::user(question.text),
+    )
+    .keep_alive()
+    .turn_budget(6)
+    .tool_budget::<FindAccount>(2))
 }
 ```
 
-## Builder Options
+See [clients.md](clients.md) for model URLs, tools, dynamic filters, memory,
+attachments, and agent configuration.
 
-| Method               | Effect                                                        |
-| -------------------- | ------------------------------------------------------------- |
-| `.preamble(text)`    | Static system prompt sent before the conversation history     |
-| `.environment(text)` | Additional context appended to the preamble at build time     |
-| `.temperature(f)`    | Sampling temperature passed to the provider                   |
-| `.session_id(id)`    | Override the auto-generated UUID (useful for durable storage) |
-| `.with_compactor(c)` | Attach a history compactor (e.g. `SlidingWindowCompactor`)    |
-| `.with_store(s)`     | Attach a history store for persistence                        |
-| `.with_memory(f)`    | Attach the compatibility memory factory for dynamic context   |
+## Snapshot And Restore
 
-`.preamble` and `.environment` compose: the final system prompt is
-`{preamble}\n\n{environment}` when both are set.
-
-## Typed Input and Output
-
-Substitute `String` with any `Serialize + DeserializeOwned + JsonSchema` type
-to switch to JSON mode for that side:
+Take a snapshot after at least one completed turn and persist it with the
+application's own storage:
 
 ```rust
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+let snapshot = chat.snapshot()?;
 
-#[derive(Serialize, Deserialize, JsonSchema)]
-struct Question { topic: String }
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-struct Answer { summary: String, confidence: f32 }
-
-let mut chat: Chat<Question, Answer> =
-    Chat::builder("gemini:///gemini-2.5-flash-lite")
-        .preamble("You are a precise Q&A assistant.")
-        .build()?;
-
-let turn = chat.send(ctx, Question { topic: "ownership".into() }).await?;
-println!("{} ({:.0}%)", turn.output.summary, turn.output.confidence * 100.0);
+let mut restored = Chat::from_snapshot(tutor, snapshot, restored_ctx)?;
+let next = restored
+    .send(Question::new("Continue our discussion."))
+    .await?;
 ```
 
-When either side is non-`String`, the builder automatically attaches the
-JSON schema to the client options so the provider knows the expected format.
+Restoration requires the same agent definition. Live provider clients and
+application services are not serialized; bind them through the restoration
+`Context` or the service setters before continuing.
 
-## Multimodal Input
+## History Persistence And Compaction
 
-On `Chat<String, Output>` use `send_message` to pass an explicit `Message` with
-attachments:
+Attach an application history store or compactor when constructing or
+restoring a chat:
 
 ```rust
-use pravah::clients::{Message, Attachment};
+let chat = Chat::new(tutor, ctx)
+    .with_store(history_store)
+    .with_compactor(history_compactor);
 
-let msg = Message::user("Describe this image.")
-    .with_attachment(Attachment::image_file("diagram.png"));
-
-let turn = chat.send_message(ctx, msg).await?;
-println!("{}", turn.text());
+let restored = Chat::from_snapshot(tutor, snapshot, restored_ctx)?
+    .with_store(restored_store)
+    .with_compactor(restored_compactor);
 ```
 
-## History Compaction
+Pravah records staged history before committing it to runtime history. A store
+may observe a successfully written prefix if a later write fails, so stores
+should deduplicate retries by stable history position.
 
-Attach a compactor to prevent unbounded history growth:
+Compaction changes the model-visible conversation while preserving independent
+agent-loop metrics. Choose a policy that retains any context required by the
+application.
 
-```rust
-use pravah::legacy::SlidingWindowCompactor;
+## Operational Responsibilities
 
-let mut chat: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
-    .with_compactor(SlidingWindowCompactor::new(20))
-    .build()?;
-```
+The application remains responsible for:
 
-`SlidingWindowCompactor::new(n)` keeps the most recent `n` message pairs
-and evicts older ones after each turn.
+- storing snapshots and deciding when to restore them;
+- scheduling chat work;
+- supplying provider credentials and runtime services;
+- making external tool effects idempotent or deduplicated;
+- deciding how to retry failed sends.
 
-## Snapshot and Restore
-
-```rust
-// Take a snapshot (clones history and client options; no store needed).
-let snap = chat.snapshot();
-
-// Restore. The provider client is recreated; compactor and store revert to
-// no-ops and must be re-attached if needed.
-let mut restored = Chat::from_snapshot(snap)?;
-
-let t3 = restored.send(ctx, "Summarise our conversation.").await?;
-```
-
-`ChatSnapshot` is `Clone` and contains the full `ClientOptions` and
-`FlowHistory`, so all provider settings survive the round-trip. It does not
-include the compactor or store.
-
-## Durable Persistence
-
-Attach a `HistoryStore` to persist each history entry:
-
-```rust
-let mut chat: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
-    .session_id("user-123")
-    .with_store(my_store)
-    .build()?;
-```
-
-Pravah asks the store to record each entry before committing that entry to
-in-memory history. If recording fails, `ChatError::Store` is returned and the
-failed entry is not committed. Entries recorded successfully earlier in the
-turn remain present and should be deduplicated by their stable position when a
-caller retries.
-
-## Direct Chat Memory Injection
-
-Attach a [`MemoryFactory`](https://docs.rs/pravah) to inject dynamic context
-into the system prompt before each turn. The retrieved text is prepended as a
-transient system message; it is never stored in history and does not affect
-compaction or snapshots.
-
-```rust
-use pravah::legacy::memory::{MemoryFactory, MemoryQuery, MemoryResult};
-
-struct UserProfile { store: ProfileStore }
-
-impl MemoryFactory for UserProfile {
-    async fn retrieve(&self, query: &MemoryQuery<'_>) -> MemoryResult {
-        let user_id = query.input["user_id"].as_str().ok_or("missing user_id")?;
-        let profile = self.store.get(user_id).await?;
-        Ok(Some(format!("User profile: {profile}")))
-    }
-}
-
-let mut chat: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
-    .preamble("You are a personalised assistant.")
-    .with_memory(UserProfile { store })
-    .build()?;
-```
-
-`MemoryQuery::agent_name` is always `"chat"` for `Chat` sessions.
-`MemoryQuery::input` contains the serialized input value — a plain JSON string
-for `Chat<String, _>` and a JSON object for typed inputs.
-
-For per-agent routing across multiple agents, use [`MemoryRegistry`](https://docs.rs/pravah)
-with [`FlowRuntime::with_memory`](legacy.md).
-
-## Model URLs
-
-`Chat` accepts the same model URL format as flow agents:
-
-```text
-provider:///provider-native-model-id[?param=value]
-```
-
-Examples: `openai:///gpt-4o`, `anthropic:///claude-sonnet-4-5`,
-`gemini:///gemini-2.5-flash-lite`, `ollama:///qwen3:8b?base_url=http://localhost:11434`.
-
-See [clients.md — Model URLs](clients.md#model-urls) for the full reference.
+For a complete runnable conversation, see
+[`examples/chat.rs`](../examples/chat.rs).

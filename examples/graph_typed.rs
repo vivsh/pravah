@@ -3,8 +3,7 @@
 //! This example is deterministic and requires no external services.
 
 use either::Either;
-use pravah::graph;
-use pravah::{Context, FlowConf};
+use pravah::{CompiledFlow, Context, Flow, FlowConf, GraphError, Step, compile};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -43,13 +42,13 @@ struct BatchFlow {
     values: Vec<AddThreeFlow>,
 }
 
-fn add_three(root: graph::Flow<AddThreeFlow>) -> graph::Flow<Amount> {
+fn add_three(root: Flow<AddThreeFlow>) -> Flow<Amount> {
     root.map(|input| Amount {
         value: input.value + 3,
     })
 }
 
-fn choose(root: graph::Flow<ChoiceFlow>) -> graph::Flow<Amount> {
+fn choose(root: Flow<ChoiceFlow>) -> Flow<Amount> {
     root.either(|input| {
         if input.value < 10 {
             Either::Left(Small { value: input.value })
@@ -71,11 +70,11 @@ fn choose(root: graph::Flow<ChoiceFlow>) -> graph::Flow<Amount> {
     )
 }
 
-fn batch(root: graph::Flow<BatchFlow>) -> graph::Flow<Vec<Amount>> {
+fn batch(root: Flow<BatchFlow>) -> Flow<Vec<Amount>> {
     root.map(|input| input.values).each(add_three)
 }
 
-fn amount(root: graph::Flow<Amount>) -> graph::Flow<Amount> {
+fn amount(root: Flow<Amount>) -> Flow<Amount> {
     let bonus = root.local(Bonus { value: 10 });
 
     root.load(bonus.clone(), |mut amount, bonus| {
@@ -96,46 +95,41 @@ fn amount(root: graph::Flow<Amount>) -> graph::Flow<Amount> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), graph::GraphError> {
-    let flow = graph::compile(amount)?;
+async fn main() -> Result<(), GraphError> {
+    let flow = compile(amount)?;
     println!(
         "typed graph has {} nodes and {} edges",
         flow.graph().nodes.len(),
         flow.graph().edges.len()
     );
 
-    let mut runtime = flow.runtime(Amount { value: 5 })?;
     let ctx = Context::new(FlowConf::default());
+    let mut runtime = flow.start(Amount { value: 5 }, ctx.clone())?;
 
     loop {
-        match runtime.next(ctx.clone()).await? {
-            graph::Step::Continue => {
+        match runtime.next().await? {
+            Step::Continue => {
                 println!(
                     "continue; active frame depth = {}",
                     runtime.state().frame_depth()
                 );
             }
-            graph::Step::Done(value) => {
+            Step::Done(value) => {
                 let output = flow.decode_output(value)?;
                 println!("done: {output:?}");
                 break;
             }
-            graph::Step::Suspend(payload) => {
-                return Err(graph::GraphError::Invalid(format!(
+            Step::Suspend(payload) => {
+                return Err(GraphError::Invalid(format!(
                     "typed graph unexpectedly suspended: {payload}"
                 )));
             }
         }
     }
 
+    run_to_done(compile(choose)?, ChoiceFlow { value: 12 }, ctx.clone()).await?;
     run_to_done(
-        graph::compile(choose)?,
-        ChoiceFlow { value: 12 },
-        ctx.clone(),
-    )
-    .await?;
-    run_to_done(
-        graph::compile(batch)?,
+        compile(batch)?,
         BatchFlow {
             values: vec![AddThreeFlow { value: 1 }, AddThreeFlow { value: 2 }],
         },
@@ -146,24 +140,24 @@ async fn main() -> Result<(), graph::GraphError> {
 }
 
 async fn run_to_done<I, O>(
-    flow: graph::CompiledFlow<I, O>,
+    flow: CompiledFlow<I, O>,
     input: I,
     ctx: Context,
-) -> Result<(), graph::GraphError>
+) -> Result<(), GraphError>
 where
     I: 'static + Serialize + for<'de> Deserialize<'de> + JsonSchema,
     O: 'static + std::fmt::Debug + Serialize + for<'de> Deserialize<'de> + JsonSchema,
 {
-    let mut runtime = flow.runtime(input)?;
+    let mut runtime = flow.start(input, ctx)?;
     loop {
-        match runtime.next(ctx.clone()).await? {
-            graph::Step::Continue => {}
-            graph::Step::Done(value) => {
+        match runtime.next().await? {
+            Step::Continue => {}
+            Step::Done(value) => {
                 println!("done: {:?}", flow.decode_output(value)?);
                 return Ok(());
             }
-            graph::Step::Suspend(payload) => {
-                return Err(graph::GraphError::Invalid(format!(
+            Step::Suspend(payload) => {
+                return Err(GraphError::Invalid(format!(
                     "typed graph unexpectedly suspended: {payload}"
                 )));
             }

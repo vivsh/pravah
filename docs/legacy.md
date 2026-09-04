@@ -1,8 +1,31 @@
 # Legacy Flow API
 
 This guide covers the compatibility-only `pravah::legacy` workflow API. New
-workflows should use [`pravah::graph`](graph.md). Existing applications can use
-this guide for execution, suspension, nested flows, snapshots, and history.
+workflows should use Pravah's [modern typed API](graph.md). Existing
+applications can use this guide for execution, suspension, nested flows,
+snapshots, and history.
+
+## Direct Client Chat
+
+The former top-level chat helper is available as `pravah::legacy::Chat`. It is
+retained for applications that already use its model-first builder and direct
+conversation snapshots:
+
+```rust
+use pravah::legacy::Chat;
+
+let mut chat: Chat = Chat::builder("gemini:///gemini-2.5-flash-lite")
+    .preamble("You are a concise assistant.")
+    .build()?;
+
+let turn = chat.send(ctx, "Hello").await?;
+println!("{}", turn.text());
+```
+
+The compatibility exports include `ChatBuilder`, `ChatError`, `ChatSnapshot`,
+`ChatTurn`, `ChatType`, and `ChatWireKind`. New conversational applications
+should use [`pravah::Chat`](chat.md), which composes with typed agents,
+tools, budgets, and durable graph execution.
 
 ## Execution Model
 

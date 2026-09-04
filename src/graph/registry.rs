@@ -67,7 +67,7 @@ impl RuntimeServices {
 #[derive(Clone)]
 /// Context passed to continuation handlers while they advance.
 ///
-/// It carries the ordinary request `Context`, runtime services, and controlled
+/// It carries the execution's bound `Context`, runtime services, and controlled
 /// history access without smuggling services into `Context::deps()`.
 pub struct ContinuationContext {
     ctx: Context,

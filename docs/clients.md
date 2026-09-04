@@ -1,7 +1,7 @@
 # Graph Agents and Clients
 
 Read this when adding models, tools, memory, or MCP resources to a
-`pravah::graph` workflow. For execution and persistence, start with
+Pravah workflow. For execution and persistence, start with
 [graph.md](graph.md). The older trait-based agent API is available only through
 [`pravah::legacy`](legacy.md).
 
@@ -11,8 +11,7 @@ Agent definitions mirror flow definitions:
 
 ```rust
 use pravah::clients::Message;
-use pravah::graph::{Agent, AgentConfig, Flow};
-use pravah::Context;
+use pravah::{Agent, AgentConfig, Context, Flow};
 
 fn approval(root: Flow<Request>) -> Flow<Decision> {
     root.map(prepare).agent(reviewer).suspend::<Decision>()
@@ -62,7 +61,7 @@ A toolset function declares the complete set of tool graphs that can be
 prepared with the workflow:
 
 ```rust
-use pravah::graph::{ToolFilter, Toolset};
+use pravah::{ToolFilter, Toolset};
 
 fn review_tools(tools: Toolset) -> Toolset {
     tools.tool(read_file).flow(verify_claim)
@@ -146,7 +145,7 @@ An optional asynchronous controller can inspect each meaningful loop boundary
 and choose how execution proceeds:
 
 ```rust
-use pravah::graph::{
+use pravah::{
     AgentDecision, AgentInterventionPoint, AgentLoop, ToolFilter,
 };
 
@@ -196,14 +195,14 @@ example including suspension and typed resume.
 Enable the `mcp` feature to use Streamable HTTP resource servers:
 
 ```toml
-pravah = { version = "0.4.10", features = ["mcp"] }
+pravah = { version = "0.4.12", features = ["mcp"] }
 ```
 
 Register credentials and headers on the runtime `Context`, not in the graph or
 snapshot:
 
 ```rust
-use pravah::graph::{McpResourceRef, McpServer};
+use pravah::{McpResourceRef, McpServer};
 
 let ctx = Context::default().with_mcp_server(
     McpServer::new("handbook", "https://mcp.example.com")
@@ -255,9 +254,9 @@ supplies another one:
 let ctx = Context::default().with_client_factory(my_factory);
 ```
 
-The factory is runtime-only. Install it again when a process restores a
-snapshot. This is the single graph-path override for testing, tracing, retry,
-rate limiting, or custom provider clients.
+The factory is runtime-only. Bind a context containing it when a workflow
+starts or restores. This is the single graph-path override for testing,
+tracing, retry, rate limiting, or custom provider clients.
 
 ## Client Layers
 

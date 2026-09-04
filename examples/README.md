@@ -34,7 +34,7 @@ the provider's environment variable before running them.
 
 | Example | Requirements |
 | --- | --- |
-| `chat` | Gemini credentials, or edit the model URL for another configured provider |
+| `chat` | Graph-backed typed chat; Gemini credentials, or edit the configured model URL |
 | `linear_flow` | Gemini credentials; compatibility-only legacy flow |
 | `split_merge` | Gemini credentials; compatibility-only legacy flow |
 | `nested_flow` | Gemini credentials; compatibility-only legacy flow |
@@ -59,4 +59,5 @@ Set `PRAVAH_MCP_BEARER_TOKEN` and `PRAVAH_MCP_TENANT` when required by the
 server. Set `PRAVAH_ALLOW_SEARCH=1` to expose the optional search tool.
 
 The compatibility-only examples remain available for existing applications.
-New workflow features target `pravah::graph`.
+New workflow features target Pravah's modern typed API and its underlying
+`pravah::graph` runtime.

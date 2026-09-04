@@ -21,7 +21,7 @@ use super::state::{
     ContinuationChildResult, Frame, ReturnTarget, State, Step, Suspension, SuspensionTarget,
 };
 use super::validation::{validate_graph_shape, validate_registry_keys};
-use super::value::Value;
+use super::value::{Value, to_value};
 
 mod compile;
 mod continuation;
@@ -182,18 +182,21 @@ pub struct Runtime {
 
 #[derive(Clone)]
 struct RuntimeContext {
+    context: Context,
     services: Arc<RuntimeServices>,
 }
 
 impl RuntimeContext {
-    fn new() -> Self {
+    fn new(context: Context) -> Self {
         Self {
+            context,
             services: Arc::new(RuntimeServices::default()),
         }
     }
 
     fn with_services(&self, services: RuntimeServices) -> Self {
         Self {
+            context: self.context.clone(),
             services: Arc::new(services),
         }
     }
@@ -264,8 +267,11 @@ impl PreparedGraph {
         self.fingerprint
     }
 
-    /// Starts an isolated runtime using the already compiled graph.
-    pub fn start(&self, input: Value) -> Result<Runtime, GraphError> {
+    /// Starts an isolated runtime with its runtime-only invocation context.
+    ///
+    /// Fails before returning a runtime when the entry value is incompatible
+    /// with the prepared graph.
+    pub fn start(&self, input: Value, ctx: Context) -> Result<Runtime, GraphError> {
         let mut state = State::default();
         let mut frame = new_frame(&self.callables, &[], self.root_index, None)?;
         let root_graph = self
@@ -283,15 +289,19 @@ impl PreparedGraph {
             graph_fingerprint: self.fingerprint,
             state,
             history: Arc::new(Mutex::new(FlowHistory::new())),
-            runtime_context: Arc::new(RuntimeContext::new()),
+            runtime_context: Arc::new(RuntimeContext::new(ctx)),
         })
     }
 
     /// Restores an isolated runtime after checking version, graph, and VM state.
     ///
-    /// Runtime services are intentionally not serialized; configure them again
-    /// with the `with_*` methods after restore.
-    pub fn restore(&self, snapshot: Snapshot) -> Result<Runtime, GraphError> {
+    /// The supplied context and runtime services are intentionally not
+    /// serialized. Attach a fresh context here and configure services with the
+    /// `with_*` methods after restoration.
+    ///
+    /// Version, fingerprint, sparse state, frame, continuation, and suspension
+    /// validation complete before a runtime is returned.
+    pub fn restore(&self, snapshot: Snapshot, ctx: Context) -> Result<Runtime, GraphError> {
         if snapshot.snapshot_version != SNAPSHOT_VERSION {
             return Err(GraphError::SnapshotVersion {
                 got: snapshot.snapshot_version,
@@ -316,7 +326,7 @@ impl PreparedGraph {
             graph_fingerprint: self.fingerprint,
             state,
             history: Arc::new(Mutex::new(snapshot.history)),
-            runtime_context: Arc::new(RuntimeContext::new()),
+            runtime_context: Arc::new(RuntimeContext::new(ctx)),
         })
     }
 }
@@ -389,9 +399,9 @@ impl Runtime {
         self
     }
 
-    fn continuation_context(&self, ctx: Context) -> ContinuationContext {
+    fn continuation_context(&self) -> ContinuationContext {
         ContinuationContext::new(
-            ctx,
+            self.runtime_context.context.clone(),
             Arc::clone(&self.runtime_context.services),
             Arc::clone(&self.history),
         )
@@ -431,29 +441,61 @@ impl Runtime {
         })
     }
 
-    /// Advances the VM by at most one dispatchable operation.
+    /// Advances the VM by at most one dispatchable operation using its bound context.
     ///
     /// Returns `ResumeRequired` if the VM is suspended; use `resume()` for a
     /// suspend node or continuation-owned suspension.
-    pub async fn next(&mut self, ctx: Context) -> Result<Step, GraphError> {
+    pub async fn next(&mut self) -> Result<Step, GraphError> {
         if self.state.suspension.is_some() {
             return Err(GraphError::ResumeRequired);
         }
-        let step = self.step_inner(ctx).await?;
+        let step = self.step_inner().await?;
         match step {
             Step::Continue => self.try_exit_frames(),
             other => Ok(other),
         }
     }
 
-    /// Supplies a value to the active node- or continuation-owned suspension.
-    pub async fn resume(&mut self, value: Value, ctx: Context) -> Result<Step, GraphError> {
+    /// Supplies a typed value to the active suspension using the bound context.
+    ///
+    /// Use [`Runtime::resume_value`] when the value is already in Pravah's
+    /// runtime domain so its shared representation is preserved.
+    /// Conversion or schema failure leaves the suspension unchanged.
+    pub async fn resume<T>(&mut self, value: T) -> Result<Step, GraphError>
+    where
+        T: Serialize,
+    {
+        let value = to_value(value).map_err(|err| GraphError::ValueConversion {
+            target: "resume input".into(),
+            reason: err.to_string(),
+        })?;
+        self.resume_value(value).await
+    }
+
+    /// Supplies a raw graph value to the active suspension using the bound context.
+    ///
+    /// Validation failure leaves the suspension and continuation state unchanged.
+    pub async fn resume_value(&mut self, value: Value) -> Result<Step, GraphError> {
         let suspension = self
             .state
             .suspension
             .clone()
             .ok_or(GraphError::UnexpectedResume)?;
         validate_value(&suspension.resume_type, &value, "resume value")?;
+        let (frame_index, node) = self.validate_suspension_target(&suspension)?;
+        match suspension.target {
+            SuspensionTarget::Node => self.resume_suspend_node(frame_index, &node, value),
+            SuspensionTarget::Continuation => {
+                self.resume_continuation(frame_index, node, value).await
+            }
+        }
+    }
+
+    /// Resolves the active suspension only after validating its frame and node.
+    fn validate_suspension_target(
+        &self,
+        suspension: &Suspension,
+    ) -> Result<(usize, CompiledNode), GraphError> {
         if suspension.frame_depth == 0 || suspension.frame_depth > self.state.frames.len() {
             return Err(GraphError::Invalid(format!(
                 "suspension frame depth {} is invalid for stack depth {}",
@@ -496,13 +538,7 @@ impl Runtime {
                 node.name
             )));
         }
-        match suspension.target {
-            SuspensionTarget::Node => self.resume_suspend_node(frame_index, &node, value),
-            SuspensionTarget::Continuation => {
-                self.resume_continuation(frame_index, node, value, ctx)
-                    .await
-            }
-        }
+        Ok((frame_index, node))
     }
 }
 
@@ -564,12 +600,18 @@ mod preparation_tests {
     fn prepared_graph_shares_compilation_across_runtimes() {
         let prepared = PreparedGraph::new(identity_graph("shared"), HandlerRegistry::new())
             .expect("graph should prepare");
-        let first = prepared.start(Value::from(1_i64)).expect("first runtime");
-        let second = prepared.start(Value::from(2_i64)).expect("second runtime");
+        let first = prepared
+            .start(Value::from(1_i64), Context::default())
+            .expect("first runtime");
+        let second = prepared
+            .start(Value::from(2_i64), Context::default())
+            .expect("second runtime");
         assert!(Arc::ptr_eq(&first.callables, &second.callables));
 
         let snapshot = first.snapshot().expect("snapshot should build");
-        let restored = prepared.restore(snapshot).expect("snapshot should restore");
+        let restored = prepared
+            .restore(snapshot, Context::default())
+            .expect("snapshot should restore");
         assert!(Arc::ptr_eq(&first.callables, &restored.callables));
         assert_ne!(
             first.state.values_for_test(),
@@ -603,7 +645,7 @@ mod preparation_tests {
         let prepared = PreparedGraph::new(identity_graph("state_only"), HandlerRegistry::new())
             .expect("graph should prepare");
         let snapshot = prepared
-            .start(Value::from(3_i64))
+            .start(Value::from(3_i64), Context::default())
             .expect("runtime should start")
             .snapshot()
             .expect("snapshot should build");
@@ -616,7 +658,7 @@ mod preparation_tests {
         let json_snapshot: Snapshot =
             serde_json::from_value(json).expect("snapshot JSON should decode");
         prepared
-            .restore(json_snapshot)
+            .restore(json_snapshot, Context::default())
             .expect("JSON snapshot should restore");
 
         let mut encoded = Vec::new();
@@ -624,7 +666,7 @@ mod preparation_tests {
         let decoded: Snapshot =
             ciborium::from_reader(encoded.as_slice()).expect("snapshot CBOR should decode");
         prepared
-            .restore(decoded)
+            .restore(decoded, Context::default())
             .expect("CBOR snapshot should restore");
     }
 
@@ -636,12 +678,12 @@ mod preparation_tests {
         let second = PreparedGraph::new(identity_graph("second"), HandlerRegistry::new())
             .expect("second graph should prepare");
         let snapshot = first
-            .start(Value::from(1_i64))
+            .start(Value::from(1_i64), Context::default())
             .expect("runtime should start")
             .snapshot()
             .expect("snapshot should build");
         assert!(matches!(
-            second.restore(snapshot),
+            second.restore(snapshot, Context::default()),
             Err(GraphError::GraphMismatch { .. })
         ));
     }
@@ -652,14 +694,14 @@ mod preparation_tests {
         let prepared = PreparedGraph::new(identity_graph("versioned"), HandlerRegistry::new())
             .expect("graph should prepare");
         let mut snapshot = prepared
-            .start(Value::from(1_i64))
+            .start(Value::from(1_i64), Context::default())
             .expect("runtime should start")
             .snapshot()
             .expect("snapshot should build");
         snapshot.snapshot_version = 999;
 
         assert!(matches!(
-            prepared.restore(snapshot),
+            prepared.restore(snapshot, Context::default()),
             Err(GraphError::SnapshotVersion { got: 999, .. })
         ));
     }
@@ -670,14 +712,14 @@ mod preparation_tests {
         let prepared = PreparedGraph::new(identity_graph("old_version"), HandlerRegistry::new())
             .expect("graph should prepare");
         let mut snapshot = prepared
-            .start(Value::from(1_i64))
+            .start(Value::from(1_i64), Context::default())
             .expect("runtime should start")
             .snapshot()
             .expect("snapshot should build");
         snapshot.snapshot_version = 7;
 
         assert!(matches!(
-            prepared.restore(snapshot),
+            prepared.restore(snapshot, Context::default()),
             Err(GraphError::SnapshotVersion {
                 got: 7,
                 expected: SNAPSHOT_VERSION
@@ -691,7 +733,7 @@ mod preparation_tests {
         let prepared = PreparedGraph::new(identity_graph("deterministic"), HandlerRegistry::new())
             .expect("graph should prepare");
         let runtime = prepared
-            .start(Value::from(1_i64))
+            .start(Value::from(1_i64), Context::default())
             .expect("runtime should start");
         let first = runtime.snapshot().expect("first snapshot should build");
         let second = runtime.snapshot().expect("second snapshot should build");
@@ -708,17 +750,14 @@ mod preparation_tests {
         let prepared = PreparedGraph::new(two_step_graph("sparse_errors"), HandlerRegistry::new())
             .expect("graph should prepare");
         let mut runtime = prepared
-            .start(Value::from(1_i64))
+            .start(Value::from(1_i64), Context::default())
             .expect("runtime should start");
-        runtime
-            .next(Context::default())
-            .await
-            .expect("identity should run");
+        runtime.next().await.expect("identity should run");
         let snapshot = runtime.snapshot().expect("snapshot should build");
         for (label, corruption) in malformed_snapshots(snapshot) {
             assert!(
                 matches!(
-                    prepared.restore(corruption),
+                    prepared.restore(corruption, Context::default()),
                     Err(GraphError::SnapshotValidation(_))
                 ),
                 "{label} corruption should be rejected"

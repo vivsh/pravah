@@ -2,8 +2,7 @@
 //!
 //! This example is deterministic and requires no external services.
 
-use pravah::graph::{self, Flow, GraphError, Step};
-use pravah::{Context, FlowConf};
+use pravah::{Context, Flow, FlowConf, GraphError, Step, compile};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -26,12 +25,12 @@ fn twice(root: Flow<Twice>) -> Flow<i64> {
 
 #[tokio::main]
 async fn main() -> Result<(), GraphError> {
-    let flow = graph::compile(twice)?;
-    let mut runtime = flow.runtime(Twice(40))?;
+    let flow = compile(twice)?;
     let ctx = Context::new(FlowConf::default());
+    let mut runtime = flow.start(Twice(40), ctx)?;
 
     loop {
-        match runtime.next(ctx.clone()).await? {
+        match runtime.next().await? {
             Step::Continue => {}
             Step::Done(value) => {
                 println!("{}", flow.decode_output(value)?);

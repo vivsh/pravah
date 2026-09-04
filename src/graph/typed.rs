@@ -14,7 +14,7 @@ use super::error::GraphError;
 use super::ids::{EdgeId, HandlerKey, MarkId, VarId};
 use super::model::{NodeKind, TypeSpec, UntypedGraph, VarInit, VarKey, VarScope};
 use super::registry::{ContinuationHandler, HandlerRegistry};
-use super::runtime::{PreparedGraph, Runtime};
+use super::runtime::{PreparedGraph, Runtime, Snapshot};
 use super::value::{Value, from_value, to_value};
 use crate::Context;
 
@@ -872,11 +872,24 @@ where
     I: 'static + Serialize + DeserializeOwned + JsonSchema,
     O: 'static + Serialize + DeserializeOwned + JsonSchema,
 {
-    /// Creates a runtime for this flow and input value.
-    pub fn runtime(&self, input: I) -> Result<Runtime, GraphError> {
-        let input = to_value(input)
-            .map_err(|err| GraphError::Invalid(format!("failed to serialize input: {err}")))?;
-        self.prepared.start(input)
+    /// Starts an isolated execution with its invocation context.
+    ///
+    /// Fails before execution exists when the typed input cannot enter the VM
+    /// value domain or does not satisfy the graph entry schema.
+    pub fn start(&self, input: I, ctx: Context) -> Result<Runtime, GraphError> {
+        let input = to_value(input).map_err(|err| GraphError::ValueConversion {
+            target: "workflow input".into(),
+            reason: err.to_string(),
+        })?;
+        self.prepared.start(input, ctx)
+    }
+
+    /// Restores an execution and attaches its new runtime-only context.
+    ///
+    /// Fails when the snapshot version, graph fingerprint, or VM state is
+    /// incompatible; the supplied snapshot is never partially restored.
+    pub fn restore(&self, snapshot: Snapshot, ctx: Context) -> Result<Runtime, GraphError> {
+        self.prepared.restore(snapshot, ctx)
     }
 
     /// Decodes a raw runtime output value into the typed output.

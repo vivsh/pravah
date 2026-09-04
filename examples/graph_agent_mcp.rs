@@ -15,12 +15,11 @@ mod enabled {
 
     use pravah::clients::Message;
     use pravah::deps::Deps;
-    use pravah::graph::{
-        self, Agent, AgentConfig, Flow, GraphError, McpResourceRef, McpServer, Step, ToolFilter,
-        Toolset,
-    };
     use pravah::tools::ToolError;
-    use pravah::{Context, FlowConf};
+    use pravah::{
+        Agent, AgentConfig, Context, Flow, FlowConf, GraphError, McpResourceRef, McpServer, Step,
+        ToolFilter, Toolset, compile,
+    };
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
@@ -166,10 +165,10 @@ mod enabled {
             resource_uri: required_env("PRAVAH_MCP_RESOURCE_URI")?,
             allow_search: env::var("PRAVAH_ALLOW_SEARCH").is_ok_and(|value| value == "1"),
         };
-        let flow = graph::compile(answer_question)?;
-        let mut runtime = flow.runtime(question)?;
+        let flow = compile(answer_question)?;
+        let mut runtime = flow.start(question, ctx)?;
         loop {
-            match runtime.next(ctx.clone()).await? {
+            match runtime.next().await? {
                 Step::Continue => {}
                 Step::Done(value) => {
                     println!("{:#?}", flow.decode_output(value)?);

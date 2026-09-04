@@ -8,7 +8,7 @@ Enable MCP support:
 
 ```toml
 [dependencies]
-pravah = { version = "0.4.10", features = ["mcp"] }
+pravah = { version = "0.4.12", features = ["mcp"] }
 ```
 
 ## Register an MCP Server
@@ -16,8 +16,7 @@ pravah = { version = "0.4.10", features = ["mcp"] }
 Server locations and credentials belong to the runtime `Context`:
 
 ```rust
-use pravah::graph::McpServer;
-use pravah::Context;
+use pravah::{Context, McpServer};
 
 let ctx = Context::default().with_mcp_server(
     McpServer::new("handbook", "https://mcp.example.com")
@@ -37,8 +36,7 @@ resource-template catalog before selecting context for one invocation:
 
 ```rust
 use pravah::clients::Message;
-use pravah::graph::{AgentConfig, GraphError, McpResourceRef};
-use pravah::Context;
+use pravah::{AgentConfig, Context, GraphError, McpResourceRef};
 
 async fn configure_reviewer(
     request: ReviewRequest,
@@ -94,7 +92,7 @@ before the first model dispatch.
 Declare the complete candidate toolset in the agent definition:
 
 ```rust
-use pravah::graph::{Agent, Toolset};
+use pravah::{Agent, Toolset};
 
 fn review_tools(tools: Toolset) -> Toolset {
     tools
@@ -111,7 +109,7 @@ fn reviewer(root: Agent<ReviewRequest>) -> Agent<Review> {
 Then select a subset while configuring a particular invocation:
 
 ```rust
-use pravah::graph::ToolFilter;
+use pravah::ToolFilter;
 
 let allow_search = request.allow_external_search;
 
@@ -154,6 +152,8 @@ resource provenance are checkpointed. Restoring a snapshot does not rerun the
 configuration function or reread MCP resources. Live server registration and
 model clients remain runtime services and must be supplied again for future
 agent invocations.
+Pass the replacement `Context` to `CompiledFlow::restore` or
+`Chat::from_snapshot` when credentials or registrations change.
 
 See [`graph_agent_mcp`](../examples/graph_agent_mcp.rs) for the complete
 runnable example.

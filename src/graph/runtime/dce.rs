@@ -134,14 +134,11 @@ mod tests {
         let prepared =
             PreparedGraph::new(graph, HandlerRegistry::new()).expect("graph should prepare");
         let mut runtime = prepared
-            .start(Value::from(7_i64))
+            .start(Value::from(7_i64), Context::default())
             .expect("runtime should start");
 
         assert_eq!(
-            runtime
-                .next(Context::default())
-                .await
-                .expect("runtime step"),
+            runtime.next().await.expect("runtime step"),
             Step::Done(Value::from(7_i64))
         );
         assert_eq!(prepared.graph().nodes.len(), authored_nodes);

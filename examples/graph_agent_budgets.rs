@@ -7,11 +7,13 @@ mod support;
 
 #[cfg(feature = "testing")]
 mod example {
-    use pravah::Context;
     use pravah::clients::Message;
-    use pravah::graph::{Agent, AgentConfig, Flow, Step, Toolset, compile};
     use pravah::testing::{ScriptedFactory, mock_tool_call};
     use pravah::tools::ToolError;
+    use pravah::{
+        Agent, AgentConfig, CompiledFlow, Context, Flow, GraphError, Runtime, Step, Toolset,
+        compile,
+    };
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
@@ -56,7 +58,7 @@ mod example {
     async fn configure_researcher(
         request: ResearchRequest,
         _ctx: Context,
-    ) -> Result<AgentConfig, pravah::graph::GraphError> {
+    ) -> Result<AgentConfig, GraphError> {
         Ok(AgentConfig::new(
             "openai:///scripted",
             "Use available evidence, then return the structured answer.",
@@ -79,21 +81,23 @@ mod example {
             ])
             .then_output(json!({"answer": "One search ran; the budget then forced conclusion."}));
         let flow = compile(research)?;
-        let mut runtime = flow.runtime(ResearchRequest {
-            question: "Explain the result succinctly.".into(),
-        })?;
         let ctx = Context::default().with_client_factory(factory);
-        drive(&flow, &mut runtime, ctx).await
+        let mut runtime = flow.start(
+            ResearchRequest {
+                question: "Explain the result succinctly.".into(),
+            },
+            ctx,
+        )?;
+        drive(&flow, &mut runtime).await
     }
 
     /// Drives the stepwise runtime until the structured agent output is ready.
     async fn drive(
-        flow: &pravah::graph::CompiledFlow<ResearchRequest, ResearchAnswer>,
-        runtime: &mut pravah::graph::Runtime,
-        ctx: Context,
+        flow: &CompiledFlow<ResearchRequest, ResearchAnswer>,
+        runtime: &mut Runtime,
     ) -> Result<(), ExampleError> {
         loop {
-            match runtime.next(ctx.clone()).await? {
+            match runtime.next().await? {
                 Step::Continue => {}
                 Step::Done(value) => {
                     println!("{:#?}", flow.decode_output(value)?);

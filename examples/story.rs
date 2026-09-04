@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use either::Either;
 use pravah::clients::Message;
-use pravah::graph::{self, Agent, AgentConfig};
-use pravah::{Context, FlowConf};
+use pravah::{
+    Agent, AgentConfig, CompiledFlow, Context, Flow, FlowConf, GraphError, Step, compile,
+};
 use rath::images::{ImageData, ImageOptions, ImageRequest};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -231,11 +232,8 @@ fn merge_panel_render((illustration, panel): (IllustrationPrompt, DirectorPanel)
     }
 }
 
-fn agent_config<T: Serialize>(
-    input: T,
-    instructions: &str,
-) -> Result<AgentConfig, graph::GraphError> {
-    let message = serde_json::to_string(&input).map_err(|err| graph::GraphError::JsonEncode {
+fn agent_config<T: Serialize>(input: T, instructions: &str) -> Result<AgentConfig, GraphError> {
+    let message = serde_json::to_string(&input).map_err(|err| GraphError::JsonEncode {
         target: "story agent message".into(),
         reason: err.to_string(),
     })?;
@@ -249,7 +247,7 @@ fn agent_config<T: Serialize>(
 async fn configure_choreographer(
     input: ChoreographerBrief,
     _ctx: Context,
-) -> Result<AgentConfig, graph::GraphError> {
+) -> Result<AgentConfig, GraphError> {
     agent_config(
         input,
         "You are the choreographer for a graphic novel production. You work \
@@ -276,7 +274,7 @@ fn choreographer(root: Agent<ChoreographerBrief>) -> Agent<ChoreoNotes> {
 async fn configure_dialogue(
     input: DialogueBrief,
     _ctx: Context,
-) -> Result<AgentConfig, graph::GraphError> {
+) -> Result<AgentConfig, GraphError> {
     agent_config(
         input,
         "You are the dialogue writer for a graphic novel production. You work \
@@ -302,7 +300,7 @@ fn dialogue_writer(root: Agent<DialogueBrief>) -> Agent<DialogueNotes> {
 async fn configure_cinematographer(
     input: CinematographerBrief,
     _ctx: Context,
-) -> Result<AgentConfig, graph::GraphError> {
+) -> Result<AgentConfig, GraphError> {
     agent_config(
         input,
         "You are the cinematographer for a graphic novel production. You work \
@@ -329,7 +327,7 @@ fn cinematographer(root: Agent<CinematographerBrief>) -> Agent<CinemaNote> {
 async fn configure_director(
     input: DirectorBrief,
     _ctx: Context,
-) -> Result<AgentConfig, graph::GraphError> {
+) -> Result<AgentConfig, GraphError> {
     agent_config(
         input,
         "You are the director of a graphic novel. Your crew has delivered independent \
@@ -358,7 +356,7 @@ fn director(root: Agent<DirectorBrief>) -> Agent<ComicPanel> {
 async fn configure_illustrator(
     input: IllustratorBrief,
     _ctx: Context,
-) -> Result<AgentConfig, graph::GraphError> {
+) -> Result<AgentConfig, GraphError> {
     agent_config(
         input,
         "You are the production illustrator prompt designer for a professional comic book. \
@@ -388,16 +386,16 @@ fn illustrator(root: Agent<IllustratorBrief>) -> Agent<IllustrationPrompt> {
 async fn generate_panel_image(
     render: PanelRender,
     _ctx: Context,
-) -> Result<DirectorPanel, graph::GraphError> {
+) -> Result<DirectorPanel, GraphError> {
     let dir = Path::new("target/story_panels");
-    tokio::fs::create_dir_all(dir).await.map_err(|err| {
-        graph::GraphError::Invalid(format!("failed to create image folder: {err}"))
-    })?;
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|err| GraphError::Invalid(format!("failed to create image folder: {err}")))?;
     let prompt_path = dir.join(format!("panel_{:03}.prompt.txt", render.panel.panel_number));
     tokio::fs::write(&prompt_path, &render.illustration.prompt)
         .await
         .map_err(|err| {
-            graph::GraphError::Invalid(format!(
+            GraphError::Invalid(format!(
                 "failed to write panel prompt '{}': {err}",
                 prompt_path.display()
             ))
@@ -415,9 +413,7 @@ async fn generate_panel_image(
         })),
     }
     .create("fal:///fal-ai/flux/schnell")
-    .map_err(|err| {
-        graph::GraphError::Invalid(format!("failed to create Fal image client: {err}"))
-    })?;
+    .map_err(|err| GraphError::Invalid(format!("failed to create Fal image client: {err}")))?;
 
     let mut prompt = render.illustration.prompt.clone();
     let mut last_error = None;
@@ -434,9 +430,7 @@ async fn generate_panel_image(
                 ..ImageRequest::default()
             })
             .await
-            .map_err(|err| {
-                graph::GraphError::Invalid(format!("failed to generate panel image: {err}"))
-            })?;
+            .map_err(|err| GraphError::Invalid(format!("failed to generate panel image: {err}")))?;
 
         save_image_metadata(
             dir,
@@ -446,7 +440,7 @@ async fn generate_panel_image(
         )
         .await?;
         let image = response.images.first().ok_or_else(|| {
-            graph::GraphError::Invalid("Fal image response did not include any images".to_string())
+            GraphError::Invalid("Fal image response did not include any images".to_string())
         })?;
         match save_image_data(dir, render.panel.panel_number, image).await {
             Ok(path) => {
@@ -463,14 +457,14 @@ async fn generate_panel_image(
                 tokio::fs::write(&retry_prompt_path, &prompt)
                     .await
                     .map_err(|err| {
-                        graph::GraphError::Invalid(format!(
+                        GraphError::Invalid(format!(
                             "failed to write retry prompt '{}': {err}",
                             retry_prompt_path.display()
                         ))
                     })?;
             }
             Err(err) => {
-                return Err(graph::GraphError::Invalid(format!(
+                return Err(GraphError::Invalid(format!(
                     "{err}; prompt saved at '{}'",
                     prompt_path.display()
                 )));
@@ -481,7 +475,7 @@ async fn generate_panel_image(
     let err = last_error
         .map(|err| err.to_string())
         .unwrap_or_else(|| "image generation did not produce a usable image".to_string());
-    Err(graph::GraphError::Invalid(format!(
+    Err(GraphError::Invalid(format!(
         "{err}; prompt saved at '{}'",
         prompt_path.display()
     )))
@@ -516,16 +510,15 @@ async fn save_image_metadata(
     panel_number: usize,
     attempt: usize,
     metadata: &Option<serde_json::Value>,
-) -> Result<(), graph::GraphError> {
+) -> Result<(), GraphError> {
     let Some(metadata) = metadata else {
         return Ok(());
     };
     let path = dir.join(format!("panel_{panel_number:03}.attempt_{attempt}.json"));
-    let data = serde_json::to_vec_pretty(metadata).map_err(|err| {
-        graph::GraphError::Invalid(format!("failed to encode image metadata: {err}"))
-    })?;
+    let data = serde_json::to_vec_pretty(metadata)
+        .map_err(|err| GraphError::Invalid(format!("failed to encode image metadata: {err}")))?;
     tokio::fs::write(&path, data).await.map_err(|err| {
-        graph::GraphError::Invalid(format!(
+        GraphError::Invalid(format!(
             "failed to write image metadata '{}': {err}",
             path.display()
         ))
@@ -533,9 +526,9 @@ async fn save_image_metadata(
     Ok(())
 }
 
-fn validate_image_bytes(path: &Path, bytes_len: usize) -> Result<(), graph::GraphError> {
+fn validate_image_bytes(path: &Path, bytes_len: usize) -> Result<(), GraphError> {
     if bytes_len < MIN_PANEL_IMAGE_BYTES {
-        return Err(graph::GraphError::Invalid(format!(
+        return Err(GraphError::Invalid(format!(
             "generated image '{}' is only {} bytes; treating it as a likely blank/safety-filtered panel",
             path.display(),
             bytes_len
@@ -548,22 +541,20 @@ async fn save_image_data(
     dir: &Path,
     panel_number: usize,
     image: &ImageData,
-) -> Result<PathBuf, graph::GraphError> {
+) -> Result<PathBuf, GraphError> {
     match image {
         ImageData::Url { url } => save_image_url(dir, panel_number, url).await,
         ImageData::Base64 { mime_type, data } => {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data)
-                .map_err(|err| {
-                    graph::GraphError::Invalid(format!("invalid base64 image data: {err}"))
-                })?;
+                .map_err(|err| GraphError::Invalid(format!("invalid base64 image data: {err}")))?;
             let path = dir.join(format!(
                 "panel_{panel_number:03}.{}",
                 image_extension(mime_type)
             ));
             validate_image_bytes(&path, bytes.len())?;
             tokio::fs::write(&path, bytes).await.map_err(|err| {
-                graph::GraphError::Invalid(format!(
+                GraphError::Invalid(format!(
                     "failed to write panel image '{}': {err}",
                     path.display()
                 ))
@@ -573,17 +564,13 @@ async fn save_image_data(
     }
 }
 
-async fn save_image_url(
-    dir: &Path,
-    panel_number: usize,
-    url: &str,
-) -> Result<PathBuf, graph::GraphError> {
-    let response = reqwest::get(url).await.map_err(|err| {
-        graph::GraphError::Invalid(format!("failed to download panel image: {err}"))
-    })?;
+async fn save_image_url(dir: &Path, panel_number: usize, url: &str) -> Result<PathBuf, GraphError> {
+    let response = reqwest::get(url)
+        .await
+        .map_err(|err| GraphError::Invalid(format!("failed to download panel image: {err}")))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(graph::GraphError::Invalid(format!(
+        return Err(GraphError::Invalid(format!(
             "panel image download failed with status {status}"
         )));
     }
@@ -593,16 +580,17 @@ async fn save_image_url(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("image/png")
         .to_string();
-    let bytes = response.bytes().await.map_err(|err| {
-        graph::GraphError::Invalid(format!("failed to read panel image bytes: {err}"))
-    })?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|err| GraphError::Invalid(format!("failed to read panel image bytes: {err}")))?;
     let path = dir.join(format!(
         "panel_{panel_number:03}.{}",
         image_extension(&content_type)
     ));
     validate_image_bytes(&path, bytes.len())?;
     tokio::fs::write(&path, bytes).await.map_err(|err| {
-        graph::GraphError::Invalid(format!(
+        GraphError::Invalid(format!(
             "failed to write panel image '{}': {err}",
             path.display()
         ))
@@ -619,7 +607,7 @@ fn image_extension(content_type: &str) -> &'static str {
     }
 }
 
-async fn print_and_read(dp: DirectorPanel, _ctx: Context) -> Result<UserInput, graph::GraphError> {
+async fn print_and_read(dp: DirectorPanel, _ctx: Context) -> Result<UserInput, GraphError> {
     let rule = "─".repeat(62);
     println!("\n{rule}");
     println!("  PANEL {}", dp.panel_number);
@@ -647,7 +635,7 @@ async fn print_and_read(dp: DirectorPanel, _ctx: Context) -> Result<UserInput, g
         line.trim().to_string()
     })
     .await
-    .map_err(|e| graph::GraphError::Invalid(format!("print_and_read failed: {e}")))?;
+    .map_err(|e| GraphError::Invalid(format!("print_and_read failed: {e}")))?;
 
     Ok(UserInput {
         panel_number: dp.panel_number,
@@ -718,7 +706,7 @@ fn route_input(input: UserInput) -> Either<StoryTurn, FinalSummary> {
     })
 }
 
-fn story_turn(root: graph::Flow<StoryTurn>) -> graph::Flow<UserInput> {
+fn story_turn(root: Flow<StoryTurn>) -> Flow<UserInput> {
     let (choreo, dialogue, cinema, carry) = root.split(split_crew);
 
     let (director_brief, director_carry) = choreo
@@ -746,17 +734,17 @@ fn story_turn(root: graph::Flow<StoryTurn>) -> graph::Flow<UserInput> {
 }
 
 async fn run_story_turn(
-    flow: &graph::CompiledFlow<StoryTurn, UserInput>,
+    flow: &CompiledFlow<StoryTurn, UserInput>,
     turn: StoryTurn,
     ctx: Context,
 ) -> Result<UserInput, ExampleError> {
-    let mut runtime = flow.runtime(turn)?;
+    let mut runtime = flow.start(turn, ctx)?;
 
     loop {
-        match runtime.next(ctx.clone()).await? {
-            graph::Step::Continue => {}
-            graph::Step::Done(value) => return Ok(flow.decode_output(value)?),
-            graph::Step::Suspend(_) => {
+        match runtime.next().await? {
+            Step::Continue => {}
+            Step::Done(value) => return Ok(flow.decode_output(value)?),
+            Step::Suspend(_) => {
                 return Err(ExampleError::unexpected(
                     "story example does not expect suspension",
                 ));
@@ -790,7 +778,7 @@ async fn main() -> Result<(), ExampleError> {
     println!("\nProduction starting — Panel 1 in progress...\n");
 
     let ctx = Context::new(FlowConf::default());
-    let flow = graph::compile(story_turn)?;
+    let flow = compile(story_turn)?;
     let mut turn = StoryTurn {
         panel_number: 1,
         recap: String::new(),
