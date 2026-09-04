@@ -400,7 +400,7 @@ pub(super) fn add_store_node<T, S, H>(
     func: H,
 ) -> TypedEdge<T>
 where
-    T: 'static + Clone + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
+    T: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
     S: 'static + Serialize + DeserializeOwned + JsonSchema,
     H: Fn(T, S) -> S + Send + Sync + 'static,
 {
@@ -421,7 +421,7 @@ pub(super) fn add_store_node_named<T, S, H>(
     func: H,
 ) -> TypedEdge<T>
 where
-    T: 'static + Clone + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
+    T: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
     S: 'static + Serialize + DeserializeOwned + JsonSchema,
     H: Fn(T, S) -> S + Send + Sync + 'static,
 {

@@ -327,7 +327,7 @@ where
     /// Updates a typed variable while passing the input edge value through.
     pub fn store<T, S, H>(&self, input: TypedEdge<T>, var: TypedVar<S>, func: H) -> TypedEdge<T>
     where
-        T: 'static + Clone + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
+        T: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
         S: 'static + Serialize + DeserializeOwned + JsonSchema,
         H: Fn(T, S) -> S + Send + Sync + 'static,
     {
@@ -710,7 +710,6 @@ where
         func: impl Fn(T, S) -> S + Send + Sync + 'static,
     ) -> Self
     where
-        T: Clone,
         S: 'static + Serialize + DeserializeOwned + JsonSchema,
     {
         self.store_named::<S, _>(format!("store_{}", S::schema_name()), var, func)
@@ -718,7 +717,6 @@ where
 
     fn store_named<S, H>(self, name: impl Into<String>, var: TypedVar<S>, func: H) -> Self
     where
-        T: Clone,
         S: 'static + Serialize + DeserializeOwned + JsonSchema,
         H: Fn(T, S) -> S + Send + Sync + 'static,
     {

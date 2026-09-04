@@ -1,13 +1,15 @@
 //! Typed graph workflow with maps, variables, branches, subflows, and `each`.
 //!
 //! This example is deterministic and requires no external services.
+//! `Amount` intentionally does not implement `Clone`; storing local state does
+//! not require cloning application flow values.
 
 use either::Either;
 use pravah::{CompiledFlow, Context, Flow, FlowConf, GraphError, Step, compile};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct Amount {
     value: i64,
 }

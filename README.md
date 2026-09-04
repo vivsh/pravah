@@ -111,8 +111,10 @@ collections, local state, reusable child flows, agents, and suspension points.
 Inputs and outputs remain application types throughout the workflow.
 
 Here, a typed local records the attempt count without changing the value moving
-through the flow. Pravah prepares the request, gathers evidence, asks an agent
-for a recommendation, and then suspends with an `ApprovalRequest`.
+through the flow. The cloned value is the lightweight `TypedVar` handle, which
+allows the later `load` to reference the same local; `Request` itself does not
+need to implement `Clone`. Pravah prepares the request, gathers evidence, asks
+an agent for a recommendation, and then suspends with an `ApprovalRequest`.
 
 `Request` is the application's input, while `execution` is one active run of
 the reusable compiled workflow. Its explicit step loop lets the application

@@ -13,8 +13,15 @@ struct Response {
     value: i64,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct Counter(i64);
+
 fn workflow(root: Flow<Request>) -> Flow<Response> {
-    root.map(|request| Response {
+    let counter = root.local(Counter(0));
+    root.store(counter, |request, counter| {
+        Counter(request.value + counter.0)
+    })
+    .map(|request| Response {
         value: request.value + 1,
     })
 }
@@ -32,7 +39,7 @@ async fn configure_assistant(request: Request, _ctx: Context) -> Result<AgentCon
     ))
 }
 
-/// Verifies the modern typed workflow and chat API is available at the crate root.
+/// Verifies root API exports and storing a flow value that does not implement `Clone`.
 #[tokio::test]
 async fn modern_typed_api_is_available_at_crate_root() -> Result<(), GraphError> {
     let compiled = compile(workflow)?;
