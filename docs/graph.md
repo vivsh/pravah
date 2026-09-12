@@ -129,6 +129,10 @@ History entries have stable positions. `HistoryStore` implementations must
 treat a repeated position as an idempotent replay so a partially persisted
 batch can be retried safely.
 
+Import `HistoryStore`, `HistoryCompactor`, `HistoryEntry`, and
+`CompactionResult` directly from `pravah`. The same types are available under
+`pravah::history` for applications that prefer an explicit module path.
+
 ## Legacy API
 
 `pravah::legacy` remains available for compatibility. It receives fixes needed

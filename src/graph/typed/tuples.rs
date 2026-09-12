@@ -37,7 +37,7 @@ macro_rules! impl_split_outputs {
             }
 
             fn schema_names() -> Vec<String> {
-                vec![$($T::schema_name(),)+]
+                vec![$($T::schema_name().into_owned(),)+]
             }
 
             fn encode_outputs(self, node: &str) -> Result<Vec<Value>, GraphError> {

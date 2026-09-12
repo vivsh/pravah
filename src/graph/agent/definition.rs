@@ -171,7 +171,7 @@ impl<T> Agent<T> {
                 .errors
                 .push("agent configure may only be declared once".into());
         } else {
-            let agent = O::schema_name();
+            let agent = O::schema_name().into_owned();
             self.definition.configure = Some(AgentConfigurator {
                 call: Arc::new(move |value, ctx| {
                     let agent = agent.clone();

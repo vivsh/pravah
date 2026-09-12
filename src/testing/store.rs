@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
-use crate::legacy::{HistoryEntry, HistoryStore};
+use crate::history::{HistoryEntry, HistoryStore};
 
 /// [`HistoryStore`] test double that records every appended history entry.
 #[derive(Clone)]

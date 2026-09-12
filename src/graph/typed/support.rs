@@ -90,7 +90,7 @@ pub(super) fn type_spec<T>() -> TypeSpec
 where
     T: JsonSchema,
 {
-    let mut schema_gen = schemars::r#gen::SchemaGenerator::default();
+    let mut schema_gen = schemars::SchemaGenerator::default();
     let schema = match serde_json::to_value(schema_gen.root_schema_for::<T>()) {
         Ok(schema) => schema,
         Err(err) => serde_json::Value::String(format!("schema generation failed: {err}")),

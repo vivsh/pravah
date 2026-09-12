@@ -201,7 +201,7 @@ where
                     Ok(output) => return default_tool_message(&output),
                     Err(second) => {
                         return Err(EdgeToolMessageError::Fatal {
-                            expected: O::schema_name(),
+                            expected: O::schema_name().into_owned(),
                             reason: second.to_string(),
                             raw: preview_display(&value),
                         });
@@ -209,7 +209,7 @@ where
                 }
             }
             Err(EdgeToolMessageError::Fatal {
-                expected: O::schema_name(),
+                expected: O::schema_name().into_owned(),
                 reason: first.to_string(),
                 raw: preview_display(&value),
             })
@@ -233,7 +233,7 @@ where
                 output
             } else {
                 return Err(EdgeToolMessageError::Fatal {
-                    expected: O::schema_name(),
+                    expected: O::schema_name().into_owned(),
                     reason: first.to_string(),
                     raw: preview_value(&value),
                 });
@@ -253,7 +253,7 @@ fn default_tool_message<O: Serialize + JsonSchema>(
     output: &O,
 ) -> Result<Message, EdgeToolMessageError> {
     let content = serde_json::to_string(output).map_err(|error| EdgeToolMessageError::Fatal {
-        expected: O::schema_name(),
+        expected: O::schema_name().into_owned(),
         reason: error.to_string(),
         raw: "<tool output>".into(),
     })?;
@@ -648,7 +648,7 @@ pub(super) fn effective_preamble(payload: &AgentPayload, resolved: &ResolvedAgen
 }
 
 pub(super) fn schema_for<T: JsonSchema>() -> JsonValue {
-    serde_json::to_value(schemars::r#gen::SchemaGenerator::default().root_schema_for::<T>())
+    serde_json::to_value(schemars::SchemaGenerator::default().root_schema_for::<T>())
         .unwrap_or_else(|_| serde_json::json!({"type": "object"}))
 }
 

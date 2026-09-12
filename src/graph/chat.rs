@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::Context;
-use crate::legacy::{HistoryCompactor, HistoryStore};
+use crate::history::{HistoryCompactor, HistoryStore};
 
 use super::agent::Agent;
 use super::error::GraphError;

@@ -318,7 +318,7 @@ where
         guard.builder.node(
             name,
             NodeKind::Suspend {
-                resume_type: R::schema_name(),
+                resume_type: R::schema_name().into_owned(),
                 payload: Value::NULL,
             },
             vec![input_edge],

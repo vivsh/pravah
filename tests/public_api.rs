@@ -1,5 +1,8 @@
 use pravah::clients::Message;
-use pravah::{Agent, AgentConfig, Chat, Context, Flow, GraphError, Step, compile};
+use pravah::{
+    Agent, AgentConfig, Chat, CompactionResult, Context, Flow, GraphError, HistoryCompactor,
+    HistoryEntry, HistoryStore, Step, compile,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +18,27 @@ struct Response {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct Counter(i64);
+
+struct RootHistoryStore;
+
+impl HistoryStore for RootHistoryStore {
+    type Error = std::convert::Infallible;
+
+    async fn record(&self, _entry: &HistoryEntry) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+struct RootHistoryCompactor;
+
+impl HistoryCompactor for RootHistoryCompactor {
+    async fn compact(&self, _session_id: &str, _entries: &[&HistoryEntry]) -> CompactionResult {
+        CompactionResult {
+            evict_indices: Vec::new(),
+            summary: None,
+        }
+    }
+}
 
 fn workflow(root: Flow<Request>) -> Flow<Response> {
     let counter = root.local(Counter(0));
@@ -55,6 +79,8 @@ async fn modern_typed_api_is_available_at_crate_root() -> Result<(), GraphError>
     };
     assert_eq!(output, Response { value: 2 });
 
-    let _chat = Chat::new(assistant, Context::default());
+    let _chat = Chat::new(assistant, Context::default())
+        .with_store(RootHistoryStore)
+        .with_compactor(RootHistoryCompactor);
     Ok(())
 }

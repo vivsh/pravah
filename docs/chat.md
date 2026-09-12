@@ -123,6 +123,8 @@ Attach an application history store or compactor when constructing or
 restoring a chat:
 
 ```rust
+use pravah::{CompactionResult, HistoryCompactor, HistoryEntry, HistoryStore};
+
 let chat = Chat::new(tutor, ctx)
     .with_store(history_store)
     .with_compactor(history_compactor);
@@ -131,6 +133,9 @@ let restored = Chat::from_snapshot(tutor, snapshot, restored_ctx)?
     .with_store(restored_store)
     .with_compactor(restored_compactor);
 ```
+
+The persistence and compaction contracts are part of Pravah's modern root API;
+applications do not need to import `pravah::legacy` to implement them.
 
 Pravah records staged history before committing it to runtime history. A store
 may observe a successfully written prefix if a later write fails, so stores

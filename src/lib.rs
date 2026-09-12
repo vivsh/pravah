@@ -4,6 +4,7 @@ pub mod context;
 pub mod deps;
 pub mod diagram;
 pub mod graph;
+pub mod history;
 pub mod legacy;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -19,3 +20,7 @@ pub use graph::{
 };
 #[cfg(feature = "mcp")]
 pub use graph::{McpError, McpResourceInfo, McpServer};
+pub use history::{
+    CompactionResult, FlowHistory, HistoryCompactor, HistoryEntry, HistoryStore, NoopCompactor,
+    NoopHistoryStore, SlidingWindowCompactor,
+};

@@ -7,15 +7,16 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::compactor::{DynHistoryCompactor, HistoryCompactor, NoopCompactor};
-use super::history::{FlowHistory, HistoryEntry};
 use super::memory::{DynMemoryFactory, MemoryFactory, MemoryQuery, NoopMemoryFactory};
-use super::store::{DynHistoryStore, HistoryStore, NoopHistoryStore};
 use crate::clients::{
     Client, ClientError, ClientOptions, ClientOutput, Message, ResponseFormat, Role, TokenUsage,
     materialize_messages,
 };
 use crate::context::Context;
+use crate::history::{
+    DynHistoryCompactor, DynHistoryStore, FlowHistory, HistoryCompactor, HistoryEntry,
+    HistoryStore, NoopCompactor, NoopHistoryStore,
+};
 
 /// Agent-id label used when pushing messages into [`FlowHistory`].
 const CHAT_AGENT_ID: &str = "chat";

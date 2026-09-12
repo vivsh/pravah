@@ -6,8 +6,6 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::builder::FlowBuilder;
-use super::compactor::count_complete_turns;
-use super::history::FlowHistory;
 use super::memory::DynMemoryFactory;
 use super::memory::MemoryQuery;
 use super::node_api::Node;
@@ -15,7 +13,7 @@ use super::nodes::{
     AgentInfo, EachInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo, MapInfo, SuspendInfo,
     ToolMessageError, ToolWorkInfo, WorkInfo,
 };
-use super::store::DynHistoryStore;
+use crate::history::{DynHistoryStore, FlowHistory, count_complete_turns};
 use crate::legacy::NodeId;
 use crate::legacy::errors::{AgentError, BuildError, FlowError};
 use crate::legacy::interner::Interner;
@@ -78,7 +76,7 @@ pub trait Flow: 'static + JsonSchema + Serialize + DeserializeOwned + Send + Syn
 
     /// Unique identifier for this flow's entry node; defaults to the JSON Schema name.
     fn node_id() -> String {
-        Self::schema_name()
+        Self::schema_name().into_owned()
     }
 }
 
@@ -164,7 +162,7 @@ impl FlowGraph {
 
     pub fn from_flow<F: Flow>() -> Result<Self, FlowError> {
         let entry = F::node_id();
-        let exit = F::Output::schema_name();
+        let exit = F::Output::schema_name().into_owned();
         F::build(Node::from_builder(FlowBuilder::new()))
             .finalize()
             .build()?

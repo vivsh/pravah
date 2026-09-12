@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::Context;
-use crate::legacy::FlowHistory;
-use crate::legacy::{HistoryCompactor, HistoryStore};
+use crate::history::{FlowHistory, HistoryCompactor, HistoryStore};
 
 use super::agent::support::{validate_agent_snapshot_state, validate_agent_suspension};
 use super::error::GraphError;

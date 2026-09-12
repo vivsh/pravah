@@ -4109,10 +4109,10 @@ struct FailAtHistoryRecord {
     fail_at: usize,
 }
 
-impl crate::legacy::HistoryStore for FailAtHistoryRecord {
+impl crate::history::HistoryStore for FailAtHistoryRecord {
     type Error = EdgeHistoryRecordError;
 
-    async fn record(&self, _entry: &crate::legacy::HistoryEntry) -> Result<(), Self::Error> {
+    async fn record(&self, _entry: &crate::history::HistoryEntry) -> Result<(), Self::Error> {
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if call == self.fail_at {
             Err(EdgeHistoryRecordError)

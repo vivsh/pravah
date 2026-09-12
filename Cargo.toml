@@ -1,6 +1,6 @@
 [package]
 name = "pravah"
-version = "0.4.13"
+version = "0.4.14"
 edition = "2024"
 description = "Typed, stepwise agentic information flows for Rust"
 license = "MIT OR Apache-2.0"
@@ -30,7 +30,7 @@ mcp = ["dep:http", "dep:percent-encoding", "dep:rmcp"]
 [dependencies]
 base64 = "0.22"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "time"] }
-schemars = "0.8"
+schemars = "1.0.4"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -56,7 +56,7 @@ tempfile = "3.27.0"
 dotenvy = "0.15"
 pravah = { path = ".", features = ["testing"] }
 rmcp = { version = "3.1", default-features = false, features = ["server", "transport-streamable-http-server"] }
-schemars = "0.8"
+schemars = "1.0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 either = "1"

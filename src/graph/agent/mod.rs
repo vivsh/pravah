@@ -332,7 +332,7 @@ where
         control_handler_key: controller.as_ref().map(|_| String::new()),
         input_schema,
         output_schema,
-        output_type_name: O::schema_name(),
+        output_type_name: O::schema_name().into_owned(),
         tools: payload_tools,
     };
     AgentBuild {

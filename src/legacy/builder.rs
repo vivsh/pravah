@@ -12,11 +12,12 @@ use super::nary::{MergeInputs, SplitOutputs};
 use super::nodes::{
     AgentInfo, EachInfo, EitherFn, EitherInfo, FlowNode, ForkFn, ForkInfo, JoinFn, JoinInfo, MapFn,
     MapInfo, SuspendDeserializeFn, SuspendInfo, ToolInfo, ToolMessageError, ToolMessageFn,
-    ToolWorkFn, ToolWorkInfo, WorkFn, WorkInfo, build_tool_definition, node,
+    ToolWorkFn, ToolWorkInfo, WorkFn, WorkInfo, node,
 };
 use crate::legacy::NodeId;
 use crate::legacy::errors::{BuildError, FlowError};
 use crate::legacy::validation::validate_nodes;
+use crate::tools::tool_definition;
 use crate::{
     clients::Message,
     commons::{Agent, make_agent_message},
@@ -44,7 +45,7 @@ fn decode_tool_output<O>(value: Value) -> Result<O, ToolMessageError>
 where
     O: DeserializeOwned + JsonSchema,
 {
-    let expected = O::schema_name();
+    let expected = O::schema_name().into_owned();
     match serde_json::from_value::<O>(value.clone()) {
         Ok(output) => Ok(output),
         Err(value_error) => {
@@ -122,7 +123,7 @@ impl FlowBuilder {
                 .push(format!("agent '{}': duplicate node key", name_str));
             return self;
         }
-        let mut schema_gen = schemars::r#gen::SchemaGenerator::default();
+        let mut schema_gen = schemars::SchemaGenerator::default();
         let input_schema = match serde_json::to_value(schema_gen.root_schema_for::<A>()) {
             Ok(v) => v,
             Err(e) => {
@@ -140,7 +141,7 @@ impl FlowBuilder {
             }
         };
         let config = A::configure();
-        let output_str = A::Output::schema_name();
+        let output_str = A::Output::schema_name().into_owned();
         let output_id = self.flow.interner.intern(&output_str);
         let agent_info = AgentInfo {
             id: name,
@@ -238,7 +239,7 @@ impl FlowBuilder {
         let agent_str = A::node_id();
         let agent_id = self.flow.interner.intern(&agent_str);
 
-        let definition = match build_tool_definition::<I>() {
+        let definition = match tool_definition::<I>() {
             Ok(d) => d,
             Err(e) => {
                 self.errors.push(format!(

@@ -47,7 +47,6 @@ pub use memory::{
 };
 pub use nary::{MergeInputs, SplitOutputs};
 pub use node_api::{EitherNode, Node, Toolbox};
-pub(crate) use nodes::build_tool_definition;
 pub use retry::RetryLayer;
 pub use retry::{RetryConfig, RetryingFactory};
 pub use runtime::{FlowRuntime, FlowSnapshot, LimitKind, RunLimits, RunOutcome};

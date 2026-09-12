@@ -71,7 +71,7 @@ pub trait Agent: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'stat
 
     /// Graph node id. Defaults to the schema name.
     fn node_id() -> String {
-        Self::schema_name()
+        Self::schema_name().into_owned()
     }
 
     /// Builds the first user message for this agent invocation.

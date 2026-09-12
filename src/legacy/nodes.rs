@@ -10,9 +10,9 @@ use super::flow::FlowGraph;
 use crate::legacy::NodeId;
 use crate::legacy::errors::FlowError;
 use crate::{
-    clients::{Message, schema::sanitize_strict},
+    clients::Message,
     context::Context,
-    tools::base::{SuspendedValue, pascal_to_snake},
+    tools::base::SuspendedValue,
     tools::{ToolDefinition, ToolError},
 };
 
@@ -42,24 +42,6 @@ impl From<ToolError> for ToolMessageError {
     fn from(error: ToolError) -> Self {
         Self::Recoverable(error)
     }
-}
-
-/// Builds a [`ToolDefinition`] for type `T` using its JSON Schema.
-pub(crate) fn build_tool_definition<T: JsonSchema>() -> Result<ToolDefinition, String> {
-    let raw =
-        serde_json::to_value(schemars::r#gen::SchemaGenerator::default().root_schema_for::<T>())
-            .map_err(|e| format!("schema serialization failed: {e}"))?;
-    let description = raw
-        .get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let parameters = sanitize_strict(raw);
-    Ok(ToolDefinition {
-        name: pascal_to_snake(&T::schema_name()),
-        description,
-        parameters,
-    })
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

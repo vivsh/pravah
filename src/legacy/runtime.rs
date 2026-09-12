@@ -4,13 +4,12 @@ use super::{flow::StepServices, nodes::FlowNode};
 use crate::{
     Context,
     clients::{DefaultClientFactory, Message, Role},
+    history::{DynHistoryCompactor, DynHistoryStore, FlowHistory, NoopCompactor, NoopHistoryStore},
     legacy::{
-        ClientFactory, Flow, FlowError, FlowGraph, FlowHistory, FlowStep, NodeId,
-        compactor::{DynHistoryCompactor, NoopCompactor},
+        ClientFactory, Flow, FlowError, FlowGraph, FlowStep, NodeId,
         inspect::FlowInspector,
         memory::{DynMemoryFactory, NoopMemoryFactory},
         state::{AgentContinuation, Callable, FlowState},
-        store::{DynHistoryStore, NoopHistoryStore},
     },
     tools::base::SuspendedValue,
 };
@@ -244,16 +243,13 @@ impl<I: Flow> FlowRuntime<I> {
     }
 
     /// Replaces the history compactor.
-    pub fn with_compactor(
-        mut self,
-        c: impl crate::legacy::compactor::HistoryCompactor + 'static,
-    ) -> Self {
+    pub fn with_compactor(mut self, c: impl crate::history::HistoryCompactor + 'static) -> Self {
         self.compactor = Box::new(c);
         self
     }
 
     /// Replaces the history store.
-    pub fn with_store(mut self, s: impl crate::legacy::store::HistoryStore + 'static) -> Self {
+    pub fn with_store(mut self, s: impl crate::history::HistoryStore + 'static) -> Self {
         self.store = Box::new(s);
         self
     }
@@ -449,7 +445,7 @@ impl<I: Flow> FlowRuntime<I> {
             .suspension()
             .ok_or(FlowError::UnexpectedResumption)?;
         let expected = suspension.output_type.clone();
-        let got = R::schema_name();
+        let got = R::schema_name().into_owned();
         if got != expected {
             return Err(FlowError::ResumptionTypeMismatch { expected, got });
         }
@@ -497,13 +493,13 @@ impl<I: Flow> FlowRuntime<I> {
             .map(|s| s.to_string())
             .collect();
         for session_id in &session_ids {
-            let owned: Vec<crate::legacy::history::HistoryEntry> = self
+            let owned: Vec<crate::history::HistoryEntry> = self
                 .history
                 .session_entries(session_id)
                 .into_iter()
                 .cloned()
                 .collect();
-            let refs: Vec<&crate::legacy::history::HistoryEntry> = owned.iter().collect();
+            let refs: Vec<&crate::history::HistoryEntry> = owned.iter().collect();
             let result = self.compactor.compact_dyn(session_id, &refs).await;
             self.history
                 .apply_compaction(session_id, &refs, result)

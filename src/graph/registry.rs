@@ -7,11 +7,10 @@ use tokio::sync::Mutex;
 
 use crate::Context;
 use crate::clients::Message;
-use crate::legacy::FlowHistory;
-use crate::legacy::compactor::count_complete_turns;
-use crate::legacy::compactor::{DynHistoryCompactor, NoopCompactor};
-use crate::legacy::store::{DynHistoryStore, NoopHistoryStore};
-use crate::legacy::{HistoryCompactor, HistoryEntry, HistoryStore};
+use crate::history::{
+    DynHistoryCompactor, DynHistoryStore, FlowHistory, HistoryCompactor, HistoryEntry,
+    HistoryStore, NoopCompactor, NoopHistoryStore, count_complete_turns,
+};
 
 use super::error::GraphError;
 use super::ids::{EdgeId, HandlerKey};

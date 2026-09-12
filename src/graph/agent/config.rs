@@ -12,7 +12,7 @@ use super::AgentToolPayload;
 
 /// Builds the canonical model-facing definition used by tools and budgets.
 pub(super) fn agent_tool_definition<T: JsonSchema>() -> Result<ToolDefinition, String> {
-    crate::legacy::build_tool_definition::<T>()
+    crate::tools::tool_definition::<T>()
 }
 
 /// Returns the canonical identity for a tool input type.
