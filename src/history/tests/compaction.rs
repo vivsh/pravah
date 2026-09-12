@@ -1,4 +1,5 @@
-use crate::history::{FlowHistory, HistoryCompactor, NoopCompactor, SlidingWindowCompactor};
+use crate::history::FlowHistory;
+use crate::legacy::{HistoryCompactor, NoopCompactor, SlidingWindowCompactor};
 
 use super::support::{push_assistant, push_tool, push_tool_calls, tool_call};
 

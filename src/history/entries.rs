@@ -4,13 +4,17 @@ use uuid::Uuid;
 use super::compactor::CompactionResult;
 use crate::clients::{ClientError, Message, Role, TokenUsage};
 
+mod replacement;
+
+pub(crate) use replacement::{protected_start, validate_message_groups};
+
 /// One history row with Pravah metadata around a wire-format [`Message`].
 /// External code should create entries through [`FlowHistory::push`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     /// Stable row id for persistence.
     pub id: Uuid,
-    /// Monotonic position assigned by [`FlowHistory::push`].
+    /// Append position; a working-memory summary inherits the first replaced position.
     pub position: u64,
     /// Session this entry belongs to.
     pub session_id: String,
@@ -35,8 +39,8 @@ impl HistoryEntry {
     }
 }
 
-/// Append-only history for all active agent sessions.
-/// Token counters are updated on every [`push`](FlowHistory::push).
+/// Runtime conversation history and cumulative usage for all agent sessions.
+/// Preparation may replace completed exchanges; counters retain their original usage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FlowHistory {
     entries: Vec<HistoryEntry>,

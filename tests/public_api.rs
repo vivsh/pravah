@@ -1,7 +1,7 @@
 use pravah::clients::Message;
 use pravah::{
-    Agent, AgentConfig, Chat, CompactionResult, Context, Flow, GraphError, HistoryCompactor,
-    HistoryEntry, HistoryStore, Step, compile,
+    Agent, AgentConfig, Chat, Context, Flow, GraphError, HistoryEntry, HistoryPreparation,
+    HistoryPreparer, HistoryReplacement, HistoryStore, Step, compile,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,14 +29,16 @@ impl HistoryStore for RootHistoryStore {
     }
 }
 
-struct RootHistoryCompactor;
+struct RootHistoryPreparer;
 
-impl HistoryCompactor for RootHistoryCompactor {
-    async fn compact(&self, _session_id: &str, _entries: &[&HistoryEntry]) -> CompactionResult {
-        CompactionResult {
-            evict_indices: Vec::new(),
-            summary: None,
-        }
+impl HistoryPreparer for RootHistoryPreparer {
+    type Error = std::convert::Infallible;
+
+    async fn prepare(
+        &self,
+        _request: HistoryPreparation<'_>,
+    ) -> Result<HistoryReplacement, Self::Error> {
+        Ok(HistoryReplacement::default())
     }
 }
 
@@ -81,6 +83,6 @@ async fn modern_typed_api_is_available_at_crate_root() -> Result<(), GraphError>
 
     let _chat = Chat::new(assistant, Context::default())
         .with_store(RootHistoryStore)
-        .with_compactor(RootHistoryCompactor);
+        .with_history_preparer(RootHistoryPreparer);
     Ok(())
 }

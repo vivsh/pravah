@@ -309,36 +309,7 @@ impl AgentHandler {
         ctx: ContinuationContext,
     ) -> Result<ContinuationTransition, GraphError> {
         let concluding = conclusion.is_some();
-        let request_ctx = ctx.context();
-        let tools = if concluding {
-            Vec::new()
-        } else {
-            let active = effective_tools(
-                &checkpoint.resolved.tools,
-                &checkpoint.selected_tools,
-                checkpoint.budget.as_ref(),
-            );
-            tool_definitions(payload, &active)
-        };
-        let options = client_options(payload, checkpoint, tools);
-        let client = request_ctx
-            .client_factory()
-            .create(&checkpoint.resolved.model, options)
-            .map_err(|err| GraphError::AgentClient(format!("client creation failed: {err}")))?;
-        ctx.validate_history_for_session(&checkpoint.session_id)
-            .await?;
-        let history = ctx.history_for_session(&checkpoint.session_id).await;
-        let mut messages = materialize_messages(&history, request_ctx)
-            .await
-            .map_err(|err| GraphError::Invalid(format!("message materialization failed: {err}")))?;
-        append_guidance(&mut messages, checkpoint.guidance.as_deref());
-        if matches!(conclusion, Some(ConclusionCause::TurnBudget)) {
-            append_budget_reminder(&mut messages, client.as_ref(), payload);
-        }
-        let response = client
-            .execute(&messages)
-            .await
-            .map_err(|err| GraphError::AgentClient(format!("execution failed: {err}")))?;
+        let response = execute_prepared_request(payload, checkpoint, conclusion, &ctx).await?;
         match response.output {
             ClientOutput::Output(output) => {
                 self.complete_output(payload, checkpoint, output, response.usage, concluding, ctx)
@@ -384,7 +355,6 @@ impl AgentHandler {
         checkpoint.metrics.record_output(usage)?;
         ctx.push_history(&checkpoint.session_id, &payload.agent_id, message)
             .await?;
-        ctx.compact_history(&checkpoint.session_id).await?;
         Ok(ContinuationTransition {
             checkpoint: None,
             state: completed_agent_state(checkpoint)?,
@@ -448,7 +418,6 @@ impl AgentHandler {
         let transition = self.begin_tool_execution(checkpoint, prepared)?;
         ctx.push_history_batch(&checkpoint.session_id, &payload.agent_id, messages)
             .await?;
-        ctx.compact_history(&checkpoint.session_id).await?;
         Ok(transition)
     }
 
@@ -584,7 +553,6 @@ impl AgentHandler {
         let message = message.with_call_id(call_id);
         ctx.push_history(&checkpoint.session_id, &payload.agent_id, message)
             .await?;
-        ctx.compact_history(&checkpoint.session_id).await?;
         self.commit_tool_result(checkpoint, active_call, value, error)
     }
 
@@ -729,6 +697,62 @@ fn validate_agent_output(
     } else {
         result
     }
+}
+
+/// Resolves the actual client surface and prepares history exactly once before execution.
+async fn execute_prepared_request(
+    payload: &AgentPayload,
+    checkpoint: &EdgeAgentCheckpoint,
+    conclusion: Option<ConclusionCause>,
+    ctx: &ContinuationContext,
+) -> Result<crate::clients::ClientResponse, GraphError> {
+    let client = dispatch_client(payload, checkpoint, conclusion.is_some(), ctx.context())?;
+    let mut framework_messages = Vec::new();
+    append_guidance(&mut framework_messages, checkpoint.guidance.as_deref());
+    if matches!(conclusion, Some(ConclusionCause::TurnBudget)) {
+        append_budget_reminder(&mut framework_messages, client.as_ref(), payload);
+    }
+    let history = ctx
+        .prepare_history(
+            &checkpoint.session_id,
+            &checkpoint.resolved.model,
+            client.options(),
+            &framework_messages,
+        )
+        .await?;
+    let mut messages = materialize_messages(&history, ctx.context())
+        .await
+        .map_err(|err| GraphError::Invalid(format!("message materialization failed: {err}")))?;
+    messages.extend(framework_messages);
+    client
+        .execute(&messages)
+        .await
+        .map_err(|err| GraphError::AgentClient(format!("execution failed: {err}")))
+}
+
+/// Builds one client using the checkpoint's effective tool surface and bound factory.
+fn dispatch_client(
+    payload: &AgentPayload,
+    checkpoint: &EdgeAgentCheckpoint,
+    concluding: bool,
+    ctx: &Context,
+) -> Result<Box<dyn crate::clients::Client>, GraphError> {
+    let tools = if concluding {
+        Vec::new()
+    } else {
+        let active = effective_tools(
+            &checkpoint.resolved.tools,
+            &checkpoint.selected_tools,
+            checkpoint.budget.as_ref(),
+        );
+        tool_definitions(payload, &active)
+    };
+    ctx.client_factory()
+        .create(
+            &checkpoint.resolved.model,
+            client_options(payload, checkpoint, tools),
+        )
+        .map_err(|err| GraphError::AgentClient(format!("client creation failed: {err}")))
 }
 
 fn tool_infos(payload: &AgentPayload, selected: &[String]) -> Vec<ToolInfo> {

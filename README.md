@@ -23,7 +23,7 @@ agent loop.
 
 ```toml
 [dependencies]
-pravah = "0.4.14"
+pravah = "0.4.15"
 ```
 
 ## Flow, Agent, and Chat

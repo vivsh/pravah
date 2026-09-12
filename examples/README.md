@@ -18,6 +18,7 @@ These examples are deterministic and require no provider credentials.
 | `graph_typed` | Typed maps, branches, variables, subflows, and `each` |
 | `graph_untyped` | Building an `UntypedGraph` and handler registry directly |
 | `graph_agent_budgets` | Deterministic agent and per-tool budgets; run with `--features testing` |
+| `graph_chat_working_memory` | Fallible history preparation, summary replacement, and restore; run with `--features testing` |
 
 ## Diagrams And Local Persistence
 

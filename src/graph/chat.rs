@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::Context;
-use crate::history::{HistoryCompactor, HistoryStore};
+use crate::history::{HistoryPreparer, HistoryStore};
 
 use super::agent::Agent;
 use super::error::GraphError;
@@ -73,9 +73,9 @@ where
         })
     }
 
-    /// Replaces the history compactor used by the chat runtime.
-    pub fn with_compactor(mut self, compactor: impl HistoryCompactor + 'static) -> Self {
-        self.services = self.services.with_compactor(compactor);
+    /// Sets the fallible pre-request history policy; reattach it after snapshot restore.
+    pub fn with_history_preparer(mut self, preparer: impl HistoryPreparer + 'static) -> Self {
+        self.services = self.services.with_history_preparer(preparer);
         self.refresh_runtime_services();
         self
     }

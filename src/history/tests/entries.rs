@@ -1,5 +1,6 @@
 use crate::clients::{ClientError, Message, Role, TokenUsage};
-use crate::history::{CompactionResult, FlowHistory};
+use crate::history::FlowHistory;
+use crate::legacy::CompactionResult;
 
 use super::support::{push_assistant, push_tool, push_tool_calls, push_user, tool_call, usage};
 

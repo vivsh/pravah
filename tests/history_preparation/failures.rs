@@ -1,0 +1,117 @@
+use super::*;
+use pravah::{Flow, Runtime, Step, compile};
+
+#[derive(Debug, thiserror::Error)]
+#[error("memory service unavailable")]
+struct PreparationFailure;
+
+struct Failing;
+
+impl HistoryPreparer for Failing {
+    type Error = PreparationFailure;
+
+    async fn prepare(
+        &self,
+        _request: HistoryPreparation<'_>,
+    ) -> Result<HistoryReplacement, Self::Error> {
+        Err(PreparationFailure)
+    }
+}
+
+struct Invalid {
+    indices: Vec<usize>,
+}
+
+impl HistoryPreparer for Invalid {
+    type Error = std::convert::Infallible;
+
+    async fn prepare(
+        &self,
+        _request: HistoryPreparation<'_>,
+    ) -> Result<HistoryReplacement, Self::Error> {
+        Ok(HistoryReplacement {
+            evict_indices: self.indices.clone(),
+            summary: None,
+        })
+    }
+}
+
+fn workflow(root: Flow<Question>) -> Flow<Answer> {
+    root.agent(tutor)
+}
+
+/// Stops after the user message is recorded, before the first model execution.
+async fn before_dispatch(
+    policy: impl HistoryPreparer + 'static,
+    factory: &ScriptedFactory,
+) -> Result<Runtime, GraphError> {
+    let flow = compile(workflow)?;
+    let mut execution = flow
+        .start(
+            Question {
+                text: "protected".into(),
+            },
+            Context::default().with_client_factory(factory.clone()),
+        )?
+        .with_history_preparer(policy);
+    for _ in 0..10 {
+        execution.next().await?;
+        if !execution.snapshot()?.history().is_empty() {
+            return Ok(execution);
+        }
+    }
+    Err(GraphError::Invalid("did not reach dispatch".into()))
+}
+
+/// A typed preparation error survives in GraphError and leaves the whole checkpoint retryable.
+#[tokio::test]
+async fn policy_failure_makes_zero_calls_and_preserves_snapshot() -> Result<(), GraphError> {
+    let factory = ScriptedFactory::new().then_output(serde_json::json!({"text":"ok"}));
+    let mut execution = before_dispatch(Failing, &factory).await?;
+    let before = execution.snapshot()?;
+    match execution.next().await {
+        Err(GraphError::HistoryPreparation { source, .. }) => {
+            assert!(source.is::<PreparationFailure>())
+        }
+        other => panic!("unexpected preparation outcome: {other:?}"),
+    }
+    assert!(factory.calls().is_empty());
+    assert_eq!(
+        serde_json::to_value(&before).expect("snapshot"),
+        serde_json::to_value(execution.snapshot()?).expect("snapshot")
+    );
+    let flow = compile(workflow)?;
+    let mut restored = flow
+        .restore(
+            before,
+            Context::default().with_client_factory(factory.clone()),
+        )?
+        .with_history_preparer(Summarize);
+    for _ in 0..10 {
+        if matches!(restored.next().await?, Step::Done(_)) {
+            break;
+        }
+    }
+    assert_eq!(factory.calls().len(), 1);
+    Ok(())
+}
+
+/// Invalid or protected indices do not change history or permit a model call.
+#[tokio::test]
+async fn runtime_rejects_protected_and_out_of_range_eviction() -> Result<(), GraphError> {
+    for indices in [vec![0], vec![99], vec![0, 0]] {
+        let factory = ScriptedFactory::new();
+        let mut execution = before_dispatch(Invalid { indices }, &factory).await?;
+        let before = serde_json::to_value(execution.snapshot()?).expect("snapshot");
+        assert!(matches!(
+            execution.next().await,
+            Err(GraphError::HistoryPreparationValidation { .. })
+        ));
+        assert_eq!(
+            serde_json::to_value(execution.snapshot()?).expect("snapshot"),
+            before
+        );
+        assert!(factory.calls().is_empty());
+    }
+    Ok(())
+}

@@ -21,6 +21,6 @@ pub use graph::{
 #[cfg(feature = "mcp")]
 pub use graph::{McpError, McpResourceInfo, McpServer};
 pub use history::{
-    CompactionResult, FlowHistory, HistoryCompactor, HistoryEntry, HistoryStore, NoopCompactor,
-    NoopHistoryStore, SlidingWindowCompactor,
+    FlowHistory, HistoryEntry, HistoryPreparation, HistoryPreparer, HistoryReplacement,
+    HistoryStore, NoopHistoryStore,
 };

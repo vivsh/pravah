@@ -32,7 +32,7 @@ struct ScriptedClient {
 }
 
 impl ScriptedClient {
-    fn new(inner: Arc<Mutex<ScriptedInner>>, model_url: String) -> Self {
+    fn new(inner: Arc<Mutex<ScriptedInner>>, model_url: String, options: ClientOptions) -> Self {
         let url = ModelUrl::parse(&model_url).unwrap_or_else(|_| {
             ModelUrl::parse("openai:///test-model").expect("fallback URL is valid")
         });
@@ -40,7 +40,7 @@ impl ScriptedClient {
             inner,
             model_url,
             url,
-            options: ClientOptions::default(),
+            options,
         }
     }
 }
@@ -151,11 +151,12 @@ impl ClientFactory for ScriptedFactory {
     fn create(
         &self,
         model_url: &str,
-        _options: ClientOptions,
+        options: ClientOptions,
     ) -> Result<Box<dyn Client>, ClientError> {
         Ok(Box::new(ScriptedClient::new(
             Arc::clone(&self.inner),
             model_url.to_owned(),
+            options,
         )))
     }
 }

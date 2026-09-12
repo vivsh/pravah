@@ -8,7 +8,7 @@ Enable MCP support:
 
 ```toml
 [dependencies]
-pravah = { version = "0.4.14", features = ["mcp"] }
+pravah = { version = "0.4.15", features = ["mcp"] }
 ```
 
 ## Register an MCP Server

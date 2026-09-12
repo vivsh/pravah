@@ -33,6 +33,25 @@ pub enum GraphError {
     #[error("history persistence failed: {0}")]
     HistoryPersistence(String),
 
+    /// An application could not prepare working memory for the upcoming request.
+    #[error("history preparation failed for '{session_id}': {source}")]
+    HistoryPreparation {
+        /// Session whose history remains unchanged.
+        session_id: String,
+        /// Original application error, available for inspection and downcasting.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// A history replacement or resulting message sequence is unsafe.
+    #[error("history preparation is invalid for '{session_id}': {reason}")]
+    HistoryPreparationValidation {
+        /// Session whose history remains unchanged.
+        session_id: String,
+        /// Invalid index, message group, or stale observation.
+        reason: String,
+    },
+
     /// An agent's activation-time configuration function failed.
     #[error("agent configuration failed for '{agent}': {reason}")]
     AgentConfiguration { agent: String, reason: String },

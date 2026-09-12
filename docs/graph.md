@@ -129,9 +129,19 @@ History entries have stable positions. `HistoryStore` implementations must
 treat a repeated position as an idempotent replay so a partially persisted
 batch can be retried safely.
 
-Import `HistoryStore`, `HistoryCompactor`, `HistoryEntry`, and
-`CompactionResult` directly from `pravah`. The same types are available under
+Import `HistoryStore`, `HistoryPreparer`, `HistoryPreparation`, `HistoryEntry`, and
+`HistoryReplacement` directly from `pravah`. The same types are available under
 `pravah::history` for applications that prefer an explicit module path.
+
+Use `Runtime::with_history_preparer` to prepare summary-based working memory
+before each model execution. The policy receives effective request options and
+framework guidance, along with separate committed and protected history views.
+Replacement is validated and applied atomically; the current user/tool exchange
+cannot be evicted. Successfully replaced rows are physically removed from
+snapshots without resetting usage counters or changing retained identities.
+Policy errors prevent model execution. The policy is never run after final
+output and must be reattached after restore. See the [chat guide](chat.md#history-persistence-and-working-memory)
+for decisions, error handling, audit-store semantics, and sizing limitations.
 
 ## Legacy API
 

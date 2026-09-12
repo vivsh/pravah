@@ -117,33 +117,76 @@ Restoration requires the same agent definition. Live provider clients and
 application services are not serialized; bind them through the restoration
 `Context` or the service setters before continuing.
 
-## History Persistence And Compaction
+## History Persistence And Working Memory
 
-Attach an application history store or compactor when constructing or
+Attach an application history store or preparation policy when constructing or
 restoring a chat:
 
 ```rust
-use pravah::{CompactionResult, HistoryCompactor, HistoryEntry, HistoryStore};
+use pravah::{HistoryPreparation, HistoryPreparer, HistoryReplacement, HistoryStore};
 
 let chat = Chat::new(tutor, ctx)
     .with_store(history_store)
-    .with_compactor(history_compactor);
+    .with_history_preparer(working_memory);
 
 let restored = Chat::from_snapshot(tutor, snapshot, restored_ctx)?
     .with_store(restored_store)
-    .with_compactor(restored_compactor);
+    .with_history_preparer(restored_working_memory);
 ```
 
-The persistence and compaction contracts are part of Pravah's modern root API;
+The persistence and preparation contracts are part of Pravah's modern root API;
 applications do not need to import `pravah::legacy` to implement them.
 
 Pravah records staged history before committing it to runtime history. A store
 may observe a successfully written prefix if a later write fails, so stores
 should deduplicate retries by stable history position.
 
-Compaction changes the model-visible conversation while preserving independent
-agent-loop metrics. Choose a policy that retains any context required by the
-application.
+Implement `HistoryPreparer::prepare` to return `Result<HistoryReplacement, YourError>`.
+Its borrowed `HistoryPreparation` exposes the resolved model, effective client
+options (including the preamble, schemas, provider settings and currently active
+tools), and the exact framework guidance accompanying the upcoming request.
+Attachment materialization and provider wire transformations happen later;
+this view does not provide exact token counts or strict token-budget enforcement.
+
+`committed()` contains prior exchanges eligible for replacement. `protected()`
+contains the newest user input and its ongoing tool exchange. The policy can
+read both, but replacement indices refer only to `committed()`. Select a sorted,
+contiguous prefix `0..n` ending at an exchange boundary. A non-empty `summary`
+requires replaced entries; Pravah places it in a tagged system message before
+retained exchanges. `HistoryReplacement::default()` leaves live history intact.
+
+Pravah invokes the policy once before each model execution attempt, including
+tool-loop redispatch and forced conclusion, and never after the final response.
+It validates the whole decision and resulting tool-call/result groups before
+changing history. Policy errors propagate as `GraphError::HistoryPreparation`
+with the original error as their source; invalid decisions return
+`GraphError::HistoryPreparationValidation`. Neither error executes the model or
+changes the history/checkpoint present before preparation. The pending user
+message has already been recorded by then. For application-controlled retries,
+drive the workflow with `Runtime::next()` and retry that step, or restore its
+snapshot with fresh dependencies. This change does not add an in-flight retry
+operation to `Chat::send()`; calling `send()` again does not retry the failed
+dispatch. Do not resend the same user message as another chat turn.
+
+Successful replacement physically removes old rows from snapshots while
+preserving retained row identities, positions, and accumulated usage. Audit
+stores still receive original appended messages; preparation does not send
+summary rows or delete commands to the store. Snapshots remain the source for
+restoring prepared working memory. Repeated consolidation can bound retained
+past exchanges, but the protected current exchange and summary text still take
+space. Applications choose what knowledge to preserve and how large a summary
+may become. A later attachment or provider failure does not undo a successful
+preparation; policies should tolerate retries.
+
+Policies and their dependencies are never serialized. Reattach a fresh policy
+after restore, as above. Without a policy, ordinary chat retains its history.
+`AgentConfig::memory` remains separate invocation memory; preparation does not
+rewrite it. Legacy compaction remains under `pravah::legacy`.
+
+See [the runnable working-memory example](../examples/graph_chat_working_memory.rs)
+for a fallible policy and restoration with fresh dependencies. Applications
+provide the summarizer, storage, retry handling, and any model-specific size
+estimation. This API does not add provider output caps.
 
 ## Operational Responsibilities
 

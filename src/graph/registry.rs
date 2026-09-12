@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::Context;
-use crate::clients::Message;
+use crate::clients::{ClientOptions, Message};
 use crate::history::{
-    DynHistoryCompactor, DynHistoryStore, FlowHistory, HistoryCompactor, HistoryEntry,
-    HistoryStore, NoopCompactor, NoopHistoryStore, count_complete_turns,
+    DynHistoryPreparer, DynHistoryStore, FlowHistory, HistoryEntry, HistoryPreparation,
+    HistoryPreparer, HistoryStore, NoopHistoryStore, count_complete_turns, protected_start,
+    validate_message_groups,
 };
 
 use super::error::GraphError;
@@ -20,31 +21,31 @@ use super::value::Value;
 #[derive(Clone)]
 /// Runtime-owned service bundle shared by edge handlers.
 ///
-/// Configure history behavior through `Runtime::with_compactor` and
+/// Configure history behavior through `Runtime::with_history_preparer` and
 /// `Runtime::with_store`; graph serialization never contains these services.
 pub struct RuntimeServices {
-    compactor: Arc<dyn DynHistoryCompactor>,
+    preparer: Option<Arc<dyn DynHistoryPreparer>>,
     store: Arc<dyn DynHistoryStore>,
 }
 
 impl Default for RuntimeServices {
     fn default() -> Self {
         Self {
-            compactor: Arc::new(NoopCompactor),
+            preparer: None,
             store: Arc::new(NoopHistoryStore),
         }
     }
 }
 
 impl RuntimeServices {
-    /// Creates services with no-op history hooks.
+    /// Creates services without a preparation policy and with a no-op history store.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Replaces the history compactor used after agent turns.
-    pub fn with_compactor(mut self, compactor: impl HistoryCompactor + 'static) -> Self {
-        self.compactor = Arc::new(compactor);
+    /// Installs the fallible policy run before each model execution, never after output.
+    pub fn with_history_preparer(mut self, preparer: impl HistoryPreparer + 'static) -> Self {
+        self.preparer = Some(Arc::new(preparer));
         self
     }
 
@@ -52,10 +53,6 @@ impl RuntimeServices {
     pub fn with_store(mut self, store: impl HistoryStore + 'static) -> Self {
         self.store = Arc::new(store);
         self
-    }
-
-    pub(crate) fn compactor(&self) -> &dyn DynHistoryCompactor {
-        self.compactor.as_ref()
     }
 
     pub(crate) fn store(&self) -> &dyn DynHistoryStore {
@@ -170,20 +167,42 @@ impl ContinuationContext {
         count_complete_turns(&refs)
     }
 
-    /// Runs compaction against runtime-owned history.
-    pub async fn compact_history(&self, session_id: &str) -> Result<(), GraphError> {
+    /// Prepares and atomically replaces completed session history for one model request.
+    /// The returned messages are exactly the successfully prepared history for dispatch.
+    pub(crate) async fn prepare_history(
+        &self,
+        session_id: &str,
+        model: &str,
+        options: &ClientOptions,
+        framework_messages: &[Message],
+    ) -> Result<Vec<Message>, GraphError> {
+        let invalid = |reason| GraphError::HistoryPreparationValidation {
+            session_id: session_id.to_owned(),
+            reason,
+        };
+        let Some(preparer) = &self.services.preparer else {
+            let messages = self.history_for_session(session_id).await;
+            validate_message_groups(&messages).map_err(invalid)?;
+            return Ok(messages);
+        };
         let owned = self.history_entries_for_session(session_id).await;
         let refs = owned.iter().collect::<Vec<_>>();
-        let result = self
-            .services
-            .compactor()
-            .compact_dyn(session_id, &refs)
-            .await;
-        let mut history = self.history.lock().await;
-        history
-            .apply_compaction(session_id, &refs, result)
-            .map_err(|err| GraphError::Invalid(format!("history compaction failed: {err}")))?;
-        Ok(())
+        validate_message_groups(refs.iter().map(|entry| &entry.message)).map_err(invalid)?;
+        let (committed, protected) = refs.split_at(protected_start(&refs));
+        let request = HistoryPreparation {
+            session_id,
+            model,
+            options,
+            framework_messages,
+            committed,
+            protected,
+        };
+        let result = preparer.prepare_dyn(request).await?;
+        self.history
+            .lock()
+            .await
+            .replace_prepared_history(session_id, &refs, result)
+            .map_err(invalid)
     }
 }
 

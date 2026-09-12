@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::Context;
-use crate::history::{FlowHistory, HistoryCompactor, HistoryStore};
+use crate::history::{FlowHistory, HistoryPreparer, HistoryStore};
 
 use super::agent::support::{validate_agent_snapshot_state, validate_agent_suspension};
 use super::error::GraphError;
@@ -369,14 +369,14 @@ fn validate_continuation_payloads(
 }
 
 impl Runtime {
-    /// Sets the history compactor used by runtime-owned history.
-    pub fn with_compactor(mut self, compactor: impl HistoryCompactor + 'static) -> Self {
+    /// Sets the fallible pre-request history policy; reattach it after snapshot restore.
+    pub fn with_history_preparer(mut self, preparer: impl HistoryPreparer + 'static) -> Self {
         let services = self
             .runtime_context
             .services
             .as_ref()
             .clone()
-            .with_compactor(compactor);
+            .with_history_preparer(preparer);
         self.runtime_context = Arc::new(self.runtime_context.with_services(services));
         self
     }
