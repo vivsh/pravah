@@ -48,12 +48,47 @@ restoration.
 - model URL, instructions, and the initial user message;
 - optional text memory;
 - provider-specific JSON options;
+- an optional per-request output-token cap;
 - keep-alive session behavior;
 - a runtime filter over prepared tools;
 - selected MCP text resources.
 
 Memory is system context, not conversation history. Configuration should do
 only read-only or idempotent external work because a failed step may be retried.
+
+## Limit Generated Output
+
+Use the provider-neutral setting instead of putting token-limit aliases in
+`provider_config`:
+
+```rust
+AgentConfig::new(model, instructions, Message::user(question))
+    .max_output_tokens(2048)
+    .turn_budget(6)
+```
+
+`max_output_tokens` caps each model request, including tool-loop requests and
+forced conclusion. It includes reasoning tokens where the provider counts them;
+it is not a cap on the entire agent invocation or a guarantee that the prompt
+fits the model's context window. `turn_budget` separately limits ordinary model
+turns. With no output cap configured, Rath's existing provider defaults apply.
+
+Zero and repeated declarations produce `GraphError::AgentConfigValidation`
+before activation changes history. Rath validates provider-specific ranges and
+rejects conflicting token-limit aliases in provider JSON. Custom client factories
+must preserve the cap and use a client that honors it.
+
+Provider-reported exhaustion returns `GraphError::AgentOutputLimit { agent,
+provider }`, including during forced conclusion. Partial output is discarded,
+not accepted as an answer or executed as tool calls. Pravah does not retry
+automatically. The dispatch checkpoint remains retryable; any successful
+pre-dispatch history preparation remains applied. Retrying an unchanged request
+may hit the same cap again and incur another provider charge.
+
+The resolved cap survives snapshot restoration. A history preparation policy
+can inspect the effective cap through `request.options().max_output_tokens`.
+This exposes request context, not exact token counting or strict input-budget
+enforcement.
 
 ## Declare and Filter Tools
 
@@ -195,7 +230,7 @@ example including suspension and typed resume.
 Enable the `mcp` feature to use Streamable HTTP resource servers:
 
 ```toml
-pravah = { version = "0.4.15", features = ["mcp"] }
+pravah = { version = "0.4.17", features = ["mcp"] }
 ```
 
 Register credentials and headers on the runtime `Context`, not in the graph or

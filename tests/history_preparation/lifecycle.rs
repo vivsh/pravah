@@ -16,6 +16,7 @@ impl HistoryPreparer for CountPreparation {
     async fn prepare(
         &self,
         _request: HistoryPreparation<'_>,
+        _ctx: Context,
     ) -> Result<HistoryReplacement, Self::Error> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(HistoryReplacement::default())
@@ -33,6 +34,7 @@ async fn no_policy_keeps_ordinary_chat_behavior() -> Result<(), GraphError> {
         tutor,
         Context::default().with_client_factory(factory.clone()),
     )
+    .await?
     .with_store(store.clone());
     for text in ["a", "b"] {
         chat.send(Question { text: text.into() }).await?;
@@ -59,6 +61,7 @@ async fn final_output_does_not_prepare_again() -> Result<(), GraphError> {
         tutor,
         Context::default().with_client_factory(factory.clone()),
     )
+    .await?
     .with_history_preparer(policy.clone());
     chat.send(Question { text: "a".into() }).await?;
     assert_eq!(factory.calls().len(), 1);
@@ -75,6 +78,7 @@ async fn repeated_summaries_bound_snapshots_without_rewriting_store() -> Result<
     }
     let store = CapturingHistoryStore::new();
     let mut chat = Chat::new(tutor, Context::default().with_client_factory(factory))
+        .await?
         .with_history_preparer(Summarize)
         .with_store(store.clone());
     let mut sizes = Vec::new();
@@ -118,6 +122,7 @@ async fn snapshots_restore_with_fresh_preparer() -> Result<(), GraphError> {
             ScriptedFactory::new().then_output(serde_json::json!({"text":"a"})),
         ),
     )
+    .await?
     .with_history_preparer(original.clone());
     chat.send(Question { text: "a".into() }).await?;
     let snapshot = chat.snapshot()?;
@@ -130,7 +135,7 @@ async fn snapshots_restore_with_fresh_preparer() -> Result<(), GraphError> {
     ];
     for snapshot in snapshots {
         let fresh = CountPreparation::default();
-        let mut restored = Chat::from_snapshot(
+        let mut restored = Chat::<_, _>::from_snapshot(
             tutor,
             snapshot,
             Context::default().with_client_factory(
@@ -152,6 +157,7 @@ async fn summary_snapshots_round_trip_and_continue() -> Result<(), GraphError> {
         .then_output(serde_json::json!({"text":"a"}))
         .then_output(serde_json::json!({"text":"b"}));
     let mut chat = Chat::new(tutor, Context::default().with_client_factory(factory))
+        .await?
         .with_history_preparer(Summarize);
     for text in ["a", "b"] {
         chat.send(Question { text: text.into() }).await?;
@@ -170,7 +176,7 @@ async fn summary_snapshots_round_trip_and_continue() -> Result<(), GraphError> {
             serde_json::to_value(&snapshot).expect("snapshot")
         );
         let client = ScriptedFactory::new().then_output(serde_json::json!({"text":"c"}));
-        let mut restored = Chat::from_snapshot(
+        let mut restored = Chat::<_, _>::from_snapshot(
             tutor,
             copy,
             Context::default().with_client_factory(client.clone()),

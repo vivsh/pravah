@@ -22,6 +22,7 @@ use super::state::{
 use super::validation::{validate_graph_shape, validate_registry_keys};
 use super::value::{Value, to_value};
 
+mod chat;
 mod compile;
 mod continuation;
 mod dce;
@@ -45,7 +46,7 @@ use snapshot::validate_snapshot_state;
 use sparse::{SparseState, expand_state, sparse_state};
 
 /// Current serialized runtime snapshot version.
-pub const SNAPSHOT_VERSION: u32 = 8;
+pub const SNAPSHOT_VERSION: u32 = 9;
 
 #[derive(Clone)]
 struct CompiledGraph {

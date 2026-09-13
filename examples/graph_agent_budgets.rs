@@ -1,6 +1,7 @@
 //! Deterministic graph-agent turn and tool budgets without a custom controller.
 //!
 //! Run with `cargo run --example graph_agent_budgets --features testing`.
+//! The output cap is forwarded to clients; this scripted client does not count tokens.
 
 #[cfg(feature = "testing")]
 mod support;
@@ -64,6 +65,7 @@ mod example {
             "Use available evidence, then return the structured answer.",
             Message::user(request.question),
         )
+        .max_output_tokens(2048)
         .turn_budget(1)
         .tool_budget::<SearchRequest>(1))
     }

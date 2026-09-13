@@ -5,6 +5,18 @@ use super::ids::{EdgeId, HandlerKey, NodeId, VarId};
 #[derive(Debug, Error)]
 /// Error type for graph construction, validation, and VM execution failures.
 pub enum GraphError {
+    /// A chat operation requires an idle application-input boundary.
+    #[error(
+        "chat is not ready for '{operation}'; an unfinished turn cannot accept input or state changes"
+    )]
+    ChatNotReady {
+        /// Application operation that requires a between-turn input boundary.
+        operation: &'static str,
+    },
+
+    /// An agent or tool suspended somewhere other than a chat response boundary.
+    #[error("chat execution suspended inside an agent or tool; its snapshot remains available")]
+    ChatSuspended,
     /// A serialized or constructed graph failed structural validation.
     #[error("graph validation failed: {0}")]
     GraphValidation(String),
@@ -83,6 +95,15 @@ pub enum GraphError {
     /// An LLM client could not be created or executed.
     #[error("agent client operation failed: {0}")]
     AgentClient(String),
+
+    /// The provider exhausted its generation-token cap; partial output is discarded.
+    #[error("agent '{agent}' reached the output token limit for provider '{provider:?}'")]
+    AgentOutputLimit {
+        /// Stable identity of the agent whose request was interrupted.
+        agent: String,
+        /// Provider that reported output exhaustion.
+        provider: crate::clients::Provider,
+    },
 
     /// An MCP resource could not be listed, resolved, or read.
     #[error("MCP resource operation failed: {0}")]

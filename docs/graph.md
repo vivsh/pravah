@@ -91,8 +91,10 @@ typed `Runtime::resume` entry point as an ordinary suspend node, with
 `AgentResume` as its fixed resume value. Dynamic graph callers use
 `Runtime::resume_value` with an existing Pravah `Value`.
 
-Every serialized format has an explicit version. During the `0.4.x` line,
-incompatible versions are rejected and are not migrated automatically. Drain
+Every serialized format has an explicit version. Output-token cap support
+requires snapshot format 9 and JSON wire format 7; older snapshots and wire
+requests are rejected rather than silently losing limits. During the `0.4.x`
+line, incompatible versions are rejected and are not migrated automatically. Drain
 in-flight workflows or keep the matching Pravah runtime when upgrading across
 a format change.
 
@@ -134,7 +136,8 @@ Import `HistoryStore`, `HistoryPreparer`, `HistoryPreparation`, `HistoryEntry`, 
 `pravah::history` for applications that prefer an explicit module path.
 
 Use `Runtime::with_history_preparer` to prepare summary-based working memory
-before each model execution. The policy receives effective request options and
+before each model execution. `prepare(&self, request, ctx)` receives the bound
+execution `Context` for application dependencies, effective request options and
 framework guidance, along with separate committed and protected history views.
 Replacement is validated and applied atomically; the current user/tool exchange
 cannot be evicted. Successfully replaced rows are physically removed from

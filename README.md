@@ -23,7 +23,7 @@ agent loop.
 
 ```toml
 [dependencies]
-pravah = "0.4.15"
+pravah = "0.4.17"
 ```
 
 ## Flow, Agent, and Chat
@@ -157,13 +157,13 @@ tool abstraction.
 ```rust
 use pravah::{Chat, Context};
 
-let mut chat = Chat::new(support_agent, Context::default());
+let mut chat = Chat::new(support_agent, Context::default()).await?;
 
 let first = chat.send(question).await?;
 println!("{}", first.output.answer);
 
 let snapshot = chat.snapshot()?;
-let mut restored = Chat::from_snapshot(
+let mut restored = Chat::<_, _>::from_snapshot(
     support_agent,
     snapshot,
     Context::default(),
@@ -175,6 +175,11 @@ let next = restored.send(follow_up).await?;
 `Chat` turns a function-defined `Agent` into a typed multi-turn conversation.
 It retains the conversation across turns, drives the workflow on behalf of the
 caller, and supports snapshot restoration across requests or processes.
+
+Need to persist application data alongside the conversation? Use
+`Chat::with_state(agent, initial_state, ctx).await?` and typed `get()`/`set()`:
+one checkpoint captures both. State stays private unless your application
+explicitly includes it in a message. See the [Chat guide](docs/chat.md).
 
 Because chat uses the same agent API, it also supports dynamic configuration,
 typed tools, budgets, memory, and application services. A conversational

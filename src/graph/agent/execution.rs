@@ -724,10 +724,15 @@ async fn execute_prepared_request(
         .await
         .map_err(|err| GraphError::Invalid(format!("message materialization failed: {err}")))?;
     messages.extend(framework_messages);
-    client
-        .execute(&messages)
-        .await
-        .map_err(|err| GraphError::AgentClient(format!("execution failed: {err}")))
+    client.execute(&messages).await.map_err(|err| match err {
+        crate::clients::ClientError::OutputLimitReached { provider, .. } => {
+            GraphError::AgentOutputLimit {
+                agent: payload.agent_id.clone(),
+                provider,
+            }
+        }
+        other => GraphError::AgentClient(format!("execution failed: {other}")),
+    })
 }
 
 /// Builds one client using the checkpoint's effective tool surface and bound factory.
@@ -791,14 +796,14 @@ fn client_options(
     ClientOptions {
         output_type_name: payload.output_type_name.clone(),
         provider_config: checkpoint.resolved.provider_config.clone(),
+        max_output_tokens: checkpoint.resolved.max_output_tokens,
         ..ClientOptions::default()
     }
-    .with_input_schema(payload.input_schema.clone())
     .with_tools(tools)
     .with_tool_choice(tool_choice)
     .with_name(payload.agent_id.clone())
     .with_output_schema(payload.output_schema.clone())
-    .with_preamble(effective_preamble(payload, &checkpoint.resolved))
+    .with_preamble(effective_preamble(&checkpoint.resolved))
 }
 
 fn append_guidance(messages: &mut Vec<Message>, guidance: Option<&str>) {

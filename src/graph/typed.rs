@@ -19,10 +19,12 @@ use super::value::{Value, from_value, to_value};
 use crate::Context;
 
 mod build;
+mod chat;
 mod support;
 mod tuples;
 
 use build::*;
+pub(crate) use chat::build_chat_graph;
 use support::*;
 pub use tuples::{MergeFlows, SplitOutputs};
 

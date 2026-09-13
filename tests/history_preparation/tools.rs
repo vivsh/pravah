@@ -80,6 +80,7 @@ impl HistoryPreparer for ObserveTools {
     async fn prepare(
         &self,
         request: HistoryPreparation<'_>,
+        _ctx: Context,
     ) -> Result<HistoryReplacement, Self::Error> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         assert!(request.committed().is_empty());
@@ -156,6 +157,7 @@ async fn request_view_matches_tool_loop_and_conclusion() -> Result<(), GraphErro
         researcher,
         Context::default().with_client_factory(OverrideFactory(factory.clone())),
     )
+    .await?
     .with_history_preparer(policy.clone());
     chat.send(Question {
         text: "research".into(),

@@ -145,6 +145,7 @@ pub struct AgentConfig {
     pub(crate) message: Message,
     pub(crate) memory: Option<String>,
     pub(crate) provider_config: Option<JsonValue>,
+    pub(crate) max_output_tokens: Option<u32>,
     pub(crate) keep_alive: bool,
     pub(crate) tool_filter: ToolFilter,
     pub(crate) resources: Vec<McpResourceRef>,
@@ -172,6 +173,7 @@ impl AgentConfig {
             message,
             memory: None,
             provider_config: None,
+            max_output_tokens: None,
             keep_alive: false,
             tool_filter: ToolFilter::all(),
             resources: Vec::new(),
@@ -190,6 +192,24 @@ impl AgentConfig {
     /// Sets opaque provider-specific configuration passed through to Rath.
     pub fn provider_config(mut self, config: impl Into<JsonValue>) -> Self {
         self.provider_config = Some(config.into());
+        self
+    }
+
+    /// Caps generated tokens per model request, including forced conclusion.
+    ///
+    /// Includes reasoning tokens where the provider counts them. Zero or repeated
+    /// declarations fail activation with `GraphError::AgentConfigValidation`.
+    /// Rath validates provider-specific restrictions and reports exhaustion as
+    /// `GraphError::AgentOutputLimit`; truncated output is never a successful answer.
+    /// This is independent of the agent's turn budget and the input context size.
+    pub fn max_output_tokens(mut self, tokens: u32) -> Self {
+        if tokens == 0 {
+            self.budget_errors
+                .push("agent max output tokens must be positive".into());
+        } else if self.max_output_tokens.replace(tokens).is_some() {
+            self.budget_errors
+                .push("agent max output tokens may only be declared once".into());
+        }
         self
     }
 
@@ -253,6 +273,8 @@ pub(crate) struct ResolvedAgentConfig {
     pub instructions: String,
     pub memory: Option<String>,
     pub provider_config: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     pub keep_alive: bool,
     pub tools: Vec<String>,
     pub resources: Vec<ResolvedResource>,

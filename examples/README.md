@@ -19,6 +19,7 @@ These examples are deterministic and require no provider credentials.
 | `graph_untyped` | Building an `UntypedGraph` and handler registry directly |
 | `graph_agent_budgets` | Deterministic agent and per-tool budgets; run with `--features testing` |
 | `graph_chat_working_memory` | Fallible history preparation, summary replacement, and restore; run with `--features testing` |
+| `graph_chat_state` | Typed application state and complete JSON/CBOR chat checkpoints; run with `--features testing` |
 
 ## Diagrams And Local Persistence
 

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::Context;
 use crate::clients::{ClientOptions, Message};
 use crate::graph::GraphError;
 
@@ -60,14 +61,17 @@ pub struct HistoryReplacement {
 
 /// Fallible application policy invoked once before each model execution attempt.
 /// Errors prevent execution and leave history unchanged. External work should be idempotent.
+/// The supplied context belongs to the execution, including fresh dependencies after restore.
 pub trait HistoryPreparer: Send + Sync {
     /// Application error preserved as the source of `GraphError::HistoryPreparation`.
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Chooses a safe replacement for completed history using the upcoming request context.
+    /// `ctx` provides runtime dependencies; external writes are not atomic with history replacement.
     fn prepare(
         &self,
         request: HistoryPreparation<'_>,
+        ctx: Context,
     ) -> impl std::future::Future<Output = Result<HistoryReplacement, Self::Error>> + Send;
 }
 
@@ -76,17 +80,20 @@ pub(crate) trait DynHistoryPreparer: Send + Sync {
     async fn prepare_dyn(
         &self,
         request: HistoryPreparation<'_>,
+        ctx: Context,
     ) -> Result<HistoryReplacement, GraphError>;
 }
 
 #[async_trait]
 impl<T: HistoryPreparer> DynHistoryPreparer for T {
+    /// Forwards request dependencies and retains the application's error as its source.
     async fn prepare_dyn(
         &self,
         request: HistoryPreparation<'_>,
+        ctx: Context,
     ) -> Result<HistoryReplacement, GraphError> {
         let session_id = request.session_id;
-        self.prepare(request)
+        self.prepare(request, ctx)
             .await
             .map_err(|source| GraphError::HistoryPreparation {
                 session_id: session_id.to_owned(),

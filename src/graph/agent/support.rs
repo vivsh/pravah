@@ -31,6 +31,7 @@ pub(super) async fn resolve_agent_config(
         instructions: config.instructions,
         memory: config.memory,
         provider_config: config.provider_config,
+        max_output_tokens: config.max_output_tokens,
         keep_alive: config.keep_alive,
         tools,
         resources,
@@ -383,6 +384,11 @@ pub(super) fn validate_checkpoint(
     validate_selected_tools(payload, checkpoint)?;
     validate_budget_state(&checkpoint.resolved.tools, checkpoint.budget.as_ref())?;
     validate_resolved_resources(&checkpoint.resolved.resources)?;
+    if checkpoint.resolved.max_output_tokens == Some(0) {
+        return Err(GraphError::SnapshotValidation(
+            "agent checkpoint max output tokens is zero".into(),
+        ));
+    }
     if checkpoint.resolved.model.trim().is_empty() {
         return Err(GraphError::SnapshotValidation(
             "agent checkpoint model is empty".into(),
@@ -625,11 +631,8 @@ pub(super) fn transition_with_children(
     })
 }
 
-pub(super) fn effective_preamble(payload: &AgentPayload, resolved: &ResolvedAgentConfig) -> String {
-    let hint = format!(
-        "The user message is JSON. Interpret it using this JSON Schema: {}",
-        payload.input_schema
-    );
+/// Combines authored instructions and resolved context without assuming the message format.
+pub(super) fn effective_preamble(resolved: &ResolvedAgentConfig) -> String {
     let mut sections = Vec::new();
     if !resolved.instructions.is_empty() {
         sections.push(resolved.instructions.clone());
@@ -643,7 +646,6 @@ pub(super) fn effective_preamble(payload: &AgentPayload, resolved: &ResolvedAgen
             resource.server, resource.uri, resource.text
         ));
     }
-    sections.push(hint);
     sections.join("\n\n")
 }
 

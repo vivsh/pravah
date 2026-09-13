@@ -279,6 +279,7 @@ pub(super) fn default_variable_value(variable: &Variable) -> Result<Option<Value
     }
 }
 
+/// Validates edge shape, constructing the detailed diagnostic label only on failure.
 pub(super) fn validate_edge_value(
     graph: &UntypedGraph,
     edge: EdgeId,
@@ -286,11 +287,19 @@ pub(super) fn validate_edge_value(
     label: &str,
 ) -> Result<(), GraphError> {
     let edge_data = graph.edge(edge).ok_or(GraphError::MissingEdge(edge))?;
-    let label = edge_data.label.as_ref().map_or_else(
-        || format!("{label} {edge:?}"),
-        |edge_label| format!("{label} edge '{edge_label}'"),
-    );
-    validate_value(&edge_data.type_spec, value, &label)
+    validate_value(&edge_data.type_spec, value, label).map_err(|error| match error {
+        GraphError::Schema {
+            expected, value, ..
+        } => GraphError::Schema {
+            label: edge_data.label.as_ref().map_or_else(
+                || format!("{label} {edge:?}"),
+                |edge_label| format!("{label} edge '{edge_label}'"),
+            ),
+            expected,
+            value,
+        },
+        other => other,
+    })
 }
 
 pub(super) fn suspend_payload(configured: &Value, input: &Value) -> Value {

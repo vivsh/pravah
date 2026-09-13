@@ -7,6 +7,8 @@ use pravah::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+#[path = "history_preparation/context.rs"]
+mod context;
 #[path = "history_preparation/failures.rs"]
 mod failures;
 #[path = "history_preparation/lifecycle.rs"]
@@ -32,6 +34,7 @@ impl HistoryPreparer for Summarize {
     async fn prepare(
         &self,
         request: HistoryPreparation<'_>,
+        _ctx: Context,
     ) -> Result<HistoryReplacement, Self::Error> {
         assert_eq!(request.model(), "openai:///test");
         assert!(
@@ -80,6 +83,7 @@ async fn replacement_reaches_client_and_bounds_history() -> Result<(), GraphErro
         tutor,
         Context::default().with_client_factory(factory.clone()),
     )
+    .await?
     .with_history_preparer(Summarize);
     chat.send(Question {
         text: "first question".into(),

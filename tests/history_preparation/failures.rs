@@ -13,6 +13,7 @@ impl HistoryPreparer for Failing {
     async fn prepare(
         &self,
         _request: HistoryPreparation<'_>,
+        _ctx: Context,
     ) -> Result<HistoryReplacement, Self::Error> {
         Err(PreparationFailure)
     }
@@ -28,6 +29,7 @@ impl HistoryPreparer for Invalid {
     async fn prepare(
         &self,
         _request: HistoryPreparation<'_>,
+        _ctx: Context,
     ) -> Result<HistoryReplacement, Self::Error> {
         Ok(HistoryReplacement {
             evict_indices: self.indices.clone(),
@@ -41,7 +43,7 @@ fn workflow(root: Flow<Question>) -> Flow<Answer> {
 }
 
 /// Stops after the user message is recorded, before the first model execution.
-async fn before_dispatch(
+pub(super) async fn before_dispatch(
     policy: impl HistoryPreparer + 'static,
     factory: &ScriptedFactory,
 ) -> Result<Runtime, GraphError> {

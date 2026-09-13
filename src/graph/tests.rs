@@ -3076,7 +3076,9 @@ async fn graph_chat_uses_one_runtime_across_turns() {
         .then_output(serde_json::json!({ "text": "first" }))
         .then_output(serde_json::json!({ "text": "second" }));
     let ctx = ctx().with_client_factory(factory.clone());
-    let mut chat = Chat::<EdgeAgentInput, EdgeAgentOutput>::new(edge_chat_agent, ctx);
+    let mut chat = Chat::<EdgeAgentInput, EdgeAgentOutput>::new(edge_chat_agent, ctx)
+        .await
+        .expect("chat initializes");
 
     let first = chat
         .send(EdgeAgentInput { text: "hi".into() })
@@ -3124,14 +3126,17 @@ async fn restored_graph_chat_uses_reattached_history_store() {
         fail_at: usize::MAX,
     };
     let ctx = ctx().with_client_factory(factory);
-    let mut chat = Chat::new(edge_chat_agent, ctx.clone()).with_store(store.clone());
+    let mut chat = Chat::new(edge_chat_agent, ctx.clone())
+        .await
+        .expect("chat initializes")
+        .with_store(store.clone());
 
     chat.send(EdgeAgentInput { text: "hi".into() })
         .await
         .expect("first chat turn should run");
     let recorded_before_restore = calls.load(Ordering::SeqCst);
     let snapshot = chat.snapshot().expect("chat should snapshot");
-    let mut restored = Chat::from_snapshot(edge_chat_agent, snapshot, ctx)
+    let mut restored = Chat::<_, _>::from_snapshot(edge_chat_agent, snapshot, ctx)
         .expect("chat should restore")
         .with_store(store);
 

@@ -51,7 +51,7 @@ use definition::{AgentConfigurator, AgentController};
 use support::*;
 
 const PAYLOAD_VERSION: u32 = 3;
-const CHECKPOINT_VERSION: u32 = 4;
+const CHECKPOINT_VERSION: u32 = 5;
 
 /// Validates the identity duplicated in an agent's generic continuation payload.
 pub(crate) fn validate_payload_handler(

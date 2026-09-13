@@ -37,6 +37,7 @@ impl HistoryPreparer for RootHistoryPreparer {
     async fn prepare(
         &self,
         _request: HistoryPreparation<'_>,
+        _ctx: Context,
     ) -> Result<HistoryReplacement, Self::Error> {
         Ok(HistoryReplacement::default())
     }
@@ -82,6 +83,7 @@ async fn modern_typed_api_is_available_at_crate_root() -> Result<(), GraphError>
     assert_eq!(output, Response { value: 2 });
 
     let _chat = Chat::new(assistant, Context::default())
+        .await?
         .with_store(RootHistoryStore)
         .with_history_preparer(RootHistoryPreparer);
     Ok(())

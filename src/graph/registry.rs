@@ -197,7 +197,7 @@ impl ContinuationContext {
             committed,
             protected,
         };
-        let result = preparer.prepare_dyn(request).await?;
+        let result = preparer.prepare_dyn(request, self.ctx.clone()).await?;
         self.history
             .lock()
             .await

@@ -6,14 +6,18 @@
 #[cfg(feature = "testing")]
 mod example {
     use pravah::clients::{Message, Role};
+    use pravah::deps::{Deps, DepsError};
     use pravah::testing::ScriptedFactory;
     use pravah::{
         Agent, AgentConfig, Chat, Context, GraphError, HistoryEntry, HistoryPreparation,
         HistoryPreparer, HistoryReplacement,
     };
+    use std::sync::Arc;
 
     #[derive(Debug, thiserror::Error)]
     enum MemoryError {
+        #[error(transparent)]
+        Dependency(#[from] DepsError),
         #[error("completed history contains no user question")]
         MissingQuestion,
     }
@@ -26,12 +30,17 @@ mod example {
         async fn prepare(
             &self,
             request: HistoryPreparation<'_>,
+            ctx: Context,
         ) -> Result<HistoryReplacement, Self::Error> {
             if request.committed().is_empty() {
                 return Ok(HistoryReplacement::default());
             }
             // The policy can also inspect request.model(), options(), protected(), and guidance.
-            let summary = summarize(request.committed()).await?;
+            let summary = ctx
+                .deps()
+                .require::<Summarizer>()?
+                .summarize(request.committed())
+                .await?;
             Ok(HistoryReplacement {
                 evict_indices: (0..request.committed().len()).collect(),
                 summary: Some(summary),
@@ -39,17 +48,29 @@ mod example {
         }
     }
 
-    /// Keeps one useful fact for this demo; applications supply their own fallible summarizer.
-    async fn summarize(entries: &[&HistoryEntry]) -> Result<String, MemoryError> {
-        let question = entries
-            .iter()
-            .rev()
-            .find(|entry| matches!(entry.message.role, Role::User))
-            .ok_or(MemoryError::MissingQuestion)?;
-        Ok(format!(
-            "The previous user request was: {}",
-            question.message.content
-        ))
+    struct Summarizer;
+
+    impl Summarizer {
+        /// Keeps one useful fact for this demo; applications supply their own fallible summarizer.
+        async fn summarize(&self, entries: &[&HistoryEntry]) -> Result<String, MemoryError> {
+            let question = entries
+                .iter()
+                .rev()
+                .find(|entry| matches!(entry.message.role, Role::User))
+                .ok_or(MemoryError::MissingQuestion)?;
+            Ok(format!(
+                "The previous user request was: {}",
+                question.message.content
+            ))
+        }
+    }
+
+    fn context(client: ScriptedFactory) -> Context {
+        let mut deps = Deps::default();
+        deps.insert(Arc::new(Summarizer));
+        Context::default()
+            .with_deps(deps)
+            .with_client_factory(client)
     }
 
     fn assistant(root: Agent<String>) -> Agent<String> {
@@ -69,7 +90,8 @@ mod example {
     pub(super) async fn run() -> Result<(), GraphError> {
         let first =
             ScriptedFactory::new().then_output(serde_json::json!("We can plan a Kyoto trip."));
-        let mut chat = Chat::new(assistant, Context::default().with_client_factory(first))
+        let mut chat = Chat::new(assistant, context(first))
+            .await?
             .with_history_preparer(WorkingMemory);
         println!(
             "{}",
@@ -78,12 +100,8 @@ mod example {
         let checkpoint = chat.snapshot()?;
         let next = ScriptedFactory::new()
             .then_output(serde_json::json!("Start with the eastern temples."));
-        let mut chat = Chat::from_snapshot(
-            assistant,
-            checkpoint,
-            Context::default().with_client_factory(next.clone()),
-        )?
-        .with_history_preparer(WorkingMemory);
+        let mut chat = Chat::<_, _>::from_snapshot(assistant, checkpoint, context(next.clone()))?
+            .with_history_preparer(WorkingMemory);
         println!(
             "{}",
             chat.send("What should I see first?".into()).await?.output

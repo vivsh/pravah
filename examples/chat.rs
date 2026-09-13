@@ -35,7 +35,7 @@ async fn configure_tutor(question: Question, _ctx: Context) -> Result<AgentConfi
 async fn main() -> Result<(), GraphError> {
     dotenvy::dotenv().ok();
     let ctx = Context::default();
-    let mut chat = Chat::new(tutor, ctx);
+    let mut chat = Chat::new(tutor, ctx).await?;
 
     let first = chat
         .send(Question {
@@ -45,7 +45,7 @@ async fn main() -> Result<(), GraphError> {
     println!("{}", first.output.text);
 
     let snapshot = chat.snapshot()?;
-    let mut restored = Chat::from_snapshot(tutor, snapshot, Context::default())?;
+    let mut restored = Chat::<_, _>::from_snapshot(tutor, snapshot, Context::default())?;
     let second = restored
         .send(Question {
             text: "Give me one short example of that rule.".into(),

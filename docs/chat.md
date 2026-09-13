@@ -32,7 +32,7 @@ async fn configure_tutor(
     .keep_alive())
 }
 
-let mut chat = Chat::new(tutor, Context::default());
+let mut chat = Chat::new(tutor, Context::default()).await?;
 ```
 
 `Question` and `Answer` are application types implementing `Serialize`,
@@ -42,6 +42,54 @@ let mut chat = Chat::new(tutor, Context::default());
 The configuration function runs for each new chat input. It may select the
 model, instructions, initial user message, memory, tools, resources, and
 budgets from the input and `Context`.
+
+Construction is asynchronous and fallible: it validates the chat and leaves it
+waiting for input. It does not configure the agent, call a model, resolve MCP
+resources, or record a message. Snapshots are available immediately.
+
+## Persist Application State
+
+Use `Chat<Input, Output, State>` when application data should travel with the
+conversation checkpoint:
+
+```rust
+let mut chat = Chat::with_state(tutor, initial_state, ctx).await?;
+
+let mut state = chat.get()?;
+state.selected_project = Some(project_id);
+chat.set(state)?;
+
+let reply = chat.send(question).await?;
+let snapshot = chat.snapshot()?;
+
+let mut restored = Chat::<Question, Answer, SessionState>::from_snapshot(
+    tutor, snapshot, restored_ctx,
+)?;
+let state = restored.get()?;
+```
+
+State implements `Serialize`, `DeserializeOwned`, `JsonSchema`, `Send`, and
+`Sync`, with no borrowed non-static data. Neither `Default` nor `Clone` is
+required. `get` decodes an owned value and can allocate; `set` converts and
+validates the replacement before committing. A failed update leaves the
+previous state unchanged. Only explicit state access performs typed conversion.
+
+State is included in the same `Snapshot` as execution and conversation history;
+no separate state record is needed. Persist the complete snapshot together.
+It is independent of `keep_alive`, history summaries, and `AgentConfig::memory`.
+Agents and tools cannot implicitly read or mutate it. Include relevant fields
+explicitly in a message input when the model needs them; state is not
+automatically placed in prompts or conversation history.
+
+`set` is allowed before the first message and between completed turns. During
+unfinished execution, `get` and `snapshot` remain available but `set` and `send`
+return `GraphError::ChatNotReady`. There is no automatic retry or in-flight retry
+method. If an agent controller or child tool suspends, `send` returns
+`GraphError::ChatSuspended`, not an assistant response. Use the explicit workflow
+runtime when the application needs arbitrary suspension/resumption or retry control.
+
+See the [deterministic state example](../examples/graph_chat_state.rs) for a
+complete conversation with JSON and CBOR restoration.
 
 ## Send Typed Messages
 
@@ -101,13 +149,13 @@ attachments, and agent configuration.
 
 ## Snapshot And Restore
 
-Take a snapshot after at least one completed turn and persist it with the
-application's own storage:
+Take a snapshot before the first message or between completed turns and persist
+it with the application's own storage:
 
 ```rust
 let snapshot = chat.snapshot()?;
 
-let mut restored = Chat::from_snapshot(tutor, snapshot, restored_ctx)?;
+let mut restored = Chat::<_, _>::from_snapshot(tutor, snapshot, restored_ctx)?;
 let next = restored
     .send(Question::new("Continue our discussion."))
     .await?;
@@ -117,6 +165,11 @@ Restoration requires the same agent definition. Live provider clients and
 application services are not serialized; bind them through the restoration
 `Context` or the service setters before continuing.
 
+For stateful chats, specify the same state type during restoration. Two-argument
+`Chat::<_, _>` selects unit state. Snapshot formats are unchanged, but snapshots
+from the older lazy-construction chat graph have a different fingerprint and
+cannot be restored into this API. Drain those chats or retain their matching runtime.
+
 ## History Persistence And Working Memory
 
 Attach an application history store or preparation policy when constructing or
@@ -125,11 +178,11 @@ restoring a chat:
 ```rust
 use pravah::{HistoryPreparation, HistoryPreparer, HistoryReplacement, HistoryStore};
 
-let chat = Chat::new(tutor, ctx)
+let chat = Chat::new(tutor, ctx).await?
     .with_store(history_store)
     .with_history_preparer(working_memory);
 
-let restored = Chat::from_snapshot(tutor, snapshot, restored_ctx)?
+let restored = Chat::<_, _>::from_snapshot(tutor, snapshot, restored_ctx)?
     .with_store(restored_store)
     .with_history_preparer(restored_working_memory);
 ```
@@ -141,7 +194,12 @@ Pravah records staged history before committing it to runtime history. A store
 may observe a successfully written prefix if a later write fails, so stores
 should deduplicate retries by stable history position.
 
-Implement `HistoryPreparer::prepare` to return `Result<HistoryReplacement, YourError>`.
+Implement `HistoryPreparer::prepare(&self, request, ctx)` to return
+`Result<HistoryReplacement, YourError>`. The owned `Context` is a shared clone of
+the execution-bound context; use `ctx.deps()` to access application services.
+Restoration supplies the new execution context to each preparation call, so the
+policy does not need to retain its own context. Existing implementations must
+add `ctx: Context` (or `_ctx: Context` when unused) to their `prepare` signature.
 Its borrowed `HistoryPreparation` exposes the resolved model, effective client
 options (including the preamble, schemas, provider settings and currently active
 tools), and the exact framework guidance accompanying the upcoming request.
@@ -165,8 +223,9 @@ changes the history/checkpoint present before preparation. The pending user
 message has already been recorded by then. For application-controlled retries,
 drive the workflow with `Runtime::next()` and retry that step, or restore its
 snapshot with fresh dependencies. This change does not add an in-flight retry
-operation to `Chat::send()`; calling `send()` again does not retry the failed
-dispatch. Do not resend the same user message as another chat turn.
+operation to `Chat::send()`; calling `send()` again on an unfinished turn returns
+`GraphError::ChatNotReady`. Restoring an unfinished Chat preserves that limitation;
+it does not automatically resume the failed dispatch.
 
 Successful replacement physically removes old rows from snapshots while
 preserving retained row identities, positions, and accumulated usage. Audit
@@ -180,13 +239,21 @@ preparation; policies should tolerate retries.
 
 Policies and their dependencies are never serialized. Reattach a fresh policy
 after restore, as above. Without a policy, ordinary chat retains its history.
+If a policy saves extracted facts externally before evicting history, make
+those writes idempotent using stable source-entry identities. External writes
+and history replacement are not one transaction: cancellation or later failure
+can leave facts persisted without eviction. Saved facts are not automatically
+added to model context; retrieve them through configuration or a replacement
+summary when needed.
 `AgentConfig::memory` remains separate invocation memory; preparation does not
 rewrite it. Legacy compaction remains under `pravah::legacy`.
 
 See [the runnable working-memory example](../examples/graph_chat_working_memory.rs)
 for a fallible policy and restoration with fresh dependencies. Applications
 provide the summarizer, storage, retry handling, and any model-specific size
-estimation. This API does not add provider output caps.
+estimation. Configure a separate per-request output cap with
+[`AgentConfig::max_output_tokens`](clients.md#limit-generated-output); history
+preparation does not itself enforce that cap or an input-token budget.
 
 ## Operational Responsibilities
 

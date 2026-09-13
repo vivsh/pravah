@@ -640,7 +640,9 @@ async fn keep_alive_agent_resets_budgets_for_each_invocation() {
         output_response("second answer"),
     ]);
     let ctx = test_context(factory.clone(), None);
-    let mut chat = Chat::new(keep_alive_budget_agent, ctx);
+    let mut chat = Chat::new(keep_alive_budget_agent, ctx)
+        .await
+        .expect("chat initializes");
 
     let first = chat
         .send(BudgetRequest {
