@@ -37,7 +37,7 @@ pub use compactor::{CompactionResult, HistoryCompactor, NoopCompactor, SlidingWi
 pub use diagram::FlowGraphDiagram;
 pub use errors::{AgentError, BuildError, FlowError};
 pub use flow::{Flow, FlowGraph, FlowStep};
-pub use history::{FlowHistory, HistoryEntry};
+pub use history::{HistoryEntry, MessageHistory};
 pub use human_input::{Choice, CliMode, HumanInput, HumanOutput, PendingHumanInput};
 pub use inspect::{AgentPhaseView, AgentView, FlowInspector, FrameView, LocalVar, PhaseKind};
 pub use interner::NodeId;

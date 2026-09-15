@@ -1,10 +1,10 @@
 use std::marker::PhantomData;
 
 use schemars::JsonSchema;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::Context;
-use crate::history::{HistoryPreparer, HistoryStore};
+use crate::history::{Compactor, HistoryStore};
 
 use super::agent::Agent;
 use super::error::GraphError;
@@ -13,6 +13,42 @@ use super::runtime::{Runtime, Snapshot};
 use super::state::Step;
 use super::typed::build_chat_graph;
 use super::value::{Value, from_value, to_value};
+
+mod builder;
+mod request;
+#[cfg(test)]
+mod tests;
+pub use builder::ChatBuilder;
+pub use request::ChatRequest;
+
+type InputValidator<I> = fn(&I, &Value) -> Result<(), GraphError>;
+
+/// A Chat input and optional application key carried by ordinary VM values.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChatSubmission<I> {
+    pub(crate) input: I,
+    pub(crate) key: Option<String>,
+}
+
+impl ChatSubmission<Value> {
+    /// Checks the envelope while retaining shared invocation values for typed decoding.
+    pub(crate) fn decode(value: &Value) -> Result<Self, super::value::ValueError> {
+        use super::value::ValueError;
+        let invalid = || ValueError::Unsupported("invalid chat submission envelope".into());
+        let mut fields = value.object_entries().ok_or_else(invalid)?;
+        if fields.any(|(key, _)| key != "input" && key != "key") {
+            return Err(invalid());
+        }
+        let input = value.get("input").ok_or_else(invalid)?.clone();
+        let key = match value.get("key") {
+            None => None,
+            Some(value) if value.is_null() => None,
+            Some(value) => Some(value.as_str().ok_or_else(invalid)?.to_owned()),
+        };
+        Ok(Self { input, key })
+    }
+}
 
 /// One assistant response produced by graph chat.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,12 +66,13 @@ impl<O> ChatTurn<O> {
 
 /// Typed conversation and application state backed by one graph runtime.
 ///
-/// Enable `keep_alive` in the agent configuration to preserve conversation history
-/// across turns. Application state persists independently and is never added to prompts.
+/// Builder chats always retain history; function-defined agents must enable
+/// `keep_alive`. Application state persists independently and is never added to prompts.
 pub struct Chat<I, O, S = ()> {
     runtime: Runtime,
     state_var: VarId,
     input_boundaries: [NodeId; 2],
+    validate_input: Option<InputValidator<I>>,
     _marker: PhantomData<fn(I, S) -> O>,
 }
 
@@ -70,6 +107,16 @@ where
         state: S,
         context: Context,
     ) -> Result<Self, GraphError> {
+        Self::from_definition(agent(Agent::root()), state, context, None).await
+    }
+
+    /// Initializes the common graph for function-defined and builder-created chats.
+    async fn from_definition(
+        agent: Agent<O>,
+        state: S,
+        context: Context,
+        validate_input: Option<InputValidator<I>>,
+    ) -> Result<Self, GraphError> {
         let value = encode_state(state)?;
         let (prepared, state_var, input_boundaries) = build_chat_graph::<I, O, S>(agent)?;
         let mut runtime = prepared.start(Value::NULL, context)?;
@@ -84,6 +131,7 @@ where
             runtime,
             state_var,
             input_boundaries,
+            validate_input,
             _marker: PhantomData,
         })
     }
@@ -97,17 +145,29 @@ where
         snapshot: Snapshot,
         context: Context,
     ) -> Result<Self, GraphError> {
+        Self::restore_definition(agent(Agent::root()), snapshot, context, None)
+    }
+
+    /// Restores without calling application handlers and checks retained submission values.
+    fn restore_definition(
+        agent: Agent<O>,
+        snapshot: Snapshot,
+        context: Context,
+        validate_input: Option<InputValidator<I>>,
+    ) -> Result<Self, GraphError> {
         let (prepared, state_var, input_boundaries) = build_chat_graph::<I, O, S>(agent)?;
         let runtime = prepared.restore(snapshot, context)?;
         let chat = Self {
             runtime,
             state_var,
             input_boundaries,
+            validate_input,
             _marker: PhantomData,
         };
         chat.get().map_err(|error| {
             GraphError::SnapshotValidation(format!("chat state is invalid: {error}"))
         })?;
+        chat.validate_restored_inputs()?;
         Ok(chat)
     }
 
@@ -134,8 +194,8 @@ where
     }
 
     /// Sets the fallible pre-request history policy; reattach it after snapshot restore.
-    pub fn with_history_preparer(mut self, preparer: impl HistoryPreparer + 'static) -> Self {
-        self.runtime = self.runtime.with_history_preparer(preparer);
+    pub fn with_compactor(mut self, compactor: impl Compactor + 'static) -> Self {
+        self.runtime = self.runtime.with_compactor(compactor);
         self
     }
 
@@ -153,13 +213,41 @@ where
         self.runtime.snapshot()
     }
 
-    /// Sends input at a chat boundary and runs until the next assistant response.
+    /// Converts input at a chat boundary and runs until the next assistant response.
     ///
+    /// Builder chats accept strings, messages or `ChatRequest` directly.
     /// Failed or cancelled unfinished turns reject another send; this method never
     /// retries them. Agent/tool suspension returns `GraphError::ChatSuspended`.
-    pub async fn send(&mut self, input: I) -> Result<ChatTurn<O>, GraphError> {
-        self.require_ready("send")?;
-        let mut step = self.runtime.resume(input).await?;
+    pub async fn send(&mut self, input: impl Into<I>) -> Result<ChatTurn<O>, GraphError> {
+        self.submit(input, None, "send").await
+    }
+
+    /// Converts input and sends it with a key overriding the configured user-message key.
+    /// The key is durable before activation; readiness and conversion failures accept no input.
+    pub async fn send_with_key(
+        &mut self,
+        input: impl Into<I>,
+        key: impl Into<String>,
+    ) -> Result<ChatTurn<O>, GraphError> {
+        self.submit(input, Some(key.into()), "send_with_key").await
+    }
+
+    /// Validates and converts before changing the suspended execution.
+    async fn submit(
+        &mut self,
+        input: impl Into<I>,
+        key: Option<String>,
+        operation: &'static str,
+    ) -> Result<ChatTurn<O>, GraphError> {
+        self.require_ready(operation)?;
+        let input = input.into();
+        if let Some(validate) = self.validate_input {
+            validate(
+                &input,
+                self.runtime.chat_agent_payload(&self.input_boundaries)?,
+            )?;
+        }
+        let mut step = self.runtime.resume(ChatSubmission { input, key }).await?;
         loop {
             match step {
                 Step::Continue => step = self.runtime.next().await?,
@@ -171,6 +259,24 @@ where
                 }
             }
         }
+    }
+
+    /// Rechecks persisted input separately from VM shape and frame-relationship validation.
+    fn validate_restored_inputs(&self) -> Result<(), GraphError> {
+        let validate = |value: &Value| -> Result<(), GraphError> {
+            let request: ChatSubmission<I> = from_value(value.clone())
+                .map_err(|e| GraphError::SnapshotValidation(e.to_string()))?;
+            if let Some(check) = self.validate_input {
+                check(
+                    &request.input,
+                    self.runtime.chat_agent_payload(&self.input_boundaries)?,
+                )
+                .map_err(|e| GraphError::SnapshotValidation(e.to_string()))?;
+            }
+            Ok(())
+        };
+        self.runtime
+            .validate_chat_inputs(&self.input_boundaries, validate)
     }
 
     fn require_ready(&self, operation: &'static str) -> Result<(), GraphError> {

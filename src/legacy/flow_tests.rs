@@ -793,7 +793,7 @@ fn wrap_for_provider_wraps_xml_providers_only() {
 /// final allowed turn and leaves earlier messages unchanged.
 #[test]
 fn maybe_inject_injects_on_final_turn_only() {
-    use crate::legacy::history::FlowHistory;
+    use crate::legacy::history::MessageHistory;
     use crate::legacy::interner::Interner;
     use std::collections::HashMap;
 
@@ -833,7 +833,7 @@ fn maybe_inject_injects_on_final_turn_only() {
         output_type_name: "".into(),
     };
 
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     history.push(session_id, "test_agent", Message::assistant("thinking..."));
 
     let opts = ClientOptions {
@@ -867,7 +867,7 @@ fn maybe_inject_injects_on_final_turn_only() {
         "reminder should signal final turn"
     );
 
-    let history_empty = FlowHistory::new();
+    let history_empty = MessageHistory::new();
     let mut msgs_early: Vec<Message> = vec![Message::user("start")];
     maybe_inject_turn_budget_message(
         &client,
@@ -888,7 +888,7 @@ fn maybe_inject_injects_on_final_turn_only() {
 /// prior outbound message is a tool result.
 #[test]
 fn maybe_inject_preserves_tool_payloads() {
-    use crate::legacy::history::FlowHistory;
+    use crate::legacy::history::MessageHistory;
     use crate::legacy::interner::Interner;
     use std::collections::HashMap;
 
@@ -928,11 +928,12 @@ fn maybe_inject_preserves_tool_payloads() {
         output_type_name: "".into(),
     };
 
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     history.push(
         session_id,
         "test_agent",
         Message {
+            key: None,
             role: Role::AssistantToolCalls {
                 calls: vec![ToolCall {
                     id: "call-1".into(),
@@ -1038,7 +1039,7 @@ async fn exit_tool_injects_submit_tool_in_options() {
 /// real tools registered, and the reminder names the exit tool.
 #[test]
 fn maybe_inject_fires_for_exit_tool_agent_without_real_tools() {
-    use crate::legacy::history::FlowHistory;
+    use crate::legacy::history::MessageHistory;
 
     let session_id = "s1";
     let opts = ClientOptions {
@@ -1048,7 +1049,7 @@ fn maybe_inject_fires_for_exit_tool_agent_without_real_tools() {
     };
     let client = CapturingClient::for_url(ResponseMode::Output(json!({})), "ollama:///test")
         .with_options(opts);
-    let history = FlowHistory::new();
+    let history = MessageHistory::new();
     let mut msgs: Vec<Message> = vec![Message::user("start")];
     maybe_inject_turn_budget_message(&client, "agent", session_id, &history, &mut msgs, 0);
     assert_eq!(

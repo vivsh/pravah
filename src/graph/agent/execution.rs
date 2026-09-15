@@ -7,6 +7,8 @@ impl ContinuationHandler for AgentHandler {
         let payload = decode_payload(payload).map_err(|error| {
             GraphError::GraphValidation(format!("invalid registered agent payload: {error}"))
         })?;
+        self.configure
+            .validate_data(payload.configuration.as_ref())?;
         match (payload.control_handler_key, self.controller.is_some()) {
             (Some(key), false) => Err(GraphError::MissingHandler(key)),
             (None, true) => Err(GraphError::GraphValidation(
@@ -46,16 +48,16 @@ impl AgentHandler {
         inputs: Vec<Value>,
         ctx: ContinuationContext,
     ) -> Result<ContinuationTransition, GraphError> {
-        let payload = decode_payload(payload)?;
+        let payload = AgentPayloadView::read(payload)?;
         let input = single_input(inputs, "agent")?;
         let config = self
             .configure
-            .configure(input.clone(), ctx.context().clone())
+            .configure(input.clone(), payload.configuration, ctx.context().clone())
             .await?;
         let (resolved, message, budget) =
             resolve_agent_config(&payload, config, ctx.context()).await?;
         let session_id = self.session_id(&resolved, state)?;
-        ctx.push_history(&session_id, &payload.agent_id, message)
+        ctx.push_history(&session_id, payload.agent_id, message)
             .await?;
         let selected_tools = resolved.tools.clone();
         let mut checkpoint = EdgeAgentCheckpoint {
@@ -96,7 +98,7 @@ impl AgentHandler {
         event: ContinuationEvent,
         ctx: ContinuationContext,
     ) -> Result<ContinuationTransition, GraphError> {
-        let payload = decode_payload(payload)?;
+        let payload = AgentPayloadView::read(payload)?;
         let mut checkpoint: EdgeAgentCheckpoint = from_value(checkpoint).map_err(|err| {
             GraphError::SnapshotValidation(format!("failed to decode agent checkpoint: {err}"))
         })?;
@@ -107,7 +109,7 @@ impl AgentHandler {
                 expected: CHECKPOINT_VERSION,
             });
         }
-        validate_checkpoint(&payload, &checkpoint)?;
+        validate_checkpoint(&payload.tools, &checkpoint)?;
         match event {
             ContinuationEvent::Poll => self.poll(&payload, &mut checkpoint, ctx).await,
             ContinuationEvent::ChildResult { call_id, output } => {
@@ -123,7 +125,7 @@ impl AgentHandler {
     /// Advances the explicit phase currently stored in the checkpoint.
     async fn poll(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         checkpoint: &mut EdgeAgentCheckpoint,
         ctx: ContinuationContext,
     ) -> Result<ContinuationTransition, GraphError> {
@@ -168,7 +170,7 @@ impl AgentHandler {
     /// Evaluates the optional controller and applies its decision atomically.
     async fn control_or_continue(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         checkpoint: &mut EdgeAgentCheckpoint,
         point: AgentInterventionPoint,
         ctx: ContinuationContext,
@@ -185,7 +187,7 @@ impl AgentHandler {
     /// Builds the owned read-only observation passed to one controller call.
     async fn loop_data(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         checkpoint: &EdgeAgentCheckpoint,
         point: AgentInterventionPoint,
         ctx: &ContinuationContext,
@@ -209,7 +211,7 @@ impl AgentHandler {
         Ok(AgentLoopData {
             input: checkpoint.input.clone(),
             point,
-            agent_id: payload.agent_id.clone(),
+            agent_id: payload.agent_id.to_owned(),
             session_id: checkpoint.session_id.clone(),
             configured_tools: tool_infos(payload, &checkpoint.resolved.tools),
             active_tools: tool_infos(payload, &active_tools),
@@ -225,7 +227,7 @@ impl AgentHandler {
     /// Validates one decision and returns its next checkpoint or suspension.
     fn apply_decision(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         checkpoint: &mut EdgeAgentCheckpoint,
         point: AgentInterventionPoint,
         decision: AgentDecision,
@@ -233,7 +235,7 @@ impl AgentHandler {
         validate_decision(&decision)?;
         if let AgentDecisionKind::Abort(reason) = &decision.kind {
             return Err(GraphError::AgentPolicyAbort {
-                agent: payload.agent_id.clone(),
+                agent: payload.agent_id.to_owned(),
                 reason: reason.clone(),
             });
         }
@@ -277,7 +279,7 @@ impl AgentHandler {
     /// Decodes an external agent resume value and applies it at the saved point.
     fn resume_agent(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         checkpoint: &mut EdgeAgentCheckpoint,
         input: Value,
     ) -> Result<ContinuationTransition, GraphError> {
@@ -303,7 +305,7 @@ impl AgentHandler {
     /// Performs one model request with the active tool surface and guidance.
     async fn dispatch(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         checkpoint: &mut EdgeAgentCheckpoint,
         conclusion: Option<ConclusionCause>,
         ctx: ContinuationContext,
@@ -317,7 +319,7 @@ impl AgentHandler {
             }
             ClientOutput::ToolCalls { thought: _, calls } if concluding => {
                 Err(GraphError::AgentConclusion {
-                    agent: payload.agent_id.clone(),
+                    agent: payload.agent_id.to_owned(),
                     reason: format!(
                         "tool-disabled final turn proposed {} tool call(s)",
                         calls.len()
@@ -333,7 +335,7 @@ impl AgentHandler {
     /// Validates and commits one final structured model response.
     async fn complete_output(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         checkpoint: &mut EdgeAgentCheckpoint,
         output: JsonValue,
         usage: Option<crate::clients::TokenUsage>,
@@ -353,7 +355,7 @@ impl AgentHandler {
             reason: err.to_string(),
         })?;
         checkpoint.metrics.record_output(usage)?;
-        ctx.push_history(&checkpoint.session_id, &payload.agent_id, message)
+        ctx.push_history(&checkpoint.session_id, payload.agent_id, message)
             .await?;
         Ok(ContinuationTransition {
             checkpoint: None,
@@ -396,7 +398,7 @@ impl AgentHandler {
     /// Commits an accepted assistant proposal and prepares its tool child calls.
     async fn accept_staged_proposal(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         checkpoint: &mut EdgeAgentCheckpoint,
         ctx: ContinuationContext,
     ) -> Result<ContinuationTransition, GraphError> {
@@ -416,7 +418,7 @@ impl AgentHandler {
         messages.push(assistant);
         messages.extend(std::mem::take(&mut prepared.recoverable_messages));
         let transition = self.begin_tool_execution(checkpoint, prepared)?;
-        ctx.push_history_batch(&checkpoint.session_id, &payload.agent_id, messages)
+        ctx.push_history_batch(&checkpoint.session_id, payload.agent_id, messages)
             .await?;
         Ok(transition)
     }
@@ -424,7 +426,7 @@ impl AgentHandler {
     /// Resolves an accepted proposal into executable and recoverable calls.
     fn prepare_tool_calls(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         checkpoint: &mut EdgeAgentCheckpoint,
         calls: &[EdgeProposedToolCall],
     ) -> Result<PreparedToolCalls, GraphError> {
@@ -471,7 +473,7 @@ impl AgentHandler {
     /// Validates one proposed call against the active prepared tool surface.
     fn prepare_tool_call(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         budget: Option<&mut AgentBudgetState>,
         exposed: &[String],
         call: &EdgeProposedToolCall,
@@ -537,7 +539,7 @@ impl AgentHandler {
     /// Persists and commits one returned tool child result.
     async fn child_result(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         checkpoint: &mut EdgeAgentCheckpoint,
         call_id: String,
         output: Value,
@@ -551,7 +553,7 @@ impl AgentHandler {
             error,
         } = rendered;
         let message = message.with_call_id(call_id);
-        ctx.push_history(&checkpoint.session_id, &payload.agent_id, message)
+        ctx.push_history(&checkpoint.session_id, payload.agent_id, message)
             .await?;
         self.commit_tool_result(checkpoint, active_call, value, error)
     }
@@ -559,7 +561,7 @@ impl AgentHandler {
     /// Converts one child output into history and controller-visible values.
     fn render_tool_result(
         &self,
-        payload: &AgentPayload,
+        payload: &AgentPayloadView<'_>,
         active: &EdgeActiveToolCall,
         output: Value,
     ) -> Result<EdgeRenderedToolResult, GraphError> {
@@ -672,7 +674,7 @@ fn accept_staged_boundary(
 
 /// Performs full JSON Schema validation before final history mutation.
 fn validate_agent_output(
-    payload: &AgentPayload,
+    payload: &AgentPayloadView<'_>,
     output: &JsonValue,
     concluding: bool,
 ) -> Result<(), GraphError> {
@@ -686,12 +688,12 @@ fn validate_agent_output(
         .validate(output)
         .map_err(|error| GraphError::Schema {
             label: "agent structured output".into(),
-            expected: payload.output_type_name.clone(),
+            expected: payload.output_type_name.to_owned(),
             value: error.to_string(),
         });
     if concluding {
         result.map_err(|error| GraphError::AgentConclusion {
-            agent: payload.agent_id.clone(),
+            agent: payload.agent_id.to_owned(),
             reason: format!("invalid structured output: {error}"),
         })
     } else {
@@ -701,7 +703,7 @@ fn validate_agent_output(
 
 /// Resolves the actual client surface and prepares history exactly once before execution.
 async fn execute_prepared_request(
-    payload: &AgentPayload,
+    payload: &AgentPayloadView<'_>,
     checkpoint: &EdgeAgentCheckpoint,
     conclusion: Option<ConclusionCause>,
     ctx: &ContinuationContext,
@@ -713,7 +715,7 @@ async fn execute_prepared_request(
         append_budget_reminder(&mut framework_messages, client.as_ref(), payload);
     }
     let history = ctx
-        .prepare_history(
+        .compact_history(
             &checkpoint.session_id,
             &checkpoint.resolved.model,
             client.options(),
@@ -727,7 +729,7 @@ async fn execute_prepared_request(
     client.execute(&messages).await.map_err(|err| match err {
         crate::clients::ClientError::OutputLimitReached { provider, .. } => {
             GraphError::AgentOutputLimit {
-                agent: payload.agent_id.clone(),
+                agent: payload.agent_id.to_owned(),
                 provider,
             }
         }
@@ -737,7 +739,7 @@ async fn execute_prepared_request(
 
 /// Builds one client using the checkpoint's effective tool surface and bound factory.
 fn dispatch_client(
-    payload: &AgentPayload,
+    payload: &AgentPayloadView<'_>,
     checkpoint: &EdgeAgentCheckpoint,
     concluding: bool,
     ctx: &Context,
@@ -760,7 +762,7 @@ fn dispatch_client(
         .map_err(|err| GraphError::AgentClient(format!("client creation failed: {err}")))
 }
 
-fn tool_infos(payload: &AgentPayload, selected: &[String]) -> Vec<ToolInfo> {
+fn tool_infos(payload: &AgentPayloadView<'_>, selected: &[String]) -> Vec<ToolInfo> {
     payload
         .tools
         .iter()
@@ -769,7 +771,7 @@ fn tool_infos(payload: &AgentPayload, selected: &[String]) -> Vec<ToolInfo> {
         .collect()
 }
 
-fn tool_definitions(payload: &AgentPayload, selected: &[String]) -> Vec<ToolDefinition> {
+fn tool_definitions(payload: &AgentPayloadView<'_>, selected: &[String]) -> Vec<ToolDefinition> {
     payload
         .tools
         .iter()
@@ -784,7 +786,7 @@ fn tool_definitions(payload: &AgentPayload, selected: &[String]) -> Vec<ToolDefi
 
 /// Builds provider options from the immutable payload and active tool subset.
 fn client_options(
-    payload: &AgentPayload,
+    payload: &AgentPayloadView<'_>,
     checkpoint: &EdgeAgentCheckpoint,
     tools: Vec<ToolDefinition>,
 ) -> ClientOptions {
@@ -794,14 +796,14 @@ fn client_options(
         ToolChoice::Auto
     };
     ClientOptions {
-        output_type_name: payload.output_type_name.clone(),
+        output_type_name: payload.output_type_name.to_owned(),
         provider_config: checkpoint.resolved.provider_config.clone(),
         max_output_tokens: checkpoint.resolved.max_output_tokens,
         ..ClientOptions::default()
     }
     .with_tools(tools)
     .with_tool_choice(tool_choice)
-    .with_name(payload.agent_id.clone())
+    .with_name(payload.agent_id.to_owned())
     .with_output_schema(payload.output_schema.clone())
     .with_preamble(effective_preamble(&checkpoint.resolved))
 }
@@ -811,6 +813,7 @@ fn append_guidance(messages: &mut Vec<Message>, guidance: Option<&str>) {
         return;
     };
     messages.push(Message {
+        key: None,
         role: Role::System,
         content: format!("<pravah_agent_intervention>\n{guidance}\n</pravah_agent_intervention>"),
         attachments: Vec::new(),
@@ -822,9 +825,9 @@ fn append_guidance(messages: &mut Vec<Message>, guidance: Option<&str>) {
 fn append_budget_reminder(
     messages: &mut Vec<Message>,
     client: &dyn crate::clients::Client,
-    payload: &AgentPayload,
+    payload: &AgentPayloadView<'_>,
 ) {
     let exit_tool = (client.uses_exit_tool() && !payload.output_type_name.is_empty())
-        .then_some(payload.output_type_name.as_str());
+        .then_some(payload.output_type_name);
     messages.push(Message::user(client.default_turn_budget_message(exit_tool)));
 }

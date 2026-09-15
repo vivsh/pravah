@@ -3,6 +3,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use schemars::JsonSchema;
+
+mod selection;
+pub(crate) use selection::validate_tool_names;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -16,7 +19,7 @@ pub(super) fn agent_tool_definition<T: JsonSchema>() -> Result<ToolDefinition, S
 }
 
 /// Returns the canonical identity for a tool input type.
-fn agent_tool_identity<T: JsonSchema>() -> Result<String, String> {
+pub(crate) fn agent_tool_identity<T: JsonSchema>() -> Result<String, String> {
     agent_tool_definition::<T>().map(|definition| definition.name)
 }
 
@@ -56,7 +59,13 @@ impl ToolInfo {
 /// Runtime predicate selecting from an agent's statically prepared tools.
 #[derive(Clone)]
 pub struct ToolFilter {
-    predicate: Arc<dyn Fn(&ToolInfo) -> bool + Send + Sync>,
+    kind: ToolFilterKind,
+}
+
+#[derive(Clone)]
+enum ToolFilterKind {
+    Predicate(Arc<dyn Fn(&ToolInfo) -> bool + Send + Sync>),
+    Names(Vec<String>),
 }
 
 impl fmt::Debug for ToolFilter {
@@ -80,17 +89,38 @@ impl ToolFilter {
     /// Builds a filter for activation-time or intervention-time tool selection.
     pub fn new(predicate: impl Fn(&ToolInfo) -> bool + Send + Sync + 'static) -> Self {
         Self {
-            predicate: Arc::new(predicate),
+            kind: ToolFilterKind::Predicate(Arc::new(predicate)),
         }
     }
 
     pub(crate) fn allows(&self, tool: &AgentToolPayload) -> bool {
-        (self.predicate)(&ToolInfo::from_payload(tool))
+        match &self.kind {
+            ToolFilterKind::Predicate(predicate) => predicate(&ToolInfo::from_payload(tool)),
+            ToolFilterKind::Names(names) => names.contains(&tool.name),
+        }
+    }
+
+    /// Selects explicit tool names; activation rejects duplicate or undeclared names.
+    /// Prepared declaration order determines exposure, not the supplied name order.
+    pub fn only(names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            kind: ToolFilterKind::Names(names.into_iter().map(Into::into).collect()),
+        }
+    }
+
+    pub(crate) fn validate_names<'a>(
+        &self,
+        candidates: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), String> {
+        match &self.kind {
+            ToolFilterKind::Names(names) => validate_tool_names(names, candidates),
+            ToolFilterKind::Predicate(_) => Ok(()),
+        }
     }
 }
 
 /// Reference to one text resource exposed by a configured MCP server.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 pub struct McpResourceRef {
     server: String,
     uri: String,
@@ -154,7 +184,7 @@ pub struct AgentConfig {
     pub(crate) budget_errors: Vec<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct RequestedToolBudget {
     pub(crate) name: String,
     pub(crate) limit: u32,

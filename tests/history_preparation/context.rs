@@ -34,18 +34,18 @@ impl MemoryService {
 
 struct ReadContext;
 
-impl HistoryPreparer for ReadContext {
+impl Compactor for ReadContext {
     type Error = DepsError;
 
     /// Reads the current execution's service and uses it to replace completed history.
-    async fn prepare(
+    async fn compact(
         &self,
-        request: HistoryPreparation<'_>,
+        request: CompactionRequest<'_>,
         ctx: Context,
-    ) -> Result<HistoryReplacement, Self::Error> {
+    ) -> Result<CompactionResult, Self::Error> {
         let service = ctx.deps().require::<MemoryService>()?;
         service.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(HistoryReplacement {
+        Ok(CompactionResult {
             evict_indices: (0..request.committed().len()).collect(),
             summary: (!request.committed().is_empty()).then(|| service.text.to_owned()),
         })
@@ -83,10 +83,10 @@ async fn each_chat_uses_its_bound_context() -> Result<(), GraphError> {
     let second = MemoryService::new("second account facts");
     let mut first_chat = Chat::new(tutor, context(first.clone(), factory()))
         .await?
-        .with_history_preparer(ReadContext);
+        .with_compactor(ReadContext);
     let mut second_chat = Chat::new(tutor, context(second.clone(), factory()))
         .await?
-        .with_history_preparer(ReadContext);
+        .with_compactor(ReadContext);
     for chat in [&mut first_chat, &mut second_chat] {
         chat.send(Question {
             text: "hello".into(),
@@ -109,7 +109,7 @@ async fn restore_uses_fresh_context_for_preparation() -> Result<(), TestError> {
     let original = MemoryService::new("original account facts");
     let mut chat = Chat::new(tutor, context(original.clone(), factory()))
         .await?
-        .with_history_preparer(ReadContext);
+        .with_compactor(ReadContext);
     chat.send(Question {
         text: "first".into(),
     })
@@ -120,7 +120,7 @@ async fn restore_uses_fresh_context_for_preparation() -> Result<(), TestError> {
         let client = factory();
         let mut restored =
             Chat::<_, _>::from_snapshot(tutor, copy, context(fresh.clone(), client.clone()))?
-                .with_history_preparer(ReadContext);
+                .with_compactor(ReadContext);
         assert_eq!(fresh.calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             serde_json::to_value(restored.snapshot()?)?,
@@ -150,7 +150,7 @@ async fn missing_dependency_preserves_history_and_checkpoint() -> Result<(), Tes
     let before = serde_json::to_value(runtime.snapshot()?)?;
     let result = runtime.next().await;
     assert!(
-        matches!(result, Err(GraphError::HistoryPreparation { source, .. })
+        matches!(result, Err(GraphError::HistoryCompaction { source, .. })
         if source.is::<DepsError>())
     );
     assert!(client.calls().is_empty());
@@ -170,7 +170,7 @@ async fn unfinished_dispatch_uses_restored_context() -> Result<(), TestError> {
         let client = factory();
         let mut restored = flow
             .restore(copy, context(service.clone(), client.clone()))?
-            .with_history_preparer(ReadContext);
+            .with_compactor(ReadContext);
         assert_eq!(
             serde_json::to_value(restored.snapshot()?)?,
             serde_json::to_value(&snapshot)?

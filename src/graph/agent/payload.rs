@@ -1,0 +1,88 @@
+use super::{AgentToolPayload, GraphError, JsonValue, PAYLOAD_VERSION, Value, from_value};
+
+/// Operation-local execution metadata, never retained in a handler or checkpoint.
+/// Names and configure data borrow the immutable graph; provider metadata is decoded locally.
+pub(super) struct AgentPayloadView<'a> {
+    pub(super) agent_id: &'a str,
+    pub(super) output_type_name: &'a str,
+    pub(super) configuration: Option<&'a Value>,
+    pub(super) output_schema: JsonValue,
+    pub(super) tools: Vec<AgentToolPayload>,
+}
+
+impl<'a> AgentPayloadView<'a> {
+    /// Reads execution fields from a prepared payload without rebuilding its input/data schemas.
+    /// Full definition decoding and configure-data validation remain preparation responsibilities.
+    pub(super) fn read(payload: &'a Value) -> Result<Self, GraphError> {
+        let agent_id = validate_identity(payload)?;
+        let configuration = match payload.get("configuration") {
+            None => None,
+            Some(value) if value.is_null() => None,
+            Some(value) => Some(field(value, "value")?),
+        };
+        Ok(Self {
+            agent_id,
+            output_type_name: text_field(payload, "output_type_name")?,
+            configuration,
+            output_schema: decode_field(payload, "output_schema")?,
+            tools: decode_field(payload, "tools")?,
+        })
+    }
+}
+
+/// Keeps version and handler-identity rejection explicit even for direct handler invocations.
+pub(super) fn validate_identity(payload: &Value) -> Result<&str, GraphError> {
+    let version = decode_field::<u32>(payload, "version")?;
+    if version != PAYLOAD_VERSION {
+        return Err(GraphError::UnsupportedVersion {
+            format: "agent payload",
+            got: version,
+            expected: PAYLOAD_VERSION,
+        });
+    }
+    let agent_id = text_field(payload, "agent_id")?;
+    if agent_id.is_empty() || text_field(payload, "configure_handler_key")? != agent_id {
+        return Err(GraphError::AgentConfigValidation(
+            "agent configure handler identity is missing or inconsistent".into(),
+        ));
+    }
+    if let Some(control) = payload
+        .get("control_handler_key")
+        .filter(|value| !value.is_null())
+    {
+        let valid = control
+            .as_str()
+            .and_then(|key| key.strip_suffix("::control"))
+            == Some(agent_id);
+        if !valid {
+            return Err(GraphError::AgentConfigValidation(
+                "agent control handler identity is inconsistent".into(),
+            ));
+        }
+    }
+    Ok(agent_id)
+}
+
+#[cfg(test)]
+mod tests;
+
+fn field<'a>(payload: &'a Value, name: &str) -> Result<&'a Value, GraphError> {
+    payload
+        .get(name)
+        .ok_or_else(|| GraphError::GraphValidation(format!("missing agent payload field '{name}'")))
+}
+
+fn decode_field<T: serde::de::DeserializeOwned>(
+    payload: &Value,
+    name: &str,
+) -> Result<T, GraphError> {
+    from_value(field(payload, name)?.clone()).map_err(|error| {
+        GraphError::GraphValidation(format!("invalid agent payload field '{name}': {error}"))
+    })
+}
+
+fn text_field<'a>(payload: &'a Value, name: &str) -> Result<&'a str, GraphError> {
+    field(payload, name)?.as_str().ok_or_else(|| {
+        GraphError::GraphValidation(format!("agent payload field '{name}' must be a string"))
+    })
+}

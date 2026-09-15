@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::config::AgentConfig;
-use super::{AgentLoopMetrics, AgentPayload, GraphError};
+use super::{AgentLoopMetrics, AgentToolPayload, GraphError};
 
 /// Checkpointed invocation-local agent and tool budgets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,12 +75,12 @@ impl AgentBudgetState {
 
 /// Validates accumulated and graph-relative budget configuration errors.
 pub(super) fn validate_budget_config(
-    payload: &AgentPayload,
+    tools: &[AgentToolPayload],
     config: &AgentConfig,
 ) -> Result<(), GraphError> {
     let mut errors = config.budget_errors.clone();
     for budget in &config.tool_budgets {
-        if !payload.tools.iter().any(|tool| tool.name == budget.name) {
+        if !tools.iter().any(|tool| tool.name == budget.name) {
             errors.push(format!("unknown agent tool '{}'", budget.name));
         }
     }

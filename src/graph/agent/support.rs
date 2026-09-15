@@ -3,7 +3,7 @@ use crate::graph::model::TypeSpec;
 
 /// Validates and freezes one activation-time agent configuration.
 pub(super) async fn resolve_agent_config(
-    payload: &AgentPayload,
+    payload: &AgentPayloadView<'_>,
     config: AgentConfig,
     ctx: &Context,
 ) -> Result<(ResolvedAgentConfig, Message, Option<AgentBudgetState>), GraphError> {
@@ -40,7 +40,14 @@ pub(super) async fn resolve_agent_config(
 }
 
 /// Checks activation settings that must hold before history can change.
-fn validate_agent_config(payload: &AgentPayload, config: &AgentConfig) -> Result<(), GraphError> {
+fn validate_agent_config(
+    payload: &AgentPayloadView<'_>,
+    config: &AgentConfig,
+) -> Result<(), GraphError> {
+    config
+        .tool_filter
+        .validate_names(payload.tools.iter().map(|tool| tool.name.as_str()))
+        .map_err(GraphError::AgentConfigValidation)?;
     if config.model.trim().is_empty() {
         return Err(GraphError::AgentConfigValidation(
             "model must not be empty".into(),
@@ -51,7 +58,7 @@ fn validate_agent_config(payload: &AgentPayload, config: &AgentConfig) -> Result
             "initial agent message must have the user role".into(),
         ));
     }
-    validate_budget_config(payload, config)
+    validate_budget_config(&payload.tools, config)
 }
 
 #[cfg(feature = "mcp")]
@@ -263,32 +270,10 @@ fn default_tool_message<O: Serialize + JsonSchema>(
 
 /// Decodes and validates the current serialized agent payload version.
 pub(super) fn decode_payload(payload: &Value) -> Result<AgentPayload, GraphError> {
-    let payload: AgentPayload = from_value(payload.clone())
+    let decoded: AgentPayload = from_value(payload.clone())
         .map_err(|err| GraphError::Invalid(format!("failed to decode agent payload: {err}")))?;
-    if payload.version != PAYLOAD_VERSION {
-        return Err(GraphError::UnsupportedVersion {
-            format: "agent payload",
-            got: payload.version,
-            expected: PAYLOAD_VERSION,
-        });
-    }
-    if payload.configure_handler_key.is_empty() || payload.configure_handler_key != payload.agent_id
-    {
-        return Err(GraphError::AgentConfigValidation(
-            "agent configure handler identity is missing or inconsistent".into(),
-        ));
-    }
-    let expected_control = format!("{}::control", payload.agent_id);
-    if payload
-        .control_handler_key
-        .as_deref()
-        .is_some_and(|key| key != expected_control)
-    {
-        return Err(GraphError::AgentConfigValidation(
-            "agent control handler identity is inconsistent".into(),
-        ));
-    }
-    Ok(payload)
+    super::payload::validate_identity(payload)?;
+    Ok(decoded)
 }
 
 pub(super) fn single_input(mut inputs: Vec<Value>, label: &str) -> Result<Value, GraphError> {
@@ -362,7 +347,7 @@ pub(crate) fn validate_agent_snapshot_state(
                 expected: CHECKPOINT_VERSION,
             });
         }
-        validate_checkpoint(&payload, &checkpoint)?;
+        validate_checkpoint(&payload.tools, &checkpoint)?;
     }
     if let Some(state) = state {
         restore_agent_state(Some(state.clone()))?;
@@ -372,7 +357,7 @@ pub(crate) fn validate_agent_snapshot_state(
 
 /// Validates all stable agent checkpoint identities and phase relationships.
 pub(super) fn validate_checkpoint(
-    payload: &AgentPayload,
+    tools: &[AgentToolPayload],
     checkpoint: &EdgeAgentCheckpoint,
 ) -> Result<(), GraphError> {
     if checkpoint.session_id.is_empty() {
@@ -380,8 +365,8 @@ pub(super) fn validate_checkpoint(
             "agent checkpoint session id is empty".into(),
         ));
     }
-    validate_resolved_tools(payload, &checkpoint.resolved.tools)?;
-    validate_selected_tools(payload, checkpoint)?;
+    validate_resolved_tools(tools, &checkpoint.resolved.tools)?;
+    validate_selected_tools(tools, checkpoint)?;
     validate_budget_state(&checkpoint.resolved.tools, checkpoint.budget.as_ref())?;
     validate_resolved_resources(&checkpoint.resolved.resources)?;
     if checkpoint.resolved.max_output_tokens == Some(0) {
@@ -394,13 +379,15 @@ pub(super) fn validate_checkpoint(
             "agent checkpoint model is empty".into(),
         ));
     }
-    validate_checkpoint_phase(payload, checkpoint)
+    validate_checkpoint_phase(tools, checkpoint)
 }
 
 /// Requires configured tool identities to be unique and in prepared order.
-fn validate_resolved_tools(payload: &AgentPayload, selected: &[String]) -> Result<(), GraphError> {
-    let expected = payload
-        .tools
+fn validate_resolved_tools(
+    tools: &[AgentToolPayload],
+    selected: &[String],
+) -> Result<(), GraphError> {
+    let expected = tools
         .iter()
         .filter(|tool| selected.contains(&tool.name))
         .map(|tool| tool.name.as_str())
@@ -416,10 +403,10 @@ fn validate_resolved_tools(payload: &AgentPayload, selected: &[String]) -> Resul
 
 /// Requires controller-selected tools to be an ordered configured subset.
 fn validate_selected_tools(
-    payload: &AgentPayload,
+    tools: &[AgentToolPayload],
     checkpoint: &EdgeAgentCheckpoint,
 ) -> Result<(), GraphError> {
-    validate_resolved_tools(payload, &checkpoint.selected_tools)?;
+    validate_resolved_tools(tools, &checkpoint.selected_tools)?;
     if checkpoint
         .selected_tools
         .iter()
@@ -452,7 +439,7 @@ fn validate_resolved_resources(resources: &[ResolvedResource]) -> Result<(), Gra
 
 /// Dispatches validation for the checkpoint's explicit agent-loop phase.
 fn validate_checkpoint_phase(
-    payload: &AgentPayload,
+    tools: &[AgentToolPayload],
     checkpoint: &EdgeAgentCheckpoint,
 ) -> Result<(), GraphError> {
     match &checkpoint.phase {
@@ -463,7 +450,7 @@ fn validate_checkpoint_phase(
             active,
             waiting,
             results,
-        } => validate_pending_calls(payload, checkpoint, active, waiting, results),
+        } => validate_pending_calls(tools, checkpoint, active, waiting, results),
         EdgeAgentPhase::AfterTools { results } => validate_completed_results(results),
         EdgeAgentPhase::BeforeModel | EdgeAgentPhase::Dispatch { .. } => Ok(()),
     }
@@ -488,7 +475,7 @@ fn validate_staged_calls(calls: &[EdgeProposedToolCall]) -> Result<(), GraphErro
 
 /// Validates pending child calls and completed results as one unique batch.
 fn validate_pending_calls(
-    payload: &AgentPayload,
+    tools: &[AgentToolPayload],
     checkpoint: &EdgeAgentCheckpoint,
     active: &[EdgeActiveToolCall],
     waiting: &[EdgeWaitingToolCall],
@@ -504,7 +491,7 @@ fn validate_pending_calls(
                 .map(|call| (&call.call_id, &call.tool_name, call.child_index)),
         )
     {
-        let tool = payload.tools.get(call.2).ok_or_else(|| {
+        let tool = tools.get(call.2).ok_or_else(|| {
             GraphError::SnapshotValidation("agent tool call child index is invalid".into())
         })?;
         if tool.name.as_str() != call.1.as_str() || !checkpoint.selected_tools.contains(&tool.name)
@@ -559,7 +546,7 @@ pub(crate) fn validate_agent_suspension(
     let checkpoint: EdgeAgentCheckpoint = from_value(checkpoint.clone()).map_err(|err| {
         GraphError::SnapshotValidation(format!("failed to decode agent checkpoint: {err}"))
     })?;
-    validate_checkpoint(&payload, &checkpoint)?;
+    validate_checkpoint(&payload.tools, &checkpoint)?;
     if payload.control_handler_key.is_none()
         || checkpoint_point_for_validation(&checkpoint.phase).is_none()
     {

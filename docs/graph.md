@@ -127,16 +127,22 @@ caller that repeats the same snapshot can repeat the next work handler or model
 dispatch. Side-effecting handlers must therefore use application-level
 idempotency keys or durable deduplication.
 
+Agent configuration can supply `Message::user(text).with_key(application_key)`.
+History stores and compactors receive the key through `entry.message.key`, and
+snapshots preserve it. Keys are application metadata, not provider prompt content,
+tool-call IDs, or automatic deduplication identifiers. This also works with
+[Chat](chat.md#application-message-keys).
+
 History entries have stable positions. `HistoryStore` implementations must
 treat a repeated position as an idempotent replay so a partially persisted
 batch can be retried safely.
 
-Import `HistoryStore`, `HistoryPreparer`, `HistoryPreparation`, `HistoryEntry`, and
-`HistoryReplacement` directly from `pravah`. The same types are available under
+Import `HistoryStore`, `Compactor`, `CompactionRequest`, `HistoryEntry`, and
+`CompactionResult` directly from `pravah`. The same types are available under
 `pravah::history` for applications that prefer an explicit module path.
 
-Use `Runtime::with_history_preparer` to prepare summary-based working memory
-before each model execution. `prepare(&self, request, ctx)` receives the bound
+Use `Runtime::with_compactor` to prepare summary-based working memory
+before each model execution. `compact(&self, request, ctx)` receives the bound
 execution `Context` for application dependencies, effective request options and
 framework guidance, along with separate committed and protected history views.
 Replacement is validated and applied atomically; the current user/tool exchange

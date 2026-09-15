@@ -1,5 +1,5 @@
 use crate::clients::{ClientError, Message, Role, TokenUsage};
-use crate::history::FlowHistory;
+use crate::history::MessageHistory;
 use crate::legacy::CompactionResult;
 
 use super::support::{push_assistant, push_tool, push_tool_calls, push_user, tool_call, usage};
@@ -7,7 +7,7 @@ use super::support::{push_assistant, push_tool, push_tool_calls, push_user, tool
 /// Verifies that appending an entry records its token usage as the latest usage.
 #[test]
 fn push_records_last_usage() {
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     push_assistant(&mut history, "s1", Some(usage(10, 5)));
     assert_eq!(history.last_usage().and_then(|usage| usage.input), Some(10));
     assert_eq!(history.last_usage().and_then(|usage| usage.output), Some(5));
@@ -16,7 +16,7 @@ fn push_records_last_usage() {
 /// Verifies that token totals accumulate across appended history entries.
 #[test]
 fn push_accumulates_totals() {
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     push_assistant(&mut history, "s1", Some(usage(10, 5)));
     push_assistant(&mut history, "s1", Some(usage(20, 8)));
     assert_eq!(history.total_input(), Some(30));
@@ -27,7 +27,7 @@ fn push_accumulates_totals() {
 /// Verifies that session queries return only live messages for the requested session.
 #[test]
 fn for_session_excludes_other_sessions() {
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     push_user(&mut history, "s1", "task");
     push_tool_calls(&mut history, "s1", vec![tool_call("1")]);
     push_tool(&mut history, "s1", "1");
@@ -39,7 +39,7 @@ fn for_session_excludes_other_sessions() {
 /// Verifies that unresolved assistant tool calls make only their session invalid.
 #[test]
 fn validate_for_session_rejects_dangling_calls() {
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     push_tool_calls(&mut history, "s1", vec![tool_call("1")]);
     assert!(matches!(
         history.validate_for_session("s1"),
@@ -51,7 +51,7 @@ fn validate_for_session_rejects_dangling_calls() {
 /// Verifies that the last role is taken from the newest live history entry.
 #[test]
 fn last_role_returns_latest_live_role() {
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     assert!(history.last_role().is_none());
     push_user(&mut history, "s1", "hi");
     assert!(matches!(history.last_role(), Some(Role::User)));
@@ -60,11 +60,12 @@ fn last_role_returns_latest_live_role() {
 /// Verifies that cumulative usage requires both input and output token totals.
 #[test]
 fn total_usage_requires_both_values() {
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     history.push(
         "s1",
         "agent",
         Message {
+            key: None,
             role: Role::Assistant,
             content: "x".into(),
             attachments: Vec::new(),
@@ -99,7 +100,7 @@ fn apply_compaction_marks_entries_and_inserts_summary() {
 /// Verifies that compaction rejects an index outside the supplied session slice.
 #[test]
 fn apply_compaction_rejects_out_of_bounds_index() {
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     push_tool_calls(&mut history, "s1", vec![tool_call("1")]);
     let owned: Vec<_> = history.session_entries("s1").into_iter().cloned().collect();
     let refs: Vec<_> = owned.iter().collect();
@@ -128,8 +129,8 @@ fn prune_evicted_removes_marked_entries() {
 }
 
 /// Builds two complete tool-call turns for compaction behavior tests.
-fn two_turn_history() -> FlowHistory {
-    let mut history = FlowHistory::new();
+fn two_turn_history() -> MessageHistory {
+    let mut history = MessageHistory::new();
     push_tool_calls(&mut history, "s1", vec![tool_call("1")]);
     push_tool(&mut history, "s1", "1");
     push_tool_calls(&mut history, "s1", vec![tool_call("2")]);

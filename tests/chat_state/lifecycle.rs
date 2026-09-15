@@ -81,14 +81,14 @@ async fn values_do_not_change_fingerprints_or_leak_between_chats() -> Result<(),
 async fn cancelled_turn_is_not_an_input_boundary() -> Result<(), TestError> {
     use futures::FutureExt;
     let mut chat = Chat::with_state(waiting_agent, initial_state(), Context::default()).await?;
-    assert!(chat.send("question".into()).now_or_never().is_none());
+    assert!(chat.send("question").now_or_never().is_none());
     let before = serde_json::to_value(chat.snapshot()?)?;
     assert!(matches!(
         chat.set(initial_state()),
         Err(GraphError::ChatNotReady { operation: "set" })
     ));
     assert!(matches!(
-        chat.send("another".into()).await,
+        chat.send("another").await,
         Err(GraphError::ChatNotReady { operation: "send" })
     ));
     assert_eq!(chat.get()?, initial_state());

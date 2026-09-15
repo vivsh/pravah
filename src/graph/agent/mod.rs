@@ -33,6 +33,7 @@ mod control;
 mod definition;
 mod execution;
 mod intervention;
+mod payload;
 pub(crate) mod support;
 mod tool_execution;
 
@@ -40,6 +41,7 @@ use budget::*;
 use checkpoint::*;
 pub(crate) use config::ResolvedResource;
 pub use config::{AgentConfig, McpResourceRef, ToolFilter, ToolInfo};
+pub(crate) use config::{RequestedToolBudget, agent_tool_identity, validate_tool_names};
 use config::{ResolvedAgentConfig, agent_tool_definition};
 pub use control::{
     AgentDecision, AgentDirective, AgentInterventionPoint, AgentLoop, AgentLoopMetrics,
@@ -47,10 +49,12 @@ pub use control::{
 };
 use control::{AgentDecisionKind, AgentLoopData, ControlStateUpdate};
 pub use definition::Agent;
+use definition::ConfigurationData;
 use definition::{AgentConfigurator, AgentController};
+use payload::AgentPayloadView;
 use support::*;
 
-const PAYLOAD_VERSION: u32 = 3;
+const PAYLOAD_VERSION: u32 = 4;
 const CHECKPOINT_VERSION: u32 = 5;
 
 /// Validates the identity duplicated in an agent's generic continuation payload.
@@ -107,6 +111,9 @@ pub(crate) fn namespace_payload_handler(payload: &mut Value, handler_key: &str) 
 /// It contains graph-safe metadata only; runtime services and codecs stay in
 /// the handler registry.
 pub(crate) struct AgentPayload {
+    /// Optional immutable data supplied to the configure function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<ConfigurationData>,
     /// Payload format version.
     pub version: u32,
     /// Stable internal agent identity used in history and diagnostics.
@@ -300,7 +307,7 @@ where
     I: JsonSchema,
     O: JsonSchema,
 {
-    let (toolset, controller, configure, mut errors) = agent.into_parts();
+    let (toolset, controller, configure, configuration, mut errors) = agent.into_parts();
     let tools = toolset.into_tools();
     let input_schema = schema_for::<I>();
     let output_schema = schema_for::<O>();
@@ -326,6 +333,7 @@ where
         AgentConfigurator::missing()
     });
     let payload = AgentPayload {
+        configuration,
         version: PAYLOAD_VERSION,
         agent_id: String::new(),
         configure_handler_key: String::new(),

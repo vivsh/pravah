@@ -23,7 +23,7 @@ agent loop.
 
 ```toml
 [dependencies]
-pravah = "0.4.17"
+pravah = "0.4.18"
 ```
 
 ## Flow, Agent, and Chat
@@ -155,36 +155,42 @@ tool abstraction.
 ### `pravah::Chat`
 
 ```rust
-use pravah::{Chat, Context};
+use pravah::{Chat, ChatRequest, Context};
 
-let mut chat = Chat::new(support_agent, Context::default()).await?;
+let mut chat = Chat::builder::<String>()
+    .model("openai:///gpt-5")
+    .instructions("Help the user resolve their support request.")
+    .turn_budget(6)
+    .build(Context::default())
+    .await?;
 
-let first = chat.send(question).await?;
-println!("{}", first.output.answer);
+let request = ChatRequest::from("Help me choose the right plan.")
+    .memory("The user runs a small design studio.");
+let reply = chat.send_with_key(request, "message-42").await?;
+println!("{}", reply.output);
 
 let snapshot = chat.snapshot()?;
-let mut restored = Chat::<_, _>::from_snapshot(
-    support_agent,
-    snapshot,
-    Context::default(),
-)?;
-
-let next = restored.send(follow_up).await?;
 ```
 
-`Chat` turns a function-defined `Agent` into a typed multi-turn conversation.
-It retains the conversation across turns, drives the workflow on behalf of the
-caller, and supports snapshot restoration across requests or processes.
+`Chat` provides typed multi-turn conversations without a configuration callback.
+For a simple message, just call `chat.send("Hello").await?`.
+Add tools and budgets to the builder, and select memory, tools, and resources
+per message. It retains conversation history and supports snapshot restoration
+across requests or processes using the same builder settings and fresh services.
 
 Need to persist application data alongside the conversation? Use
-`Chat::with_state(agent, initial_state, ctx).await?` and typed `get()`/`set()`:
+`builder.state(initial_state).build(ctx).await?` and typed `get()`/`set()`:
 one checkpoint captures both. State stays private unless your application
 explicitly includes it in a message. See the [Chat guide](docs/chat.md).
 
-Because chat uses the same agent API, it also supports dynamic configuration,
-typed tools, budgets, memory, and application services. A conversational
-feature can grow into a wider business workflow without replacing its agent
-model.
+Configure `.compactor(policy)` and `.store(history_store)` before `.build(ctx)`;
+the resulting Chat is ready to use.
+
+For dynamic models or application-specific configuration, use
+`Chat::new(agent, ctx).await?` with an ordinary function-defined `Agent`.
+Both paths support the same typed tools, adaptive control, history compaction,
+and durable state. A conversation can grow into a wider workflow without
+replacing its agent model.
 
 ## Designed for Real Application Work
 

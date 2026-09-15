@@ -35,5 +35,6 @@ jobs:
           cargo run --quiet -p pravah --example graph_untyped
           cargo run --quiet -p pravah --example graph_chat_working_memory --features testing
           cargo run --quiet -p pravah --example graph_chat_state --features testing
+          cargo run --quiet -p pravah --example graph_chat_builder --features testing
       - name: Package Pravah
         run: cargo package -p pravah

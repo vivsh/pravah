@@ -85,12 +85,7 @@ mod example {
         let mut state = chat.get()?;
         state.questions += 1;
         chat.set(state)?;
-        println!(
-            "{}",
-            chat.send("What should I review first?".into())
-                .await?
-                .output
-        );
+        println!("{}", chat.send("What should I review first?").await?.output);
         println!("Application state: {:?}", chat.get()?);
         Ok(())
     }

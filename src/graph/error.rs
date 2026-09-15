@@ -5,6 +5,12 @@ use super::ids::{EdgeId, HandlerKey, NodeId, VarId};
 #[derive(Debug, Error)]
 /// Error type for graph construction, validation, and VM execution failures.
 pub enum GraphError {
+    /// A Chat request failed validation before the suspended execution accepted it.
+    #[error("invalid chat request: {reason}")]
+    ChatRequestValidation {
+        /// Reason the request must be corrected before submission.
+        reason: String,
+    },
     /// A chat operation requires an idle application-input boundary.
     #[error(
         "chat is not ready for '{operation}'; an unfinished turn cannot accept input or state changes"
@@ -46,8 +52,8 @@ pub enum GraphError {
     HistoryPersistence(String),
 
     /// An application could not prepare working memory for the upcoming request.
-    #[error("history preparation failed for '{session_id}': {source}")]
-    HistoryPreparation {
+    #[error("history compaction failed for '{session_id}': {source}")]
+    HistoryCompaction {
         /// Session whose history remains unchanged.
         session_id: String,
         /// Original application error, available for inspection and downcasting.
@@ -56,8 +62,8 @@ pub enum GraphError {
     },
 
     /// A history replacement or resulting message sequence is unsafe.
-    #[error("history preparation is invalid for '{session_id}': {reason}")]
-    HistoryPreparationValidation {
+    #[error("history compaction is invalid for '{session_id}': {reason}")]
+    HistoryCompactionValidation {
         /// Session whose history remains unchanged.
         session_id: String,
         /// Invalid index, message group, or stale observation.

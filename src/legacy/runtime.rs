@@ -4,7 +4,9 @@ use super::{flow::StepServices, nodes::FlowNode};
 use crate::{
     Context,
     clients::{DefaultClientFactory, Message, Role},
-    history::{DynHistoryCompactor, DynHistoryStore, FlowHistory, NoopCompactor, NoopHistoryStore},
+    history::{
+        DynHistoryCompactor, DynHistoryStore, MessageHistory, NoopCompactor, NoopHistoryStore,
+    },
     legacy::{
         ClientFactory, Flow, FlowError, FlowGraph, FlowStep, NodeId,
         inspect::FlowInspector,
@@ -104,7 +106,7 @@ pub(crate) struct FlowCall(pub(crate) Arc<FlowGraph>);
 pub struct FlowRuntime<I: Flow> {
     state: FlowState,
     callables: Vec<FlowCall>,
-    history: FlowHistory,
+    history: MessageHistory,
     factory: Arc<dyn ClientFactory>,
     memory: Arc<dyn DynMemoryFactory>,
     compactor: Box<dyn DynHistoryCompactor>,
@@ -127,7 +129,7 @@ impl<I: Flow> FlowRuntime<I> {
         let entry_id = graph.entry;
 
         let mut state = FlowState::new();
-        let mut history = FlowHistory::new();
+        let mut history = MessageHistory::new();
         history.push(
             "__root__",
             "__runtime__",
@@ -558,12 +560,12 @@ impl<I: Flow> std::fmt::Debug for FlowRuntime<I> {
 #[derive(Serialize, Deserialize)]
 pub struct FlowSnapshot {
     state: FlowState,
-    history: FlowHistory,
+    history: MessageHistory,
 }
 
 impl FlowSnapshot {
     /// Returns the conversation history captured by this snapshot.
-    pub fn history(&self) -> &FlowHistory {
+    pub fn history(&self) -> &MessageHistory {
         &self.history
     }
 }

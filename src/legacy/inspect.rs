@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::history::FlowHistory;
+use super::history::MessageHistory;
 use super::nodes::FlowNode;
 use super::runtime::FlowCall;
 use super::state::{AgentContinuation, FlowState, Frame};
@@ -74,14 +74,14 @@ pub struct AgentView {
 pub struct FlowInspector<'a> {
     state: &'a FlowState,
     callables: &'a [FlowCall],
-    history: &'a FlowHistory,
+    history: &'a MessageHistory,
 }
 
 impl<'a> FlowInspector<'a> {
     pub(crate) fn new(
         state: &'a FlowState,
         callables: &'a [FlowCall],
-        history: &'a FlowHistory,
+        history: &'a MessageHistory,
     ) -> Self {
         Self {
             state,
@@ -122,7 +122,7 @@ impl<'a> FlowInspector<'a> {
     }
 
     /// Returns the full history, including entries from all sessions.
-    pub fn history(&self) -> &'a FlowHistory {
+    pub fn history(&self) -> &'a MessageHistory {
         self.history
     }
 

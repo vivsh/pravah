@@ -18,7 +18,7 @@ async fn failed_turn_roundtrips_keep_fresh_services_idle() -> Result<(), TestErr
     )
     .await?;
     assert!(matches!(
-        chat.send("question".into()).await,
+        chat.send("question").await,
         Err(GraphError::AgentClient(_))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -36,7 +36,7 @@ async fn failed_turn_roundtrips_keep_fresh_services_idle() -> Result<(), TestErr
             Err(GraphError::ChatNotReady { .. })
         ));
         assert!(matches!(
-            restored.send("another".into()).await,
+            restored.send("another").await,
             Err(GraphError::ChatNotReady { .. })
         ));
         assert_eq!(fresh.load(Ordering::SeqCst), 0);

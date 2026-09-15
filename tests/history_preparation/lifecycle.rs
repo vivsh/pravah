@@ -10,16 +10,16 @@ use pravah::testing::CapturingHistoryStore;
 #[derive(Clone, Default)]
 struct CountPreparation(Arc<AtomicUsize>);
 
-impl HistoryPreparer for CountPreparation {
+impl Compactor for CountPreparation {
     type Error = std::convert::Infallible;
 
-    async fn prepare(
+    async fn compact(
         &self,
-        _request: HistoryPreparation<'_>,
+        _request: CompactionRequest<'_>,
         _ctx: Context,
-    ) -> Result<HistoryReplacement, Self::Error> {
+    ) -> Result<CompactionResult, Self::Error> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(HistoryReplacement::default())
+        Ok(CompactionResult::default())
     }
 }
 
@@ -62,7 +62,7 @@ async fn final_output_does_not_prepare_again() -> Result<(), GraphError> {
         Context::default().with_client_factory(factory.clone()),
     )
     .await?
-    .with_history_preparer(policy.clone());
+    .with_compactor(policy.clone());
     chat.send(Question { text: "a".into() }).await?;
     assert_eq!(factory.calls().len(), 1);
     assert_eq!(policy.0.load(Ordering::SeqCst), 1);
@@ -79,7 +79,7 @@ async fn repeated_summaries_bound_snapshots_without_rewriting_store() -> Result<
     let store = CapturingHistoryStore::new();
     let mut chat = Chat::new(tutor, Context::default().with_client_factory(factory))
         .await?
-        .with_history_preparer(Summarize)
+        .with_compactor(Summarize)
         .with_store(store.clone());
     let mut sizes = Vec::new();
     for _ in 0..20 {
@@ -114,7 +114,7 @@ async fn repeated_summaries_bound_snapshots_without_rewriting_store() -> Result<
 
 /// JSON and CBOR snapshots restore with fresh policy and client dependencies and no format change.
 #[tokio::test]
-async fn snapshots_restore_with_fresh_preparer() -> Result<(), GraphError> {
+async fn snapshots_restore_with_fresh_compactor() -> Result<(), GraphError> {
     let original = CountPreparation::default();
     let mut chat = Chat::new(
         tutor,
@@ -123,7 +123,7 @@ async fn snapshots_restore_with_fresh_preparer() -> Result<(), GraphError> {
         ),
     )
     .await?
-    .with_history_preparer(original.clone());
+    .with_compactor(original.clone());
     chat.send(Question { text: "a".into() }).await?;
     let snapshot = chat.snapshot()?;
     let json = serde_json::to_vec(&snapshot).expect("JSON snapshot");
@@ -142,7 +142,7 @@ async fn snapshots_restore_with_fresh_preparer() -> Result<(), GraphError> {
                 ScriptedFactory::new().then_output(serde_json::json!({"text":"b"})),
             ),
         )?
-        .with_history_preparer(fresh.clone());
+        .with_compactor(fresh.clone());
         restored.send(Question { text: "b".into() }).await?;
         assert_eq!(fresh.0.load(Ordering::SeqCst), 1);
     }
@@ -158,7 +158,7 @@ async fn summary_snapshots_round_trip_and_continue() -> Result<(), GraphError> {
         .then_output(serde_json::json!({"text":"b"}));
     let mut chat = Chat::new(tutor, Context::default().with_client_factory(factory))
         .await?
-        .with_history_preparer(Summarize);
+        .with_compactor(Summarize);
     for text in ["a", "b"] {
         chat.send(Question { text: text.into() }).await?;
     }
@@ -181,7 +181,7 @@ async fn summary_snapshots_round_trip_and_continue() -> Result<(), GraphError> {
             copy,
             Context::default().with_client_factory(client.clone()),
         )?
-        .with_history_preparer(Summarize);
+        .with_compactor(Summarize);
         restored.send(Question { text: "c".into() }).await?;
         assert_eq!(restored.snapshot()?.history().entries().len(), 3);
         assert!(matches!(client.calls()[0].1[0].role, Role::System));

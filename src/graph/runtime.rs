@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::Context;
-use crate::history::{FlowHistory, HistoryPreparer, HistoryStore};
+use crate::history::{Compactor, HistoryStore, MessageHistory};
 
 use super::agent::support::{validate_agent_snapshot_state, validate_agent_suspension};
 use super::error::GraphError;
@@ -139,7 +139,7 @@ pub struct Snapshot {
     /// Serializable VM frame stack and suspension state.
     pub(crate) state: SparseState,
     /// Runtime-owned conversation/history state.
-    pub(crate) history: FlowHistory,
+    pub(crate) history: MessageHistory,
 }
 
 impl Snapshot {
@@ -154,7 +154,7 @@ impl Snapshot {
     }
 
     /// Returns the runtime-owned conversation history captured by this snapshot.
-    pub fn history(&self) -> &FlowHistory {
+    pub fn history(&self) -> &MessageHistory {
         &self.history
     }
 }
@@ -176,7 +176,7 @@ pub struct Runtime {
     registry: Arc<HandlerRegistry>,
     graph_fingerprint: GraphFingerprint,
     state: State,
-    history: Arc<Mutex<FlowHistory>>,
+    history: Arc<Mutex<MessageHistory>>,
     runtime_context: Arc<RuntimeContext>,
 }
 
@@ -288,7 +288,7 @@ impl PreparedGraph {
             registry: Arc::clone(&self.registry),
             graph_fingerprint: self.fingerprint,
             state,
-            history: Arc::new(Mutex::new(FlowHistory::new())),
+            history: Arc::new(Mutex::new(MessageHistory::new())),
             runtime_context: Arc::new(RuntimeContext::new(ctx)),
         })
     }
@@ -371,13 +371,13 @@ fn validate_continuation_payloads(
 
 impl Runtime {
     /// Sets the fallible pre-request history policy; reattach it after snapshot restore.
-    pub fn with_history_preparer(mut self, preparer: impl HistoryPreparer + 'static) -> Self {
+    pub fn with_compactor(mut self, compactor: impl Compactor + 'static) -> Self {
         let services = self
             .runtime_context
             .services
             .as_ref()
             .clone()
-            .with_history_preparer(preparer);
+            .with_compactor(compactor);
         self.runtime_context = Arc::new(self.runtime_context.with_services(services));
         self
     }

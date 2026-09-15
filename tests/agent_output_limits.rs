@@ -7,8 +7,8 @@ use pravah::clients::{Client, ClientError, ClientFactory, ClientOptions, Message
 use pravah::testing::{ScriptedFactory, mock_tool_call};
 use pravah::tools::ToolError;
 use pravah::{
-    Agent, AgentConfig, Context, Flow, GraphError, HistoryPreparation, HistoryPreparer,
-    HistoryReplacement, Runtime, Snapshot, Step, Toolset, compile,
+    Agent, AgentConfig, CompactionRequest, CompactionResult, Compactor, Context, Flow, GraphError,
+    Runtime, Snapshot, Step, Toolset, compile,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -114,17 +114,17 @@ struct ObserveCap {
     cap: Option<u32>,
 }
 
-impl HistoryPreparer for ObserveCap {
+impl Compactor for ObserveCap {
     type Error = std::convert::Infallible;
 
-    async fn prepare(
+    async fn compact(
         &self,
-        request: HistoryPreparation<'_>,
+        request: CompactionRequest<'_>,
         _ctx: Context,
-    ) -> Result<HistoryReplacement, Self::Error> {
+    ) -> Result<CompactionResult, Self::Error> {
         assert_eq!(request.options().max_output_tokens, self.cap);
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(HistoryReplacement::default())
+        Ok(CompactionResult::default())
     }
 }
 
@@ -200,7 +200,7 @@ async fn request_cap_is_optional_and_visible_to_preparation() -> Result<(), Test
                 },
                 context(script.clone(), cap),
             )?
-            .with_history_preparer(ObserveCap {
+            .with_compactor(ObserveCap {
                 calls: calls.clone(),
                 cap,
             });
@@ -232,7 +232,7 @@ async fn tool_loops_and_forced_conclusion_keep_the_cap() -> Result<(), TestError
                 },
                 context(script.clone(), Some(2048)),
             )?
-            .with_history_preparer(ObserveCap {
+            .with_compactor(ObserveCap {
                 calls: calls.clone(),
                 cap: Some(2048),
             });

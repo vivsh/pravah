@@ -13,7 +13,7 @@ use super::nodes::{
     AgentInfo, EachInfo, EitherInfo, FlowNode, ForkInfo, JoinInfo, MapInfo, SuspendInfo,
     ToolMessageError, ToolWorkInfo, WorkInfo,
 };
-use crate::history::{DynHistoryStore, FlowHistory, count_complete_turns};
+use crate::history::{DynHistoryStore, MessageHistory, count_complete_turns};
 use crate::legacy::NodeId;
 use crate::legacy::errors::{AgentError, BuildError, FlowError};
 use crate::legacy::interner::Interner;
@@ -110,7 +110,7 @@ struct PendingToolState {
 struct DispatchContext<'a> {
     factory: &'a dyn ClientFactory,
     ctx: Context,
-    history: &'a mut FlowHistory,
+    history: &'a mut MessageHistory,
     store: &'a dyn DynHistoryStore,
     states: &'a mut FlowState,
     session_id: &'a str,
@@ -126,7 +126,7 @@ pub(crate) struct StepServices<'a> {
 
 async fn record_history(
     store: &dyn DynHistoryStore,
-    history: &mut FlowHistory,
+    history: &mut MessageHistory,
     session_id: &str,
     agent_id: &str,
     message: Message,
@@ -486,7 +486,7 @@ impl FlowGraph {
         &self,
         services: StepServices<'_>,
         ctx: Context,
-        history: &mut FlowHistory,
+        history: &mut MessageHistory,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
         self.step(services, ctx, history, None, states).await
@@ -496,7 +496,7 @@ impl FlowGraph {
         &self,
         services: StepServices<'_>,
         ctx: Context,
-        history: &mut FlowHistory,
+        history: &mut MessageHistory,
         resumption: Value,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
@@ -509,7 +509,7 @@ impl FlowGraph {
         flow: &FlowGraph,
         services: StepServices<'_>,
         ctx: Context,
-        history: &mut FlowHistory,
+        history: &mut MessageHistory,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
         let current = states.get_agent_state(node.id).cloned();
@@ -615,7 +615,7 @@ impl FlowGraph {
     async fn handle_pending_tools(
         node: &AgentInfo,
         flow: &FlowGraph,
-        history: &mut FlowHistory,
+        history: &mut MessageHistory,
         store: &dyn DynHistoryStore,
         states: &mut FlowState,
         pending: PendingToolState,
@@ -730,7 +730,7 @@ pub(crate) fn maybe_inject_turn_budget_message(
     client: &dyn Client,
     agent_name: &str,
     session_id: &str,
-    history: &FlowHistory,
+    history: &MessageHistory,
     session_msgs: &mut Vec<Message>,
     turn_offset: usize,
 ) {
@@ -898,6 +898,7 @@ impl FlowGraph {
             ClientOutput::ToolCalls { thought, calls } => {
                 tracing::debug!(agent = %agent_name, tool_calls = calls.len(), "agent issued tool calls");
                 let atc_msg = Message {
+                    key: None,
                     role: Role::AssistantToolCalls {
                         calls: calls.clone(),
                     },
@@ -995,7 +996,7 @@ impl FlowGraph {
         &self,
         services: StepServices<'_>,
         ctx: Context,
-        history: &mut FlowHistory,
+        history: &mut MessageHistory,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {
         states.last_step_was_effect = false;
@@ -1105,7 +1106,7 @@ impl FlowGraph {
         &self,
         services: StepServices<'_>,
         ctx: Context,
-        history: &mut FlowHistory,
+        history: &mut MessageHistory,
         mut resumption: Option<Value>,
         states: &mut FlowState,
     ) -> Result<FlowStep, FlowError> {

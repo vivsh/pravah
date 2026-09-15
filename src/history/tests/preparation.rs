@@ -1,11 +1,11 @@
 use crate::clients::{Message, Role};
-use crate::history::{FlowHistory, HistoryReplacement, protected_start, validate_message_groups};
+use crate::history::{CompactionResult, MessageHistory, protected_start, validate_message_groups};
 
 use super::support::*;
 
 /// Builds two complete exchanges followed by one protected user input.
-fn conversation() -> FlowHistory {
-    let mut history = FlowHistory::new();
+fn conversation() -> MessageHistory {
+    let mut history = MessageHistory::new();
     push_user(&mut history, "s", "old");
     push_tool_calls(&mut history, "s", vec![tool_call("a"), tool_call("b")]);
     push_tool(&mut history, "s", "b");
@@ -18,8 +18,8 @@ fn conversation() -> FlowHistory {
 }
 
 fn replace(
-    history: &mut FlowHistory,
-    decision: HistoryReplacement,
+    history: &mut MessageHistory,
+    decision: CompactionResult,
 ) -> Result<Vec<Message>, String> {
     let owned = history
         .session_entries("s")
@@ -27,7 +27,7 @@ fn replace(
         .cloned()
         .collect::<Vec<_>>();
     let refs = owned.iter().collect::<Vec<_>>();
-    history.replace_prepared_history("s", &refs, decision)
+    history.replace_compacted_history("s", &refs, decision)
 }
 
 /// Rejects malformed decisions and partial exchanges without changing any serialized field.
@@ -49,7 +49,7 @@ fn invalid_replacements_are_atomic() {
         let before = serde_json::to_value(&history).expect("encode history");
         let result = replace(
             &mut history,
-            HistoryReplacement {
+            CompactionResult {
                 evict_indices,
                 summary: summary.map(str::to_owned),
             },
@@ -76,7 +76,7 @@ fn replacement_preserves_accounting_identity_and_session_isolation() {
     let next_position = history.entries().last().expect("last entry").position + 1;
     let messages = replace(
         &mut history,
-        HistoryReplacement {
+        CompactionResult {
             evict_indices: (0..5).collect(),
             summary: Some("memory".into()),
         },
@@ -112,10 +112,10 @@ fn stale_observations_are_rejected_without_mutation() {
     let before = serde_json::to_value(&history).expect("encode history");
     assert!(
         history
-            .replace_prepared_history(
+            .replace_compacted_history(
                 "s",
                 &old.iter().collect::<Vec<_>>(),
-                HistoryReplacement::default()
+                CompactionResult::default()
             )
             .is_err()
     );
@@ -133,9 +133,9 @@ fn preparation_prunes_old_tombstones_only_in_its_session() {
     let mut entries = history.entries().to_vec();
     entries[0].evicted = true;
     entries.last_mut().expect("last entry").evicted = true;
-    let mut history = FlowHistory::from_entries(entries);
+    let mut history = MessageHistory::from_entries(entries);
     let before = history.entries().len();
-    replace(&mut history, HistoryReplacement::default()).expect("valid preparation");
+    replace(&mut history, CompactionResult::default()).expect("valid preparation");
     assert_eq!(history.entries().len(), before - 1);
     assert!(history.entries().last().expect("other session").evicted);
 }
@@ -149,7 +149,7 @@ fn current_tool_exchange_is_protected() {
     let entries = history.session_entries("s");
     assert_eq!(protected_start(&entries), 7);
     assert_eq!(entries.len() - protected_start(&entries), 3);
-    let mut no_user = FlowHistory::new();
+    let mut no_user = MessageHistory::new();
     push_assistant(&mut no_user, "s", None);
     assert_eq!(protected_start(&no_user.session_entries("s")), 0);
 }
@@ -158,7 +158,7 @@ fn current_tool_exchange_is_protected() {
 #[test]
 fn tool_group_validation_is_complete() {
     for invalid_case in 0..5 {
-        let mut history = FlowHistory::new();
+        let mut history = MessageHistory::new();
         match invalid_case {
             0 => push_tool(&mut history, "s", "orphan"),
             1 => push_tool_calls(&mut history, "s", vec![tool_call("a"), tool_call("a")]),

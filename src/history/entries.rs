@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::compactor::CompactionResult;
+use super::legacy_compactor;
 use crate::clients::{ClientError, Message, Role, TokenUsage};
 
 mod replacement;
@@ -9,7 +9,7 @@ mod replacement;
 pub(crate) use replacement::{protected_start, validate_message_groups};
 
 /// One history row with Pravah metadata around a wire-format [`Message`].
-/// External code should create entries through [`FlowHistory::push`].
+/// External code should create entries through [`MessageHistory::push`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     /// Stable row id for persistence.
@@ -42,7 +42,7 @@ impl HistoryEntry {
 /// Runtime conversation history and cumulative usage for all agent sessions.
 /// Preparation may replace completed exchanges; counters retain their original usage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct FlowHistory {
+pub struct MessageHistory {
     entries: Vec<HistoryEntry>,
     next_position: u64,
     last_usage: Option<TokenUsage>,
@@ -50,13 +50,47 @@ pub struct FlowHistory {
     total_output: Option<u32>,
 }
 
-impl FlowHistory {
+impl MessageHistory {
     /// Creates an empty history with zeroed counters.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Reconstructs a [`FlowHistory`] from a flat list of stored entries.
+    /// Borrows live non-tool messages oldest-first, omitting the newest `skip_recent` non-tool messages.
+    /// Indices refer to all live session entries, including tools; they are not stable row identities.
+    /// This selection does not authorize eviction of partial exchanges or tool groups.
+    pub fn enum_messages<'a>(
+        &'a self,
+        session_id: &'a str,
+        skip_recent: usize,
+    ) -> impl Iterator<Item = (usize, &'a Message)> {
+        super::inspection::enum_messages(self.live_messages(session_id), skip_recent)
+    }
+
+    /// Returns the compact JSON array size of all live session messages, including tool data.
+    /// Includes keys, usage and attachment metadata/data, but not HistoryEntry metadata or file contents.
+    /// This is not provider request size or token count; serialization/size overflow can fail.
+    pub fn byte_size(&self, session_id: &str) -> Result<usize, serde_json::Error> {
+        super::inspection::byte_size(self.live_messages(session_id))
+    }
+
+    /// Counts live user exchanges with a final assistant reply; tool rounds and summaries add no turns.
+    /// Does not validate message groups or change cumulative provider usage counters.
+    pub fn turn_count(&self, session_id: &str) -> usize {
+        super::inspection::turn_count(self.live_messages(session_id))
+    }
+
+    fn live_messages<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> impl Iterator<Item = &'a Message> + Clone {
+        self.entries
+            .iter()
+            .filter(move |entry| !entry.evicted && entry.session_id == session_id)
+            .map(|entry| &entry.message)
+    }
+
+    /// Reconstructs a [`MessageHistory`] from a flat list of stored entries.
     ///
     /// Use this when loading row-per-entry data from a relational database.
     /// Token totals are recomputed only from the provided entries; if evicted
@@ -120,7 +154,7 @@ impl FlowHistory {
     }
 
     /// Returns the live entries for one session.
-    /// Pass this exact slice back to [`apply_compaction`](FlowHistory::apply_compaction).
+    /// Pass this exact slice back to [`apply_compaction`](MessageHistory::apply_compaction).
     pub fn session_entries(&self, session_id: &str) -> Vec<&HistoryEntry> {
         self.entries
             .iter()
@@ -161,13 +195,13 @@ impl FlowHistory {
     }
 
     /// Applies one compaction decision.
-    /// `session_slice` must match the slice returned by [`session_entries`](FlowHistory::session_entries).
+    /// `session_slice` must match the slice returned by [`session_entries`](MessageHistory::session_entries).
     /// Returns an error when a compactor reports an out-of-bounds index.
     pub fn apply_compaction(
         &mut self,
         session_id: &str,
         session_slice: &[&HistoryEntry],
-        result: CompactionResult,
+        result: legacy_compactor::CompactionResult,
     ) -> Result<(), ClientError> {
         if result.evict_indices.is_empty() && result.summary.is_none() {
             return Ok(());

@@ -265,7 +265,7 @@ Snapshots preserve remaining items and partial results during iteration.
   item to the next.
 
 - **Completed sessions are not compacted.** History compaction only runs over
-  live frames. For large fan-outs over agent-heavy sub-flows, `FlowHistory`
+  live frames. For large fan-outs over agent-heavy sub-flows, `MessageHistory`
   grows unboundedly until the runtime is dropped.
 
 - **Sequential only.** Items are processed in order, one at a time. There is no

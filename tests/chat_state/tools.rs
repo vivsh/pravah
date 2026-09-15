@@ -2,8 +2,7 @@ use super::*;
 use pravah::testing::mock_tool_call;
 use pravah::tools::ToolError;
 use pravah::{
-    AgentDecision, AgentLoop, Flow, HistoryPreparation, HistoryPreparer, HistoryReplacement,
-    Toolset,
+    AgentDecision, AgentLoop, CompactionRequest, CompactionResult, Compactor, Flow, Toolset,
 };
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -21,14 +20,14 @@ fn researcher(root: Agent<String>) -> Agent<String> {
 }
 
 struct Summarize;
-impl HistoryPreparer for Summarize {
+impl Compactor for Summarize {
     type Error = std::convert::Infallible;
-    async fn prepare(
+    async fn compact(
         &self,
-        input: HistoryPreparation<'_>,
+        input: CompactionRequest<'_>,
         _ctx: Context,
-    ) -> Result<HistoryReplacement, Self::Error> {
-        Ok(HistoryReplacement {
+    ) -> Result<CompactionResult, Self::Error> {
+        Ok(CompactionResult {
             evict_indices: (0..input.committed().len()).collect(),
             summary: (!input.committed().is_empty()).then(|| "prior conversation".into()),
         })
@@ -49,9 +48,9 @@ async fn tools_and_history_preparation_do_not_touch_state() -> Result<(), TestEr
     let state = vec![vec!["private-state".repeat(100); 16]; 16];
     let mut chat = Chat::with_state(researcher, state, context(script.clone()))
         .await?
-        .with_history_preparer(Summarize);
+        .with_compactor(Summarize);
     let before = serde_json::to_value(chat.snapshot()?)?;
-    chat.send("first".into()).await?;
+    chat.send("first").await?;
     for snapshot in roundtrips(&chat.snapshot()?)? {
         let restored = Chat::<String, String, Vec<Vec<String>>>::from_snapshot(
             researcher,
@@ -60,7 +59,7 @@ async fn tools_and_history_preparation_do_not_touch_state() -> Result<(), TestEr
         )?;
         assert_eq!(restored.get()?, chat.get()?);
     }
-    chat.send("second".into()).await?;
+    chat.send("second").await?;
     let after = serde_json::to_value(chat.snapshot()?)?;
     assert_eq!(
         before.pointer("/state/frames/0/variables"),
@@ -100,7 +99,7 @@ async fn nested_suspensions_are_distinct() -> Result<(), TestError> {
         )]);
         let mut chat = Chat::with_state(agent, initial_state(), context(script)).await?;
         assert!(matches!(
-            chat.send("question".into()).await,
+            chat.send("question").await,
             Err(GraphError::ChatSuspended)
         ));
         let before = serde_json::to_value(chat.snapshot()?)?;
@@ -109,7 +108,7 @@ async fn nested_suspensions_are_distinct() -> Result<(), TestError> {
             Err(GraphError::ChatNotReady { .. })
         ));
         assert!(matches!(
-            chat.send("another".into()).await,
+            chat.send("another").await,
             Err(GraphError::ChatNotReady { .. })
         ));
         assert_eq!(chat.get()?, initial_state());

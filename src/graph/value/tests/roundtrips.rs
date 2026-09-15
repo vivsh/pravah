@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::*;
+use super::super::*;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Fixture {

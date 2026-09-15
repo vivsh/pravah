@@ -59,10 +59,15 @@ pub(super) fn apply_control_state(
 
 /// Applies guidance and a deterministic subset of configured tools.
 pub(super) fn apply_directive(
-    payload: &AgentPayload,
+    payload: &AgentPayloadView<'_>,
     checkpoint: &mut EdgeAgentCheckpoint,
     directive: AgentDirective,
 ) -> Result<(), GraphError> {
+    if let Some(filter) = &directive.tool_filter {
+        filter
+            .validate_names(checkpoint.resolved.tools.iter().map(String::as_str))
+            .map_err(GraphError::AgentControlValidation)?;
+    }
     if let Some(guidance) = directive.guidance {
         checkpoint.guidance = Some(guidance);
     }
@@ -82,7 +87,7 @@ pub(super) fn apply_directive(
 
 /// Validates resume-selected identities and restores prepared tool order.
 fn validate_explicit_tools(
-    payload: &AgentPayload,
+    payload: &AgentPayloadView<'_>,
     checkpoint: &EdgeAgentCheckpoint,
     names: Vec<String>,
 ) -> Result<Vec<String>, GraphError> {
@@ -130,13 +135,13 @@ pub(super) fn checkpoint_point(phase: &EdgeAgentPhase) -> Option<AgentInterventi
 
 /// Builds a continuation-owned suspension retaining the current checkpoint.
 pub(super) fn suspend_agent(
-    payload: &AgentPayload,
+    payload: &AgentPayloadView<'_>,
     checkpoint: &EdgeAgentCheckpoint,
     point: AgentInterventionPoint,
     value: Value,
 ) -> Result<ContinuationTransition, GraphError> {
     let envelope = AgentSuspension::new(
-        payload.agent_id.clone(),
+        payload.agent_id.to_owned(),
         checkpoint.session_id.clone(),
         point,
         value,

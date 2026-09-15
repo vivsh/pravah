@@ -50,6 +50,7 @@ pub(super) fn assistant_tool_call_message(
         })
         .collect::<Result<Vec<_>, GraphError>>()?;
     Ok(Message {
+        key: None,
         role: Role::AssistantToolCalls { calls },
         content: thought.unwrap_or_default(),
         attachments: Vec::new(),
@@ -146,7 +147,7 @@ pub(super) fn add_executable_call(
 
 /// Removes the active call matching one returned continuation child identity.
 pub(super) fn take_active_call(
-    payload: &AgentPayload,
+    payload: &AgentPayloadView<'_>,
     checkpoint: &mut EdgeAgentCheckpoint,
     call_id: &str,
 ) -> Result<EdgeActiveToolCall, GraphError> {

@@ -14,11 +14,11 @@ use crate::clients::{
 };
 use crate::context::Context;
 use crate::history::{
-    DynHistoryCompactor, DynHistoryStore, FlowHistory, HistoryCompactor, HistoryEntry,
-    HistoryStore, NoopCompactor, NoopHistoryStore,
+    DynHistoryCompactor, DynHistoryStore, HistoryCompactor, HistoryEntry, HistoryStore,
+    MessageHistory, NoopCompactor, NoopHistoryStore,
 };
 
-/// Agent-id label used when pushing messages into [`FlowHistory`].
+/// Agent-id label used when pushing messages into [`MessageHistory`].
 const CHAT_AGENT_ID: &str = "chat";
 
 /// Error returned by compatibility-only [`Chat`] operations.
@@ -209,7 +209,7 @@ where
     pub session_id: String,
     pub url: String,
     pub options: ClientOptions,
-    pub history: FlowHistory,
+    pub history: MessageHistory,
     _types: PhantomData<(Input, Output)>,
 }
 
@@ -295,7 +295,7 @@ impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
             url: self.url,
             options,
             client,
-            history: FlowHistory::new(),
+            history: MessageHistory::new(),
             compactor: self.compactor,
             store: self.store,
             memory: self.memory,
@@ -304,7 +304,7 @@ impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
     }
 }
 
-/// Compatibility-only single-conversation chat backed by [`FlowHistory`].
+/// Compatibility-only single-conversation chat backed by [`MessageHistory`].
 ///
 /// `Chat<String, String>` is plain text chat. Any non-`String` input or output
 /// type switches the session into JSON mode for that side.
@@ -324,7 +324,7 @@ where
     url: String,
     options: ClientOptions,
     client: Box<dyn Client>,
-    history: FlowHistory,
+    history: MessageHistory,
     compactor: Box<dyn DynHistoryCompactor>,
     store: Box<dyn DynHistoryStore>,
     memory: Box<dyn DynMemoryFactory>,
@@ -390,7 +390,7 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
     }
 
     /// Borrows the full conversation history for this session.
-    pub fn history(&self) -> &FlowHistory {
+    pub fn history(&self) -> &MessageHistory {
         &self.history
     }
 
@@ -449,6 +449,7 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
             msgs.insert(
                 0,
                 Message {
+                    key: None,
                     role: Role::System,
                     content: text,
                     attachments: Vec::new(),

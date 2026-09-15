@@ -75,6 +75,7 @@ impl Agent for VisionPrompt {
 
     fn to_message(self, _ctx: &Context) -> Result<Message, FlowError> {
         Ok(Message {
+            key: None,
             role: Role::User,
             content: self.prompt,
             attachments: vec![Attachment::File {

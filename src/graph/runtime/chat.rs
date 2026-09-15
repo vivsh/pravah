@@ -1,6 +1,87 @@
 use super::*;
 
 impl Runtime {
+    /// Locates the Chat agent through the bootstrap edge's authored consumer relationship.
+    fn chat_agent_node(
+        &self,
+        boundaries: &[NodeId; 2],
+    ) -> Result<&crate::graph::model::Node, GraphError> {
+        let frame = self.frame(0)?;
+        let graph = &self
+            .callables
+            .get(frame.graph_index)
+            .ok_or_else(|| GraphError::SnapshotValidation("missing Chat root graph".into()))?
+            .graph;
+        let bootstrap = graph
+            .node(boundaries[0])
+            .ok_or_else(|| GraphError::SnapshotValidation("missing Chat bootstrap".into()))?;
+        let edge = bootstrap
+            .outputs
+            .first()
+            .and_then(|edge| graph.edge(*edge))
+            .ok_or_else(|| GraphError::SnapshotValidation("missing Chat input edge".into()))?;
+        let mut agents = edge
+            .consumers
+            .iter()
+            .filter_map(|id| graph.node(*id))
+            .filter(|node| matches!(node.kind, NodeKind::Continuation { .. }));
+        let agent = agents
+            .next()
+            .ok_or_else(|| GraphError::SnapshotValidation("missing Chat agent".into()))?;
+        if agents.next().is_some() {
+            return Err(GraphError::SnapshotValidation(
+                "ambiguous Chat agent".into(),
+            ));
+        }
+        Ok(agent)
+    }
+
+    /// Borrows authored configuration/tool metadata without caching a second copy.
+    pub(crate) fn chat_agent_payload(
+        &self,
+        boundaries: &[NodeId; 2],
+    ) -> Result<&Value, GraphError> {
+        match &self.chat_agent_node(boundaries)?.kind {
+            NodeKind::Continuation { payload, .. } => Ok(payload),
+            _ => Err(GraphError::SnapshotValidation(
+                "Chat agent is not a continuation".into(),
+            )),
+        }
+    }
+
+    /// Checks present boundary values and active invocation input without advancing execution.
+    pub(crate) fn validate_chat_inputs(
+        &self,
+        boundaries: &[NodeId; 2],
+        validate: impl Fn(&Value) -> Result<(), GraphError>,
+    ) -> Result<(), GraphError> {
+        let frame = self.frame(0)?;
+        let graph = &self
+            .callables
+            .get(frame.graph_index)
+            .ok_or_else(|| GraphError::SnapshotValidation("missing Chat graph".into()))?
+            .graph;
+        for boundary in boundaries {
+            let edge = graph
+                .node(*boundary)
+                .and_then(|node| node.outputs.first())
+                .ok_or_else(|| {
+                    GraphError::SnapshotValidation("missing Chat boundary output".into())
+                })?;
+            if let Some(Some(value)) = frame.values.get(edge.0) {
+                validate(value)?;
+            }
+        }
+        let agent = self.chat_agent_node(boundaries)?;
+        if let Some(Some(checkpoint)) = frame.checkpoints.get(agent.id.0) {
+            let input = checkpoint.get("input").ok_or_else(|| {
+                GraphError::SnapshotValidation("missing Chat checkpoint input".into())
+            })?;
+            validate(input)?;
+        }
+        Ok(())
+    }
+
     /// Recognizes an idle root chat boundary without retaining another lifecycle flag.
     pub(crate) fn chat_ready(&self, boundaries: &[NodeId]) -> bool {
         let Some(frame) = self.state.frames.first() else {

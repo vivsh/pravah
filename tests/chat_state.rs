@@ -88,7 +88,7 @@ async fn state_is_part_of_the_existing_snapshot() -> Result<(), TestError> {
         project: "private".into(),
         visits: 1,
     })?;
-    assert_eq!(chat.send("question".into()).await?.output, "first");
+    assert_eq!(chat.send("question").await?.output, "first");
     let snapshot: Snapshot = serde_json::from_slice(&serde_json::to_vec(&chat.snapshot()?)?)?;
     let fresh = ScriptedFactory::new().then_output(json!("second"));
     let mut restored = Chat::<String, String, Session>::from_snapshot(
@@ -97,7 +97,7 @@ async fn state_is_part_of_the_existing_snapshot() -> Result<(), TestError> {
         context(fresh.clone()),
     )?;
     assert_eq!(restored.get()?.visits, 1);
-    assert_eq!(restored.send("again".into()).await?.output, "second");
+    assert_eq!(restored.send("again").await?.output, "second");
     assert_eq!(restored.get()?.project, "private");
     assert!(!serde_json::to_string(restored.snapshot()?.history())?.contains("private"));
     assert_eq!(script.calls().len(), 1);

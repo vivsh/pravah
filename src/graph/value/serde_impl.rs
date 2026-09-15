@@ -621,11 +621,11 @@ fn key_error() -> ValueError {
     ValueError::Unsupported("runtime object keys must be strings or scalar identifiers".into())
 }
 
-struct OwnedSeq {
-    values: std::vec::IntoIter<Value>,
+struct ValueSeq<'a> {
+    values: std::slice::Iter<'a, Value>,
 }
 
-impl<'de> SeqAccess<'de> for OwnedSeq {
+impl<'de> SeqAccess<'de> for ValueSeq<'_> {
     type Error = ValueError;
     fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
     where
@@ -641,12 +641,12 @@ impl<'de> SeqAccess<'de> for OwnedSeq {
     }
 }
 
-struct OwnedMap {
-    entries: std::vec::IntoIter<(Arc<str>, Value)>,
-    value: Option<Value>,
+struct ValueMap<'a> {
+    entries: std::slice::Iter<'a, (Arc<str>, Value)>,
+    value: Option<&'a Value>,
 }
 
-impl<'de> MapAccess<'de> for OwnedMap {
+impl<'de> MapAccess<'de> for ValueMap<'_> {
     type Error = ValueError;
     fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
     where
@@ -656,7 +656,7 @@ impl<'de> MapAccess<'de> for OwnedMap {
             return Ok(None);
         };
         self.value = Some(value);
-        seed.deserialize(OwnedKey(key)).map(Some)
+        seed.deserialize(ValueKey(key)).map(Some)
     }
     fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
     where
@@ -673,9 +673,9 @@ impl<'de> MapAccess<'de> for OwnedMap {
     }
 }
 
-struct OwnedKey(Arc<str>);
+struct ValueKey<'a>(&'a str);
 
-impl<'de> Deserializer<'de> for OwnedKey {
+impl<'de> Deserializer<'de> for ValueKey<'_> {
     type Error = ValueError;
 
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -689,7 +689,7 @@ impl<'de> Deserializer<'de> for OwnedKey {
     where
         V: Visitor<'de>,
     {
-        visitor.visit_str(self.0.as_ref())
+        visitor.visit_str(self.0)
     }
 
     serde::forward_to_deserialize_any! {
@@ -699,14 +699,14 @@ impl<'de> Deserializer<'de> for OwnedKey {
     }
 }
 
-struct ValueEnum {
-    variant: String,
-    value: Option<Value>,
+struct ValueEnum<'a> {
+    variant: &'a str,
+    value: Option<&'a Value>,
 }
 
-impl<'de> EnumAccess<'de> for ValueEnum {
+impl<'a, 'de> EnumAccess<'de> for ValueEnum<'a> {
     type Error = ValueError;
-    type Variant = ValueVariant;
+    type Variant = ValueVariant<'a>;
     fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
     where
         V: de::DeserializeSeed<'de>,
@@ -716,11 +716,11 @@ impl<'de> EnumAccess<'de> for ValueEnum {
     }
 }
 
-struct ValueVariant {
-    value: Option<Value>,
+struct ValueVariant<'a> {
+    value: Option<&'a Value>,
 }
 
-impl<'de> VariantAccess<'de> for ValueVariant {
+impl<'de> VariantAccess<'de> for ValueVariant<'_> {
     type Error = ValueError;
     fn unit_variant(self) -> Result<(), Self::Error> {
         match self.value {
@@ -766,29 +766,25 @@ impl<'de> VariantAccess<'de> for ValueVariant {
     }
 }
 
-impl<'de> Deserializer<'de> for Value {
+impl<'de> Deserializer<'de> for &Value {
     type Error = ValueError;
 
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        match self.0 {
+        match &self.0 {
             Repr::Null => visitor.visit_unit(),
-            Repr::Bool(value) => visitor.visit_bool(value),
-            Repr::I64(value) => visitor.visit_i64(value),
-            Repr::U64(value) => visitor.visit_u64(value),
-            Repr::F64(value) => visitor.visit_f64(value),
-            Repr::String(value) => visitor.visit_string(value.to_string()),
-            Repr::Array(values) => visitor.visit_seq(OwnedSeq {
-                values: Arc::try_unwrap(values)
-                    .unwrap_or_else(|shared| shared.as_ref().clone())
-                    .into_iter(),
+            Repr::Bool(value) => visitor.visit_bool(*value),
+            Repr::I64(value) => visitor.visit_i64(*value),
+            Repr::U64(value) => visitor.visit_u64(*value),
+            Repr::F64(value) => visitor.visit_f64(*value),
+            Repr::String(value) => visitor.visit_str(value),
+            Repr::Array(values) => visitor.visit_seq(ValueSeq {
+                values: values.iter(),
             }),
-            Repr::Object(entries) => visitor.visit_map(OwnedMap {
-                entries: Arc::try_unwrap(entries)
-                    .unwrap_or_else(|shared| shared.as_ref().clone())
-                    .into_iter(),
+            Repr::Object(entries) => visitor.visit_map(ValueMap {
+                entries: entries.iter(),
                 value: None,
             }),
         }
@@ -814,16 +810,16 @@ impl<'de> Deserializer<'de> for Value {
     where
         V: Visitor<'de>,
     {
-        let value = match self.0 {
+        let value = match &self.0 {
             Repr::String(variant) => ValueEnum {
-                variant: variant.to_string(),
+                variant,
                 value: None,
             },
             Repr::Object(entries) if entries.len() == 1 => {
                 let (variant, value) = &entries[0];
                 ValueEnum {
-                    variant: variant.to_string(),
-                    value: Some(value.clone()),
+                    variant,
+                    value: Some(value),
                 }
             }
             _ => {
@@ -844,6 +840,40 @@ impl<'de> Deserializer<'de> for Value {
         V: Visitor<'de>,
     {
         visitor.visit_newtype_struct(self)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf unit unit_struct seq tuple tuple_struct map struct identifier ignored_any
+    }
+}
+
+impl<'de> Deserializer<'de> for Value {
+    type Error = ValueError;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        (&self).deserialize_any(visitor)
+    }
+
+    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        (&self).deserialize_option(visitor)
+    }
+
+    fn deserialize_enum<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        (&self).deserialize_enum(name, variants, visitor)
+    }
+
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        (&self).deserialize_newtype_struct(name, visitor)
     }
 
     serde::forward_to_deserialize_any! {

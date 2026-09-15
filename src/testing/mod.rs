@@ -10,14 +10,14 @@ pub use client::{
 };
 pub use store::CapturingHistoryStore;
 
-use crate::history::{FlowHistory, HistoryEntry};
+use crate::history::{HistoryEntry, MessageHistory};
 
 /// Returns the number of live history entries for `session_id`.
-pub fn session_message_count(history: &FlowHistory, session_id: &str) -> usize {
+pub fn session_message_count(history: &MessageHistory, session_id: &str) -> usize {
     history.session_entries(session_id).len()
 }
 
 /// Returns the live [`HistoryEntry`] values for `session_id`.
-pub fn session_entries<'a>(history: &'a FlowHistory, session_id: &str) -> Vec<&'a HistoryEntry> {
+pub fn session_entries<'a>(history: &'a MessageHistory, session_id: &str) -> Vec<&'a HistoryEntry> {
     history.session_entries(session_id)
 }

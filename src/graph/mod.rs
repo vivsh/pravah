@@ -48,7 +48,7 @@ pub use agent::{
     McpResourceRef, ToolFilter, ToolInfo, Toolset,
 };
 pub use builder::UntypedGraphBuilder;
-pub use chat::{Chat, ChatTurn};
+pub use chat::{Chat, ChatBuilder, ChatRequest, ChatTurn};
 pub use diagram::GraphDiagram;
 pub use error::GraphError;
 pub use ids::{EdgeId, HandlerKey, MarkId, NodeId, VarId};

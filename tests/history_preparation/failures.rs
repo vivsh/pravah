@@ -7,14 +7,14 @@ struct PreparationFailure;
 
 struct Failing;
 
-impl HistoryPreparer for Failing {
+impl Compactor for Failing {
     type Error = PreparationFailure;
 
-    async fn prepare(
+    async fn compact(
         &self,
-        _request: HistoryPreparation<'_>,
+        _request: CompactionRequest<'_>,
         _ctx: Context,
-    ) -> Result<HistoryReplacement, Self::Error> {
+    ) -> Result<CompactionResult, Self::Error> {
         Err(PreparationFailure)
     }
 }
@@ -23,15 +23,15 @@ struct Invalid {
     indices: Vec<usize>,
 }
 
-impl HistoryPreparer for Invalid {
+impl Compactor for Invalid {
     type Error = std::convert::Infallible;
 
-    async fn prepare(
+    async fn compact(
         &self,
-        _request: HistoryPreparation<'_>,
+        _request: CompactionRequest<'_>,
         _ctx: Context,
-    ) -> Result<HistoryReplacement, Self::Error> {
-        Ok(HistoryReplacement {
+    ) -> Result<CompactionResult, Self::Error> {
+        Ok(CompactionResult {
             evict_indices: self.indices.clone(),
             summary: None,
         })
@@ -44,7 +44,7 @@ fn workflow(root: Flow<Question>) -> Flow<Answer> {
 
 /// Stops after the user message is recorded, before the first model execution.
 pub(super) async fn before_dispatch(
-    policy: impl HistoryPreparer + 'static,
+    policy: impl Compactor + 'static,
     factory: &ScriptedFactory,
 ) -> Result<Runtime, GraphError> {
     let flow = compile(workflow)?;
@@ -55,7 +55,7 @@ pub(super) async fn before_dispatch(
             },
             Context::default().with_client_factory(factory.clone()),
         )?
-        .with_history_preparer(policy);
+        .with_compactor(policy);
     for _ in 0..10 {
         execution.next().await?;
         if !execution.snapshot()?.history().is_empty() {
@@ -72,7 +72,7 @@ async fn policy_failure_makes_zero_calls_and_preserves_snapshot() -> Result<(), 
     let mut execution = before_dispatch(Failing, &factory).await?;
     let before = execution.snapshot()?;
     match execution.next().await {
-        Err(GraphError::HistoryPreparation { source, .. }) => {
+        Err(GraphError::HistoryCompaction { source, .. }) => {
             assert!(source.is::<PreparationFailure>())
         }
         other => panic!("unexpected preparation outcome: {other:?}"),
@@ -88,7 +88,7 @@ async fn policy_failure_makes_zero_calls_and_preserves_snapshot() -> Result<(), 
             before,
             Context::default().with_client_factory(factory.clone()),
         )?
-        .with_history_preparer(Summarize);
+        .with_compactor(Summarize);
     for _ in 0..10 {
         if matches!(restored.next().await?, Step::Done(_)) {
             break;
@@ -107,7 +107,7 @@ async fn runtime_rejects_protected_and_out_of_range_eviction() -> Result<(), Gra
         let before = serde_json::to_value(execution.snapshot()?).expect("snapshot");
         assert!(matches!(
             execution.next().await,
-            Err(GraphError::HistoryPreparationValidation { .. })
+            Err(GraphError::HistoryCompactionValidation { .. })
         ));
         assert_eq!(
             serde_json::to_value(execution.snapshot()?).expect("snapshot"),

@@ -46,7 +46,7 @@ pub enum AgentContinuation {
 ///   in the parent frame's `keep_alive_sessions` map.
 ///
 /// - Completed sub-flow sessions are only compacted while still active, so a
-///   long fan-out over agent-heavy sub-flows can grow `FlowHistory` until the
+///   long fan-out over agent-heavy sub-flows can grow `MessageHistory` until the
 ///   outer runtime is dropped.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub(crate) struct EachState {

@@ -31,8 +31,8 @@ async fn state_conversion_occurs_only_at_explicit_boundaries() -> Result<(), Tes
     let mut chat = Chat::with_state(assistant, state, context(script)).await?;
     assert_eq!(ENCODED.load(Ordering::SeqCst), 1);
     assert_eq!(DECODED.load(Ordering::SeqCst), 0);
-    chat.send("one".into()).await?;
-    chat.send("two".into()).await?;
+    chat.send("one").await?;
+    chat.send("two").await?;
     let _copies = roundtrips(&chat.snapshot()?)?;
     assert_eq!(ENCODED.load(Ordering::SeqCst), 1);
     assert_eq!(DECODED.load(Ordering::SeqCst), 0);

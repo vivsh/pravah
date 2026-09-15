@@ -1,4 +1,4 @@
-use crate::history::FlowHistory;
+use crate::history::MessageHistory;
 use crate::legacy::{HistoryCompactor, NoopCompactor, SlidingWindowCompactor};
 
 use super::support::{push_assistant, push_tool, push_tool_calls, tool_call};
@@ -6,7 +6,7 @@ use super::support::{push_assistant, push_tool, push_tool_calls, tool_call};
 /// Verifies that the no-op compactor never selects history for eviction.
 #[test]
 fn noop_never_evicts() {
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     push_tool_calls(&mut history, "s1", vec![tool_call("1")]);
     push_tool(&mut history, "s1", "1");
     let owned: Vec<_> = history.session_entries("s1").into_iter().cloned().collect();
@@ -31,7 +31,7 @@ fn sliding_window_evicts_oldest_turn() {
 /// Verifies that an incomplete tool turn is retained even with a zero-turn window.
 #[test]
 fn incomplete_tool_turn_is_not_evicted() {
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     push_tool_calls(&mut history, "s1", vec![tool_call("a"), tool_call("b")]);
     push_tool(&mut history, "s1", "a");
     let owned: Vec<_> = history.session_entries("s1").into_iter().cloned().collect();
@@ -46,7 +46,7 @@ fn incomplete_tool_turn_is_not_evicted() {
 /// Verifies that plain assistant responses count as complete compactable turns.
 #[test]
 fn plain_assistant_turn_is_evicted() {
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     push_assistant(&mut history, "s1", None);
     push_assistant(&mut history, "s1", None);
     let owned: Vec<_> = history.session_entries("s1").into_iter().cloned().collect();
@@ -61,7 +61,7 @@ fn plain_assistant_turn_is_evicted() {
 /// Verifies that compaction decisions remain isolated to the supplied session.
 #[test]
 fn compactor_ignores_other_sessions() {
-    let mut history = FlowHistory::new();
+    let mut history = MessageHistory::new();
     push_tool_calls(&mut history, "s1", vec![tool_call("1")]);
     push_tool(&mut history, "s1", "1");
     push_tool_calls(&mut history, "s2", vec![tool_call("2")]);
@@ -78,8 +78,8 @@ fn compactor_ignores_other_sessions() {
 }
 
 /// Builds two complete tool-call turns for compactor selection tests.
-fn two_tool_turn_history() -> FlowHistory {
-    let mut history = FlowHistory::new();
+fn two_tool_turn_history() -> MessageHistory {
+    let mut history = MessageHistory::new();
     push_tool_calls(&mut history, "s1", vec![tool_call("1")]);
     push_tool(&mut history, "s1", "1");
     push_tool_calls(&mut history, "s1", vec![tool_call("2")]);

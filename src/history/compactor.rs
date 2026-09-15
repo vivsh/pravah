@@ -1,154 +1,125 @@
 use async_trait::async_trait;
 
-use super::entries::HistoryEntry;
-use crate::clients::{Message, Role};
+use crate::Context;
+use crate::clients::{ClientOptions, Message};
+use crate::graph::GraphError;
 
-/// Compaction decision for one session slice.
-/// `evict_indices` are relative to the slice passed into `compact`.
-pub struct CompactionResult {
-    /// Positions (relative to the input slice) of entries to evict.
-    pub evict_indices: Vec<usize>,
-    /// Optional replacement summary message injected after eviction.
-    pub summary: Option<Message>,
+use super::HistoryEntry;
+
+/// Borrowed context for one upcoming model request, before attachment materialization.
+/// Provider wire transformations and exact token counts are not represented here.
+pub struct CompactionRequest<'a> {
+    pub(crate) session_id: &'a str,
+    pub(crate) model: &'a str,
+    pub(crate) options: &'a ClientOptions,
+    pub(crate) framework_messages: &'a [Message],
+    pub(crate) committed: &'a [&'a HistoryEntry],
+    pub(crate) protected: &'a [&'a HistoryEntry],
 }
 
-/// Chooses which history entries to evict for one session.
-/// The runtime always passes entries from a single session.
-pub trait HistoryCompactor: Send + Sync {
-    /// Decides which entries to evict. `entries` are always from one session.
+impl CompactionRequest<'_> {
+    /// Borrows committed non-tool messages, omitting the newest `skip_recent` non-tool messages.
+    /// Indices retain their positions in `committed()`, including gaps for tool entries.
+    /// Protected input is never included; enumeration alone does not select a safe eviction prefix.
+    pub fn enum_messages(&self, skip_recent: usize) -> impl Iterator<Item = (usize, &Message)> {
+        super::inspection::enum_messages(
+            self.committed.iter().map(|entry| &entry.message),
+            skip_recent,
+        )
+    }
+
+    /// Returns the compact JSON array size of all committed messages, including tools and attachments.
+    /// Excludes protected input, framework guidance and entry metadata; not a token or provider-size estimate.
+    /// Serialization or size overflow can fail; no encoded buffer is retained.
+    pub fn byte_size(&self) -> Result<usize, serde_json::Error> {
+        super::inspection::byte_size(self.committed.iter().map(|entry| &entry.message))
+    }
+
+    /// Counts committed user exchanges ending in an assistant reply, not intermediate tool rounds.
+    pub fn turn_count(&self) -> usize {
+        super::inspection::turn_count(self.committed.iter().map(|entry| &entry.message))
+    }
+
+    /// Returns the history session being prepared.
+    pub fn session_id(&self) -> &str {
+        self.session_id
+    }
+
+    /// Returns the invocation's resolved model URL.
+    pub fn model(&self) -> &str {
+        self.model
+    }
+
+    /// Borrows effective client options, including preamble, schemas and active tools.
+    pub fn options(&self) -> &ClientOptions {
+        self.options
+    }
+
+    /// Returns additional guidance in the order it will follow conversation history.
+    pub fn framework_messages(&self) -> &[Message] {
+        self.framework_messages
+    }
+
+    /// Returns prior completed exchanges eligible for prefix replacement.
+    pub fn committed(&self) -> &[&HistoryEntry] {
+        self.committed
+    }
+
+    /// Returns the current user input and its ongoing exchange, which cannot be changed.
+    pub fn protected(&self) -> &[&HistoryEntry] {
+        self.protected
+    }
+}
+
+/// Replaces a sorted, contiguous prefix of `committed()` with optional plain text memory.
+/// An empty decision retains history. A summary requires at least one replaced entry.
+#[derive(Debug, Default)]
+pub struct CompactionResult {
+    /// Zero-based indices of committed entries; must be exactly `0..n`.
+    pub evict_indices: Vec<usize>,
+    /// Non-empty memory text, rendered as a tagged system message before retained history.
+    pub summary: Option<String>,
+}
+
+/// Fallible application policy invoked once before each model execution attempt.
+/// Errors prevent execution and leave history unchanged. External work should be idempotent.
+/// The supplied context belongs to the execution, including fresh dependencies after restore.
+pub trait Compactor: Send + Sync {
+    /// Application error preserved as the source of `GraphError::HistoryCompaction`.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Chooses a safe replacement for completed history using the upcoming request context.
+    /// `ctx` provides runtime dependencies; external writes are not atomic with history replacement.
     fn compact(
         &self,
-        session_id: &str,
-        entries: &[&HistoryEntry],
-    ) -> impl std::future::Future<Output = CompactionResult> + Send;
+        request: CompactionRequest<'_>,
+        ctx: Context,
+    ) -> impl std::future::Future<Output = Result<CompactionResult, Self::Error>> + Send;
 }
 
 #[async_trait]
-pub(crate) trait DynHistoryCompactor: Send + Sync {
-    async fn compact_dyn(&self, session_id: &str, entries: &[&HistoryEntry]) -> CompactionResult;
+pub(crate) trait DynCompactor: Send + Sync {
+    async fn compact_dyn(
+        &self,
+        request: CompactionRequest<'_>,
+        ctx: Context,
+    ) -> Result<CompactionResult, GraphError>;
 }
 
 #[async_trait]
-impl<T: HistoryCompactor> DynHistoryCompactor for T {
-    async fn compact_dyn(&self, session_id: &str, entries: &[&HistoryEntry]) -> CompactionResult {
-        self.compact(session_id, entries).await
+impl<T: Compactor> DynCompactor for T {
+    /// Forwards request dependencies and retains the application's error as its source.
+    async fn compact_dyn(
+        &self,
+        request: CompactionRequest<'_>,
+        ctx: Context,
+    ) -> Result<CompactionResult, GraphError> {
+        let session_id = request.session_id;
+        self.compact(request, ctx)
+            .await
+            .map_err(|source| GraphError::HistoryCompaction {
+                session_id: session_id.to_owned(),
+                source: Box::new(source),
+            })
     }
-}
-
-/// Compactor that never evicts — suitable for short sessions or testing.
-pub struct NoopCompactor;
-
-impl HistoryCompactor for NoopCompactor {
-    async fn compact(&self, _session_id: &str, _entries: &[&HistoryEntry]) -> CompactionResult {
-        CompactionResult {
-            evict_indices: vec![],
-            summary: None,
-        }
-    }
-}
-
-/// Drops the oldest complete turns until the session fits the configured window.
-/// Incomplete tool turns are never evicted.
-pub struct SlidingWindowCompactor {
-    /// Maximum number of complete assistant turns to retain per session.
-    pub max_turns_per_session: usize,
-}
-
-impl HistoryCompactor for SlidingWindowCompactor {
-    async fn compact(&self, _session_id: &str, entries: &[&HistoryEntry]) -> CompactionResult {
-        let mut turn_count = count_complete_turns(entries);
-        if turn_count <= self.max_turns_per_session {
-            return CompactionResult {
-                evict_indices: vec![],
-                summary: None,
-            };
-        }
-
-        let mut evict_indices: Vec<usize> = Vec::new();
-        while turn_count > self.max_turns_per_session {
-            match first_complete_turn_indices(entries, &evict_indices) {
-                Some(indices) => {
-                    evict_indices.extend_from_slice(&indices);
-                    turn_count -= 1;
-                }
-                None => break,
-            }
-        }
-
-        CompactionResult {
-            evict_indices,
-            summary: None,
-        }
-    }
-}
-
-/// Counts complete assistant turns in one session slice.
-pub(crate) fn count_complete_turns(entries: &[&HistoryEntry]) -> usize {
-    let mut count = 0;
-    let mut i = 0;
-    while i < entries.len() {
-        match &entries[i].message.role {
-            Role::Assistant => {
-                count += 1;
-                i += 1;
-            }
-            Role::AssistantToolCalls { calls } => {
-                let call_ids: std::collections::HashSet<&str> =
-                    calls.iter().map(|c| c.id.as_str()).collect();
-                let mut found_ids = std::collections::HashSet::new();
-                for entry in entries.iter().skip(i + 1) {
-                    if let Role::Tool { call_id } = &entry.message.role
-                        && call_ids.contains(call_id.as_str())
-                    {
-                        found_ids.insert(call_id.as_str());
-                    }
-                }
-                if found_ids.len() == call_ids.len() {
-                    count += 1;
-                }
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    count
-}
-
-/// Returns the first complete turn not already marked for eviction.
-fn first_complete_turn_indices(
-    entries: &[&HistoryEntry],
-    already_evicted: &[usize],
-) -> Option<Vec<usize>> {
-    for (i, entry) in entries.iter().enumerate() {
-        if already_evicted.contains(&i) {
-            continue;
-        }
-        match &entry.message.role {
-            Role::Assistant => return Some(vec![i]),
-            Role::AssistantToolCalls { calls } => {
-                let call_ids: std::collections::HashSet<&str> =
-                    calls.iter().map(|c| c.id.as_str()).collect();
-                let mut found: Vec<usize> = Vec::new();
-                let mut found_ids = std::collections::HashSet::new();
-                for (j, e2) in entries.iter().enumerate().skip(i + 1) {
-                    if already_evicted.contains(&j) {
-                        continue;
-                    }
-                    if let Role::Tool { call_id } = &e2.message.role
-                        && call_ids.contains(call_id.as_str())
-                    {
-                        found_ids.insert(call_id.as_str());
-                        found.push(j);
-                    }
-                }
-                if found_ids.len() == call_ids.len() {
-                    let mut indices = vec![i];
-                    indices.extend_from_slice(&found);
-                    return Some(indices);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }

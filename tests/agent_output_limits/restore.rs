@@ -19,7 +19,7 @@ async fn snapshots_preserve_caps_with_fresh_dependencies() -> Result<(), TestErr
         let calls = Arc::new(AtomicUsize::new(0));
         let mut restored = flow
             .restore(copy, context(script.clone(), Some(2048)))?
-            .with_history_preparer(ObserveCap {
+            .with_compactor(ObserveCap {
                 calls: calls.clone(),
                 cap: Some(2048),
             });

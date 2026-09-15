@@ -1,8 +1,7 @@
 use pravah::clients::{Message, Role};
 use pravah::testing::ScriptedFactory;
 use pravah::{
-    Agent, AgentConfig, Chat, Context, GraphError, HistoryPreparation, HistoryPreparer,
-    HistoryReplacement,
+    Agent, AgentConfig, Chat, CompactionRequest, CompactionResult, Compactor, Context, GraphError,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -11,6 +10,8 @@ use serde::{Deserialize, Serialize};
 mod context;
 #[path = "history_preparation/failures.rs"]
 mod failures;
+#[path = "history_preparation/inspection.rs"]
+mod inspection;
 #[path = "history_preparation/lifecycle.rs"]
 mod lifecycle;
 #[path = "history_preparation/tools.rs"]
@@ -28,14 +29,14 @@ struct Answer {
 
 struct Summarize;
 
-impl HistoryPreparer for Summarize {
+impl Compactor for Summarize {
     type Error = std::convert::Infallible;
 
-    async fn prepare(
+    async fn compact(
         &self,
-        request: HistoryPreparation<'_>,
+        request: CompactionRequest<'_>,
         _ctx: Context,
-    ) -> Result<HistoryReplacement, Self::Error> {
+    ) -> Result<CompactionResult, Self::Error> {
         assert_eq!(request.model(), "openai:///test");
         assert!(
             request
@@ -49,9 +50,9 @@ impl HistoryPreparer for Summarize {
             Some(Role::User)
         ));
         Ok(if request.committed().is_empty() {
-            HistoryReplacement::default()
+            CompactionResult::default()
         } else {
-            HistoryReplacement {
+            CompactionResult {
                 evict_indices: (0..request.committed().len()).collect(),
                 summary: Some("Prior conversation memory".into()),
             }
@@ -84,7 +85,7 @@ async fn replacement_reaches_client_and_bounds_history() -> Result<(), GraphErro
         Context::default().with_client_factory(factory.clone()),
     )
     .await?
-    .with_history_preparer(Summarize);
+    .with_compactor(Summarize);
     chat.send(Question {
         text: "first question".into(),
     })

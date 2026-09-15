@@ -1,4 +1,4 @@
-//! Fallible working-memory preparation with a deterministic client and summary policy.
+//! Fallible history compaction with message inspection, a deterministic client and summary policy.
 //!
 //! Run with `cargo run --example graph_chat_working_memory --features testing`.
 //! No credentials or network services are required. Supply your own summarizer in an application.
@@ -9,8 +9,8 @@ mod example {
     use pravah::deps::{Deps, DepsError};
     use pravah::testing::ScriptedFactory;
     use pravah::{
-        Agent, AgentConfig, Chat, Context, GraphError, HistoryEntry, HistoryPreparation,
-        HistoryPreparer, HistoryReplacement,
+        Agent, AgentConfig, Chat, CompactionRequest, CompactionResult, Compactor, Context,
+        GraphError,
     };
     use std::sync::Arc;
 
@@ -18,30 +18,36 @@ mod example {
     enum MemoryError {
         #[error(transparent)]
         Dependency(#[from] DepsError),
+        #[error(transparent)]
+        Size(#[from] serde_json::Error),
         #[error("completed history contains no user question")]
         MissingQuestion,
     }
 
     struct WorkingMemory;
 
-    impl HistoryPreparer for WorkingMemory {
+    impl Compactor for WorkingMemory {
         type Error = MemoryError;
 
-        async fn prepare(
+        async fn compact(
             &self,
-            request: HistoryPreparation<'_>,
+            request: CompactionRequest<'_>,
             ctx: Context,
-        ) -> Result<HistoryReplacement, Self::Error> {
-            if request.committed().is_empty() {
-                return Ok(HistoryReplacement::default());
+        ) -> Result<CompactionResult, Self::Error> {
+            if request.turn_count() == 0 {
+                return Ok(CompactionResult::default());
             }
-            // The policy can also inspect request.model(), options(), protected(), and guidance.
+            println!(
+                "Compacting {} completed turns ({} JSON bytes)",
+                request.turn_count(),
+                request.byte_size()?
+            );
             let summary = ctx
                 .deps()
                 .require::<Summarizer>()?
-                .summarize(request.committed())
+                .summarize(request.enum_messages(0).map(|(_, message)| message))
                 .await?;
-            Ok(HistoryReplacement {
+            Ok(CompactionResult {
                 evict_indices: (0..request.committed().len()).collect(),
                 summary: Some(summary),
             })
@@ -52,15 +58,17 @@ mod example {
 
     impl Summarizer {
         /// Keeps one useful fact for this demo; applications supply their own fallible summarizer.
-        async fn summarize(&self, entries: &[&HistoryEntry]) -> Result<String, MemoryError> {
-            let question = entries
-                .iter()
-                .rev()
-                .find(|entry| matches!(entry.message.role, Role::User))
+        async fn summarize<'a>(
+            &self,
+            messages: impl Iterator<Item = &'a Message> + Send,
+        ) -> Result<String, MemoryError> {
+            let question = messages
+                .filter(|message| matches!(message.role, Role::User))
+                .last()
                 .ok_or(MemoryError::MissingQuestion)?;
             Ok(format!(
                 "The previous user request was: {}",
-                question.message.content
+                question.content
             ))
         }
     }
@@ -92,20 +100,14 @@ mod example {
             ScriptedFactory::new().then_output(serde_json::json!("We can plan a Kyoto trip."));
         let mut chat = Chat::new(assistant, context(first))
             .await?
-            .with_history_preparer(WorkingMemory);
-        println!(
-            "{}",
-            chat.send("I'd like to visit Kyoto.".into()).await?.output
-        );
+            .with_compactor(WorkingMemory);
+        println!("{}", chat.send("I'd like to visit Kyoto.").await?.output);
         let checkpoint = chat.snapshot()?;
         let next = ScriptedFactory::new()
             .then_output(serde_json::json!("Start with the eastern temples."));
         let mut chat = Chat::<_, _>::from_snapshot(assistant, checkpoint, context(next.clone()))?
-            .with_history_preparer(WorkingMemory);
-        println!(
-            "{}",
-            chat.send("What should I see first?".into()).await?.output
-        );
+            .with_compactor(WorkingMemory);
+        println!("{}", chat.send("What should I see first?").await?.output);
         if let Some((_, messages)) = next.calls().first() {
             for message in messages {
                 println!("{:?}: {}", message.role, message.content);

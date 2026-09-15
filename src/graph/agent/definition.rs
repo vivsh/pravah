@@ -14,8 +14,15 @@ use super::{AgentConfig, Toolset};
 use crate::graph::error::GraphError;
 use crate::graph::value::{Value, from_value};
 
-type ConfigureCall =
-    dyn Fn(Value, Context) -> BoxFuture<'static, Result<AgentConfig, GraphError>> + Send + Sync;
+mod chat;
+mod configuration;
+#[cfg(test)]
+mod tests;
+pub(crate) use configuration::ConfigurationData;
+
+type ConfigureCall = dyn Fn(Value, Option<Value>, Context) -> BoxFuture<'static, Result<AgentConfig, GraphError>>
+    + Send
+    + Sync;
 
 type ControlCall = dyn Fn(AgentLoopData, Context) -> BoxFuture<'static, Result<AgentDecision, GraphError>>
     + Send
@@ -24,12 +31,14 @@ type ControlCall = dyn Fn(AgentLoopData, Context) -> BoxFuture<'static, Result<A
 #[derive(Clone)]
 pub(crate) struct AgentConfigurator {
     call: Arc<ConfigureCall>,
+    validate_data: fn(Option<&ConfigurationData>) -> Result<(), GraphError>,
 }
 
 impl AgentConfigurator {
     pub(crate) fn missing() -> Self {
         Self {
-            call: Arc::new(|_, _| {
+            validate_data: configuration::validate_absent,
+            call: Arc::new(|_, _, _| {
                 async {
                     Err(GraphError::AgentConfigValidation(
                         "agent configure function is missing".into(),
@@ -44,9 +53,14 @@ impl AgentConfigurator {
     pub(crate) async fn configure(
         &self,
         input: Value,
+        data: Option<&Value>,
         ctx: Context,
     ) -> Result<AgentConfig, GraphError> {
-        (self.call)(input, ctx).await
+        (self.call)(input, data.cloned(), ctx).await
+    }
+
+    pub(crate) fn validate_data(&self, data: Option<&ConfigurationData>) -> Result<(), GraphError> {
+        (self.validate_data)(data)
     }
 }
 
@@ -70,6 +84,7 @@ struct AgentDefinition {
     tools: Toolset,
     controller: Option<AgentController>,
     configure: Option<AgentConfigurator>,
+    configuration: Option<ConfigurationData>,
     errors: Vec<String>,
 }
 
@@ -83,12 +98,21 @@ pub struct Agent<T> {
 }
 
 impl<T> Agent<T> {
+    pub(crate) fn tool_names(&self) -> impl Iterator<Item = &str> {
+        self.definition
+            .tools
+            .tools
+            .iter()
+            .map(|tool| tool.payload.name.as_str())
+    }
+
     pub(crate) fn root() -> Self {
         Self {
             definition: AgentDefinition {
                 tools: Toolset::default(),
                 controller: None,
                 configure: None,
+                configuration: None,
                 errors: Vec::new(),
             },
             _marker: PhantomData,
@@ -173,7 +197,8 @@ impl<T> Agent<T> {
         } else {
             let agent = O::schema_name().into_owned();
             self.definition.configure = Some(AgentConfigurator {
-                call: Arc::new(move |value, ctx| {
+                validate_data: configuration::validate_absent,
+                call: Arc::new(move |value, _, ctx| {
                     let agent = agent.clone();
                     async move {
                         let input = from_value::<T>(value).map_err(|err| {
@@ -205,12 +230,14 @@ impl<T> Agent<T> {
         Toolset,
         Option<AgentController>,
         Option<AgentConfigurator>,
+        Option<ConfigurationData>,
         Vec<String>,
     ) {
         (
             self.definition.tools,
             self.definition.controller,
             self.definition.configure,
+            self.definition.configuration,
             self.definition.errors,
         )
     }

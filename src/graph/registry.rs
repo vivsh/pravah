@@ -8,8 +8,8 @@ use tokio::sync::Mutex;
 use crate::Context;
 use crate::clients::{ClientOptions, Message};
 use crate::history::{
-    DynHistoryPreparer, DynHistoryStore, FlowHistory, HistoryEntry, HistoryPreparation,
-    HistoryPreparer, HistoryStore, NoopHistoryStore, count_complete_turns, protected_start,
+    CompactionRequest, Compactor, DynCompactor, DynHistoryStore, HistoryEntry, HistoryStore,
+    MessageHistory, NoopHistoryStore, count_complete_turns, protected_start,
     validate_message_groups,
 };
 
@@ -21,17 +21,17 @@ use super::value::Value;
 #[derive(Clone)]
 /// Runtime-owned service bundle shared by edge handlers.
 ///
-/// Configure history behavior through `Runtime::with_history_preparer` and
+/// Configure history behavior through `Runtime::with_compactor` and
 /// `Runtime::with_store`; graph serialization never contains these services.
 pub struct RuntimeServices {
-    preparer: Option<Arc<dyn DynHistoryPreparer>>,
+    compactor: Option<Arc<dyn DynCompactor>>,
     store: Arc<dyn DynHistoryStore>,
 }
 
 impl Default for RuntimeServices {
     fn default() -> Self {
         Self {
-            preparer: None,
+            compactor: None,
             store: Arc::new(NoopHistoryStore),
         }
     }
@@ -44,8 +44,8 @@ impl RuntimeServices {
     }
 
     /// Installs the fallible policy run before each model execution, never after output.
-    pub fn with_history_preparer(mut self, preparer: impl HistoryPreparer + 'static) -> Self {
-        self.preparer = Some(Arc::new(preparer));
+    pub fn with_compactor(mut self, compactor: impl Compactor + 'static) -> Self {
+        self.compactor = Some(Arc::new(compactor));
         self
     }
 
@@ -68,14 +68,14 @@ impl RuntimeServices {
 pub struct ContinuationContext {
     ctx: Context,
     services: Arc<RuntimeServices>,
-    history: Arc<Mutex<FlowHistory>>,
+    history: Arc<Mutex<MessageHistory>>,
 }
 
 impl ContinuationContext {
     pub(crate) fn new(
         ctx: Context,
         services: Arc<RuntimeServices>,
-        history: Arc<Mutex<FlowHistory>>,
+        history: Arc<Mutex<MessageHistory>>,
     ) -> Self {
         Self {
             ctx,
@@ -169,18 +169,18 @@ impl ContinuationContext {
 
     /// Prepares and atomically replaces completed session history for one model request.
     /// The returned messages are exactly the successfully prepared history for dispatch.
-    pub(crate) async fn prepare_history(
+    pub(crate) async fn compact_history(
         &self,
         session_id: &str,
         model: &str,
         options: &ClientOptions,
         framework_messages: &[Message],
     ) -> Result<Vec<Message>, GraphError> {
-        let invalid = |reason| GraphError::HistoryPreparationValidation {
+        let invalid = |reason| GraphError::HistoryCompactionValidation {
             session_id: session_id.to_owned(),
             reason,
         };
-        let Some(preparer) = &self.services.preparer else {
+        let Some(compactor) = &self.services.compactor else {
             let messages = self.history_for_session(session_id).await;
             validate_message_groups(&messages).map_err(invalid)?;
             return Ok(messages);
@@ -189,7 +189,7 @@ impl ContinuationContext {
         let refs = owned.iter().collect::<Vec<_>>();
         validate_message_groups(refs.iter().map(|entry| &entry.message)).map_err(invalid)?;
         let (committed, protected) = refs.split_at(protected_start(&refs));
-        let request = HistoryPreparation {
+        let request = CompactionRequest {
             session_id,
             model,
             options,
@@ -197,11 +197,11 @@ impl ContinuationContext {
             committed,
             protected,
         };
-        let result = preparer.prepare_dyn(request, self.ctx.clone()).await?;
+        let result = compactor.compact_dyn(request, self.ctx.clone()).await?;
         self.history
             .lock()
             .await
-            .replace_prepared_history(session_id, &refs, result)
+            .replace_compacted_history(session_id, &refs, result)
             .map_err(invalid)
     }
 }

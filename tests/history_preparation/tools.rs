@@ -35,7 +35,7 @@ async fn configure(question: Question, _ctx: Context) -> Result<AgentConfig, Gra
     Ok(AgentConfig::new(
         "openai:///test",
         "Answer briefly.",
-        Message::user(question.text),
+        Message::user(question.text).with_key("research:42"),
     )
     .memory("known preference")
     .provider_config(serde_json::json!({"setting": true}))
@@ -74,16 +74,25 @@ struct ObserveTools {
     reject_tools: bool,
 }
 
-impl HistoryPreparer for ObserveTools {
+impl Compactor for ObserveTools {
     type Error = std::convert::Infallible;
 
-    async fn prepare(
+    async fn compact(
         &self,
-        request: HistoryPreparation<'_>,
+        request: CompactionRequest<'_>,
         _ctx: Context,
-    ) -> Result<HistoryReplacement, Self::Error> {
+    ) -> Result<CompactionResult, Self::Error> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         assert!(request.committed().is_empty());
+        assert_eq!(
+            request.protected()[0].message.key.as_deref(),
+            Some("research:42")
+        );
+        assert!(
+            request.protected()[1..]
+                .iter()
+                .all(|entry| entry.message.key.is_none())
+        );
         verify_options(request.options());
         if call == 0 {
             assert_eq!(request.options().tools.len(), 1);
@@ -112,7 +121,7 @@ impl HistoryPreparer for ObserveTools {
             );
             assert!(matches!(request.framework_messages()[1].role, Role::User));
         }
-        Ok(HistoryReplacement {
+        Ok(CompactionResult {
             evict_indices: if call > 0 && self.reject_tools {
                 vec![0]
             } else {
@@ -158,7 +167,7 @@ async fn request_view_matches_tool_loop_and_conclusion() -> Result<(), GraphErro
         Context::default().with_client_factory(OverrideFactory(factory.clone())),
     )
     .await?
-    .with_history_preparer(policy.clone());
+    .with_compactor(policy.clone());
     chat.send(Question {
         text: "research".into(),
     })
@@ -185,14 +194,14 @@ async fn tool_loop_rejects_protected_eviction() -> Result<(), GraphError> {
             },
             Context::default().with_client_factory(OverrideFactory(factory.clone())),
         )?
-        .with_history_preparer(ObserveTools {
+        .with_compactor(ObserveTools {
             reject_tools: true,
             ..ObserveTools::default()
         });
     for _ in 0..50 {
         let before = serde_json::to_value(runtime.snapshot()?).expect("snapshot");
         match runtime.next().await {
-            Err(GraphError::HistoryPreparationValidation { .. }) => {
+            Err(GraphError::HistoryCompactionValidation { .. }) => {
                 assert_eq!(
                     serde_json::to_value(runtime.snapshot()?).expect("snapshot"),
                     before

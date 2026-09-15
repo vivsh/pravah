@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
 use super::*;
-use crate::history::HistoryReplacement;
+use crate::history::CompactionResult;
 
 /// Fully validated operation-local changes; never stored in snapshots or runtime services.
-struct ValidatedHistoryReplacement {
+struct ValidatedCompactionResult {
     remove_ids: Vec<Uuid>,
     summary: Option<HistoryEntry>,
 }
@@ -58,14 +58,14 @@ pub(crate) fn validate_message_groups<'a>(
     }
 }
 
-impl FlowHistory {
+impl MessageHistory {
     /// Validates a replacement and returns the exact prepared request history after commit.
     /// Policy and validation failures occur before any mutation, including tombstone pruning.
-    pub(crate) fn replace_prepared_history(
+    pub(crate) fn replace_compacted_history(
         &mut self,
         session_id: &str,
         observed: &[&HistoryEntry],
-        decision: HistoryReplacement,
+        decision: CompactionResult,
     ) -> Result<Vec<Message>, String> {
         let current = self.session_entries(session_id);
         if !current
@@ -93,7 +93,7 @@ impl FlowHistory {
     }
 
     /// Removes only this session's replaced entries and tombstones without touching accounting.
-    fn commit_replacement(&mut self, session_id: &str, replacement: ValidatedHistoryReplacement) {
+    fn commit_replacement(&mut self, session_id: &str, replacement: ValidatedCompactionResult) {
         let insert_at = self
             .entries
             .iter()
@@ -117,8 +117,8 @@ impl FlowHistory {
 fn validate_replacement(
     session_id: &str,
     entries: &[&HistoryEntry],
-    decision: HistoryReplacement,
-) -> Result<ValidatedHistoryReplacement, String> {
+    decision: CompactionResult,
+) -> Result<ValidatedCompactionResult, String> {
     validate_indices(entries, &decision.evict_indices)?;
     let count = decision.evict_indices.len();
     let removed = entries.get(..count).ok_or("invalid replacement prefix")?;
@@ -142,7 +142,7 @@ fn validate_replacement(
         }
         None => None,
     };
-    Ok(ValidatedHistoryReplacement {
+    Ok(ValidatedCompactionResult {
         remove_ids: removed.iter().map(|entry| entry.id).collect(),
         summary,
     })
@@ -173,6 +173,7 @@ fn summary_entry(session_id: &str, position: u64, text: String) -> HistoryEntry 
         session_id,
         "__summary__",
         Message {
+            key: None,
             role: Role::System,
             content: format!("<pravah_working_memory>\n{text}\n</pravah_working_memory>"),
             attachments: Vec::new(),
