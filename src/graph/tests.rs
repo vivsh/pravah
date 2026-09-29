@@ -2457,7 +2457,7 @@ async fn typed_edge_agent_without_tools_uses_structured_output() -> Result<(), c
         .expect("agent flow should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
     let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -2579,7 +2579,7 @@ async fn adaptive_agent_control_observes_boundaries_and_changes_tool_visibility(
     let ctx = ctx()
         .with_deps(deps)
         .with_providers(crate::testing::providers(factory.clone())?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -2666,7 +2666,7 @@ async fn agent_control_recovers_from_hidden_tool_calls_and_forces_conclusion()
     let ctx = ctx()
         .with_deps(deps)
         .with_providers(crate::testing::providers(factory.clone())?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -2716,7 +2716,7 @@ async fn agent_policy_abort_leaves_runtime_retryable() {
         .agent(aborting_agent)
         .finish::<EdgeAgentInput>()
         .expect("aborting agent should compile");
-    let executor = FetchExecutor::new(ctx(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -2756,7 +2756,7 @@ async fn forced_agent_conclusion_validates_output_before_commit() -> Result<(), 
         .expect("concluding agent should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "wrong": true }));
     let ctx = ctx().with_providers(crate::testing::providers(factory)?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -2807,7 +2807,7 @@ async fn agent_controller_suspension_restores_and_accepts_typed_resume()
         )])
         .then_output(serde_json::json!({ "text": "done" }));
     let ctx = ctx().with_providers(crate::testing::providers(factory)?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -2835,7 +2835,7 @@ async fn agent_controller_suspension_restores_and_accepts_typed_resume()
     ciborium::into_writer(&restored_json, &mut cbor).expect("snapshot should encode as CBOR");
     let restored_cbor: Snapshot =
         ciborium::from_reader(cbor.as_slice()).expect("snapshot should decode from CBOR");
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .restore(restored_cbor)
         .expect("snapshot should restore");
@@ -2904,7 +2904,7 @@ async fn json_invoker_resumes_agent_controller_suspension() -> Result<(), crate:
         })
         .expect("agent should start");
 
-    let executor = FetchExecutor::new(ctx, Arc::new(registry));
+    let executor = FetchExecutor::new(ctx).with_registry(Arc::new(registry));
     let snapshot = advance_json_until_agent_suspend(&invoker, response, &executor).await;
 
     response = invoker
@@ -3012,7 +3012,7 @@ async fn agent_configuration_runs_once_across_snapshot_restore() -> Result<(), c
     let ctx = ctx()
         .with_deps(deps)
         .with_providers(crate::testing::providers(factory.clone())?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -3145,7 +3145,7 @@ async fn typed_edge_agent_provider_config_reaches_client_options() -> Result<(),
         .expect("agent flow should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
     let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(
             EdgeProviderConfigAgentInput { text: "hi".into() },
@@ -3453,7 +3453,7 @@ async fn typed_edge_agent_tool_function_round_trips_through_same_vm()
         )])
         .then_output(serde_json::json!({ "text": "done" }));
     let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -3492,7 +3492,7 @@ async fn typed_edge_agent_filters_tools_in_prepared_order() -> Result<(), crate:
         .expect("filtered agent should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
     let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(
             EdgeAgentInput {
@@ -3527,7 +3527,7 @@ async fn typed_edge_agent_configuration_failure_does_not_mutate_runtime() {
         .agent(failing_agent)
         .finish::<EdgeAgentInput>()
         .expect("failing agent definition should compile");
-    let executor = FetchExecutor::new(ctx(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -3553,7 +3553,7 @@ async fn typed_edge_agent_provider_is_resolved_at_dispatch() -> Result<(), crate
         .expect("agent flow should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
     let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -3595,7 +3595,7 @@ async fn typed_edge_agent_multiple_tool_calls_are_queued_on_single_vm_stack()
         ])
         .then_output(serde_json::json!({ "text": "done" }));
     let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -3670,7 +3670,7 @@ async fn typed_edge_agent_same_tool_calls_run_in_deterministic_queue_order()
         ])
         .then_output(serde_json::json!({ "text": "done" }));
     let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -3741,7 +3741,7 @@ fn repeated_flow(root: Flow<RepeatedFlowInput>) -> Flow<i64> {
 #[tokio::test]
 async fn typed_flow_reuses_same_subflow_with_namespaced_handlers() {
     let flow = compile(repeated_flow).expect("repeated subflow should compile");
-    let executor = FetchExecutor::new(ctx(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(RepeatedFlowInput(1), uuid::Uuid::nil())
         .expect("runtime should build");
@@ -4022,7 +4022,7 @@ async fn snapshot_rejects_obsolete_agent_checkpoint_version() {
         .agent(edge_agent)
         .finish::<EdgeAgentInput>()
         .expect("agent flow should compile");
-    let executor = FetchExecutor::new(ctx(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
@@ -4200,7 +4200,7 @@ async fn agent_history_batch_failure_does_not_commit_a_prefix() -> Result<(), cr
         fail_at: 2,
     };
     let ctx = ctx().with_providers(crate::testing::providers(factory)?);
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");

@@ -243,8 +243,8 @@ async fn streamable_http_rejects_unauthorized_and_blob_resources() -> Result<(),
 async fn restored_agent_does_not_reread_mcp_resources() -> Result<(), GraphError> {
     let (url, cancellation) = spawn_resource_server().await;
     let flow = compile(resource_flow).unwrap();
-    let executor =
-        crate::graph::FetchExecutor::new(test_context(url), Arc::new(flow.registry().clone()));
+    let executor = crate::graph::FetchExecutor::new(test_context(url))
+        .with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(
             ResourceInput {
@@ -265,8 +265,8 @@ async fn restored_agent_does_not_reread_mcp_resources() -> Result<(), GraphError
         ScriptedFactory::new().then_output(serde_json::json!({ "answer": "from checkpoint" }));
     let executor = crate::graph::FetchExecutor::new(
         Context::default().with_providers(crate::testing::providers(factory)?),
-        Arc::new(flow.registry().clone()),
-    );
+    )
+    .with_registry(Arc::new(flow.registry().clone()));
     let mut restored = flow.restore(snapshot).unwrap();
     let step = host::finish(&mut restored, &executor).await?;
     let Step::Done(value) = step else {

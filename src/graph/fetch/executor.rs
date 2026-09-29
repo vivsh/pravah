@@ -39,14 +39,27 @@ impl FetchExecutor {
         self.services = services;
         self
     }
-    /// Creates a dispatcher using the same immutable handlers as the prepared graph.
-    pub fn new(context: Context, registry: Arc<HandlerRegistry>) -> Self {
+    /// Creates a graph-independent dispatcher without registered graph handlers.
+    ///
+    /// Agent and tool hooks require [`FetchExecutor::with_registry`] or a
+    /// dispatcher created from a prepared graph.
+    pub fn new(context: Context) -> Self {
+        Self::from_registry(context, Arc::new(HandlerRegistry::new()))
+    }
+
+    pub(crate) fn from_registry(context: Context, registry: Arc<HandlerRegistry>) -> Self {
         Self {
             context,
             registry,
             services: RuntimeServices::default(),
             schemes: BTreeMap::new(),
         }
+    }
+
+    /// Installs the immutable handlers required by agent and tool hooks.
+    pub fn with_registry(mut self, registry: Arc<HandlerRegistry>) -> Self {
+        self.registry = registry;
+        self
     }
 
     /// Borrows the runtime dependencies installed by the host.

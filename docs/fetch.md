@@ -39,7 +39,28 @@ Choose one UUID for each independent execution and persist it with that executio
 See [the runnable Fetch example](../examples/graph_fetch.rs) for a complete
 response and failure round trip without network access.
 
-Use your own executor, or construct the provided dispatcher with `workflow.prepared().executor(ctx)` and call `executor.execute(&fetch).await`. The dispatcher owns runtime services; the VM does not. Unknown URI schemes fail explicitly. Register application schemes on the dispatcher when needed.
+For a worker that has a persisted Fetch but no graph, construct an executor once
+with `FetchExecutor::new(ctx)` and call `executor.execute(&fetch).await`. This
+supports HTTP and Rath requests; register application schemes on the executor
+when needed. Framework preparation and history hooks can use an installed
+compactor or store. Install a history store when durable history delivery is
+required; the default store acknowledges without persisting entries.
+
+Agent and tool hooks need their matching Rust handlers. Install an
+`Arc<HandlerRegistry>` with `.with_registry(registry)`, or obtain an executor
+from `workflow.prepared().executor(ctx)` before releasing the workflow. The
+executor can then run independently of the graph or VM. Missing handlers and
+unknown schemes fail explicitly. The executor owns runtime services; the VM
+does not.
+
+To select a Rath LLM work lane before execution, decode
+`pravah::graph::fetch::rath::RathRequest::from_fetch_request(fetch.request())`
+and inspect its borrowed
+`provider()` and full `model()` URL. The provider is the URL's logical scheme,
+not necessarily the physical provider: for example, `claude:` is a Rath alias
+for Anthropic. If a custom factory overrides its destination, keep the host's
+lane mapping in agreement with that factory. Rath Fetch does not represent image
+or video work.
 
 HTTP error statuses are responses, not transport failures. Deliver a transport or execution failure with `Err(FetchError::new(code, message))`. `FetchError::from_execution_error(&error)` explicitly converts an executor error to portable diagnostic data. Inspect original typed Rath errors before conversion if the application needs their Rust source chain.
 

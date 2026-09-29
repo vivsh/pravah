@@ -54,8 +54,8 @@ fn field<'a>(value: &'a Value, key: &str) -> Result<&'a Value, GraphError> {
 #[tokio::test]
 async fn generation_construction_shares_immutable_values() -> Result<(), GraphError> {
     let workflow = compile(flow)?;
-    let executor =
-        pravah::FetchExecutor::new(Context::default(), Arc::new(workflow.registry().clone()));
+    let executor = pravah::FetchExecutor::new(Context::default())
+        .with_registry(Arc::new(workflow.registry().clone()));
     for memory in ["", "  Unicode \u{1f30a}\n "] {
         let mut runtime = workflow.start(memory.into(), Uuid::nil())?;
         let configure = next_fetch(&mut runtime)?;

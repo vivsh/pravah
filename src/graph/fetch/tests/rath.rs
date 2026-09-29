@@ -49,6 +49,45 @@ fn option_and_message_fidelity() -> Result<(), GraphError> {
     Ok(())
 }
 
+/// Provider routing borrows the URL scheme across built-in and external models.
+#[test]
+fn provider_is_a_borrowed_logical_routing_key() -> Result<(), GraphError> {
+    for (model, expected) in [
+        ("openrouter:///anthropic/claude", "openrouter"),
+        ("gemini:///gemini-test", "gemini"),
+        ("claude:///claude-test", "claude"),
+        (
+            "private-provider:///model?base_url=https://example.com",
+            "private-provider",
+        ),
+    ] {
+        let request = RathRequest::new(model, ClientOptions::default(), Vec::new());
+        let provider = request.provider()?;
+        assert_eq!(provider, expected);
+        assert!(std::ptr::eq(provider.as_ptr(), request.model().as_ptr()));
+        let measured = allocation_counter::measure(|| {
+            let _ = std::hint::black_box(request.provider());
+        });
+        assert_eq!(measured.count_total, 0);
+        let restored = RathRequest::from_fetch_request(&request.into_fetch_request()?)?;
+        assert_eq!(restored.provider()?, expected);
+        assert_eq!(restored.model(), model);
+    }
+    Ok(())
+}
+
+/// A missing model URL scheme cannot silently select an arbitrary work lane.
+#[test]
+fn provider_rejects_missing_scheme() {
+    for model in ["", "model", ":///model"] {
+        let request = RathRequest::new(model, ClientOptions::default(), Vec::new());
+        assert!(matches!(
+            request.provider(),
+            Err(GraphError::FetchValidation(_))
+        ));
+    }
+}
+
 /// Rath output preserves provider metadata and Gemini continuation signatures.
 #[test]
 fn response_preserves_thought_signatures() -> Result<(), GraphError> {

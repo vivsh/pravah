@@ -1,10 +1,12 @@
 use std::hint::black_box;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pravah::clients::{
     Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmBackend, Message,
     ModelUrl, Provider, ProviderFactory,
 };
+use pravah::graph::fetch::rath::RathRequest;
 use pravah::graph::{
     Agent, AgentConfig, AgentDecision, AgentLoop, BuiltinNode, CompiledFlow, ContinuationContext,
     ContinuationEvent, ContinuationHandler, ContinuationTransition, EdgeId, Flow, GraphError,
@@ -12,7 +14,7 @@ use pravah::graph::{
     NodeKind, PreparedGraph, Snapshot, Step, TypeSpec, UntypedGraph, UntypedGraphBuilder, Value,
     VarId, VarKey, VarScope, compile, from_value, to_value,
 };
-use pravah::{Context, FlowConf};
+use pravah::{Context, Fetch, FetchExecutor, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -139,7 +141,65 @@ async fn run() -> Result<(), GraphError> {
     report_value_benchmarks()?;
     report_typed_benchmarks()?;
     report_runtime_benchmarks().await?;
-    report_agent_benchmarks().await
+    report_agent_benchmarks().await?;
+    report_fetch_executor_benchmarks().await
+}
+
+/// Compares graph-free construction with the existing prepared-graph path.
+async fn report_fetch_executor_benchmarks() -> Result<(), GraphError> {
+    let flow = compile(benchmark_flow)?;
+    let context = context().with_providers(pravah::testing::providers(BenchmarkClientFactory)?);
+    let registry = Arc::new(flow.registry().clone());
+    report_allocations("fetch_executor/new", || FetchExecutor::new(context.clone()));
+    report_allocations("fetch_executor/with_registry", || {
+        FetchExecutor::new(context.clone()).with_registry(Arc::clone(&registry))
+    });
+    report_allocations("fetch_executor/prepared", || {
+        flow.prepared().executor(context.clone())
+    });
+    report_sync("fetch_executor/new", FAST_ITERATIONS, || {
+        FetchExecutor::new(context.clone())
+    });
+    report_sync("fetch_executor/with_registry", FAST_ITERATIONS, || {
+        FetchExecutor::new(context.clone()).with_registry(Arc::clone(&registry))
+    });
+    report_sync("fetch_executor/prepared", FAST_ITERATIONS, || {
+        flow.prepared().executor(context.clone())
+    });
+    let fetch = Fetch::new(
+        uuid::Uuid::nil(),
+        Arc::new(
+            RathRequest::new(
+                "test:///benchmark",
+                ClientOptions::default(),
+                vec![Message::user("input")],
+            )
+            .into_fetch_request()?,
+        ),
+    );
+    let standalone = FetchExecutor::new(context.clone());
+    let prepared = flow.prepared().executor(context);
+    report_fetch_dispatch("fetch_executor/new_dispatch", &standalone, &fetch).await?;
+    report_fetch_dispatch("fetch_executor/prepared_dispatch", &prepared, &fetch).await
+}
+
+/// Measures one preconstructed executor repeatedly executing the same Rath request.
+async fn report_fetch_dispatch(
+    name: &str,
+    executor: &FetchExecutor,
+    fetch: &Fetch,
+) -> Result<(), GraphError> {
+    black_box(executor.execute(fetch).await?);
+    let mut samples = Vec::with_capacity(VM_SAMPLES);
+    for _ in 0..VM_SAMPLES {
+        let start = Instant::now();
+        for _ in 0..VM_ITERATIONS {
+            black_box(executor.execute(fetch).await?);
+        }
+        samples.push(ns_per_iteration(start.elapsed(), VM_ITERATIONS));
+    }
+    print_median(name, VM_ITERATIONS, VM_SAMPLES, &mut samples);
+    Ok(())
 }
 
 /// Configures an ordinary synthetic agent without external provider latency.

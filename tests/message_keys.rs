@@ -135,10 +135,10 @@ async fn graph_preserves_message_keys() -> Result<(), TestError> {
     let runtime = flow.start(input(), uuid::Uuid::nil())?;
     for snapshot in copies(&runtime.snapshot()?)? {
         let observer = ObserveKey::default();
-        let executor =
-            pravah::graph::FetchExecutor::new(context()?, Arc::new(flow.registry().clone()))
-                .with_store(observer.clone())
-                .with_compactor(observer.clone());
+        let executor = pravah::graph::FetchExecutor::new(context()?)
+            .with_registry(Arc::new(flow.registry().clone()))
+            .with_store(observer.clone())
+            .with_compactor(observer.clone());
         let mut runtime = flow.restore(snapshot)?;
         loop {
             match runtime.next()? {

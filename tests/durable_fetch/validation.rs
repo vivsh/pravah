@@ -151,6 +151,39 @@ async fn ordinary_agent_rejects_unregistered_settings() -> Result<(), GraphError
     Ok(())
 }
 
+/// External agent hooks retain their handlers after the prepared workflow is dropped.
+#[tokio::test]
+async fn executor_outlives_workflow_but_missing_registry_fails() -> Result<(), GraphError> {
+    let workflow = compile(flow)?;
+    let mut runtime = workflow.start("question".into(), Uuid::from_u128(9))?;
+    let fetch = next_fetch(&mut runtime)?;
+    let executor = workflow.prepared().executor(Context::default());
+    assert!(std::ptr::eq(workflow.registry(), executor.registry()));
+    let registry = Arc::new(workflow.registry().clone());
+    let manually_configured =
+        pravah::FetchExecutor::new(Context::default()).with_registry(Arc::clone(&registry));
+    assert!(std::ptr::eq(
+        registry.as_ref(),
+        manually_configured.registry()
+    ));
+    drop(runtime);
+    drop(workflow);
+
+    let missing = pravah::FetchExecutor::new(Context::default());
+    let missing_error = missing
+        .execute(&fetch)
+        .await
+        .err()
+        .ok_or_else(|| GraphError::Invalid("expected missing handler".into()))?;
+    assert!(matches!(
+        missing_error,
+        GraphError::FetchValidation(ref reason) if reason == "missing external hook handler"
+    ));
+    assert_eq!(executor.execute(&fetch).await?.status(), 200);
+    assert_eq!(manually_configured.execute(&fetch).await?.status(), 200);
+    Ok(())
+}
+
 /// Rebuilding the immutable contract preserves instruction-only restoration and recorded outcomes.
 #[tokio::test]
 async fn rebuilt_contract_preserves_pending_and_accepted_configuration() -> Result<(), GraphError> {

@@ -206,7 +206,7 @@ struct EachVmCheckpoint {
 impl PreparedGraph {
     /// Builds an external executor sharing this graph's immutable registry.
     pub fn executor(&self, context: crate::Context) -> super::fetch::FetchExecutor {
-        super::fetch::FetchExecutor::new(context, Arc::clone(&self.registry))
+        super::fetch::FetchExecutor::from_registry(context, Arc::clone(&self.registry))
     }
     /// Validates and compiles a graph and its handler registry once.
     ///

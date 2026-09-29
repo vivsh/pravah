@@ -94,6 +94,18 @@ impl RathRequest {
         &self.model
     }
 
+    /// Borrows the model URL's logical provider scheme for external scheduling.
+    ///
+    /// This is not a resolved factory or endpoint. Rath validates the full URL
+    /// when the Fetch is executed.
+    pub fn provider(&self) -> Result<&str, GraphError> {
+        self.model
+            .split_once("://")
+            .map(|(provider, _)| provider)
+            .filter(|provider| !provider.is_empty())
+            .ok_or_else(|| GraphError::FetchValidation("Rath model URL has no provider".into()))
+    }
+
     /// Borrows the exact construction options, before Rath applies URL precedence.
     pub fn options(&self) -> &ClientOptions {
         &self.options

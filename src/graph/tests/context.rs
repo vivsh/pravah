@@ -7,7 +7,8 @@ struct ContextDelta(i64);
 fn executor(flow: &CompiledFlow<TypedAmount, TypedAmount>, delta: i64) -> FetchExecutor {
     let mut deps = Deps::default();
     deps.insert(Arc::new(ContextDelta(delta)));
-    let mut executor = FetchExecutor::new(ctx().with_deps(deps), Arc::new(flow.registry().clone()));
+    let mut executor =
+        FetchExecutor::new(ctx().with_deps(deps)).with_registry(Arc::new(flow.registry().clone()));
     executor.register("delta", AddDelta).unwrap();
     assert!(executor.register("delta", AddDelta).is_err());
     executor

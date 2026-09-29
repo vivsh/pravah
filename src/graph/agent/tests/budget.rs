@@ -444,7 +444,7 @@ async fn budgets_share_tool_visibility_and_conclusion_control() -> Result<(), cr
     let factory = RecordedFactory::new(responses);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(Arc::clone(&trace)))?;
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -517,7 +517,7 @@ async fn agent_only_budget_forces_one_tool_disabled_conclusion() -> Result<(), c
         output_response("turn ceiling"),
     ]);
     let ctx = test_context(factory.clone(), None)?;
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -539,7 +539,7 @@ async fn tool_only_budget_leaves_model_turns_unrestricted() -> Result<(), crate:
         output_response("tool ceiling"),
     ]);
     let ctx = test_context(factory.clone(), None)?;
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -564,7 +564,7 @@ async fn last_budgeted_turn_may_complete_naturally() -> Result<(), crate::GraphE
     let factory = RecordedFactory::new([output_response("natural")]);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(trace))?;
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -591,7 +591,7 @@ async fn budget_conclusion_preserves_normalized_structured_output() -> Result<()
     ]);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(trace))?;
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(
             BudgetRequest {
@@ -626,7 +626,7 @@ async fn rejected_proposal_does_not_consume_tool_budget() -> Result<(), crate::G
         output_response("done"),
     ]);
     let ctx = test_context(factory.clone(), None)?;
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -695,7 +695,8 @@ async fn activation_validates_only_effective_budget_errors() -> Result<(), crate
     let filtered = compile(filtered_budget_flow).expect("filtered flow should compile");
     let factory = RecordedFactory::new([output_response("filtered")]);
     let ctx = test_context(factory.clone(), None)?;
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(filtered.registry().clone()));
+    let executor =
+        FetchExecutor::new(ctx.clone()).with_registry(Arc::new(filtered.registry().clone()));
     let mut runtime = filtered
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -712,7 +713,8 @@ async fn activation_validates_only_effective_budget_errors() -> Result<(), crate
 /// Checks that activation reports every accumulated budget error at once.
 async fn assert_invalid_budget_configuration() {
     let invalid = compile(invalid_budget_flow).expect("invalid config is runtime data");
-    let executor = FetchExecutor::new(Context::default(), Arc::new(invalid.registry().clone()));
+    let executor =
+        FetchExecutor::new(Context::default()).with_registry(Arc::new(invalid.registry().clone()));
     let mut runtime = invalid
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -736,7 +738,7 @@ async fn budget_state_restores_without_reconfiguration() -> Result<(), crate::Gr
     ]);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(Arc::clone(&trace)))?;
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -765,7 +767,7 @@ async fn restore_rejects_malformed_budget_state() -> Result<(), crate::GraphErro
     let factory = RecordedFactory::new([output_response("unused")]);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory, Some(trace))?;
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -799,7 +801,7 @@ async fn history_failure_leaves_budget_admission_retryable() -> Result<(), crate
         calls: Arc::new(AtomicUsize::new(0)),
         fail_at: 2,
     };
-    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
+    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
