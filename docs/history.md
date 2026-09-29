@@ -15,18 +15,20 @@ for (index, message) in history.enum_messages(session_id, 6) {
 ```
 
 `enum_messages` borrows Rath messages oldest-first. It excludes evicted entries,
-other sessions, tool-call proposals and tool results. It includes system summaries,
-user messages and final assistant messages. `skip_recent` counts only these
-non-tool messages; zero skips none, and a count larger than the history yields an
-empty iterator. No messages are cloned or collected by the helper.
+other sessions, framework summaries, tool-call proposals and tool results. User
+messages, final assistant messages and other system messages remain visible.
+`skip_recent` counts only exposed messages; zero skips none, and a count larger
+than the history yields an empty iterator. No messages are cloned or collected
+by the helper.
 
-Indices refer to the original live session sequence **including tool entries**, so
-they may have gaps. They are not stable identities: compaction can change indices.
+Indices refer to the original live session sequence **including summaries and
+tool entries**, so they may have gaps. They are not stable identities: compaction
+can change indices.
 For durable correlation use `message.key` or the corresponding `HistoryEntry.id`.
 Keys are application-owned and carry no uniqueness guarantee.
 
 `byte_size` measures the exact compact JSON array encoding of **all** live messages
-in the selected session, including tools, keys, usage and serialized attachments.
+in the selected session, including summaries, tools, keys, usage and serialized attachments.
 It excludes HistoryEntry metadata and does not open file attachments or fetch URLs.
 An empty session measures two bytes (`[]`). It serializes into a byte counter, not
 a buffer; computation is on demand and can fail. This is neither token count nor
@@ -40,9 +42,9 @@ alter cumulative usage or agent-budget metrics.
 ## Compactors
 
 Configure builder chats with `.compactor(policy).store(history_store)` before
-the final `.build(ctx).await?`, or before synchronous snapshot restoration.
+the final `.build(ctx)?`, or before synchronous snapshot restoration.
 For function-defined chats and explicit workflows, install a fallible `Compactor` with `chat.with_compactor(policy)`,
-`runtime.with_compactor(policy)` or `RuntimeServices::with_compactor(policy)`.
+`executor.with_compactor(policy)` or `RuntimeServices::with_compactor(policy)`.
 The trait method is:
 
 ```rust
@@ -60,6 +62,7 @@ Its helpers already select **committed history only**:
 ```rust
 let bytes = request.byte_size()?;
 let turns = request.turn_count();
+let previous_summary: Option<&str> = request.summary();
 
 for (index, message) in request.enum_messages(6) {
     let entry = &request.committed()[index];
@@ -72,9 +75,17 @@ The current user input and its entire ongoing tool exchange are always excluded
 from these helpers. Raw `committed()` and `protected()` entries remain available
 when a policy explicitly needs tool evidence or metadata.
 
+`summary()` borrows the existing summary text without the framework wrapper,
+preserving its whitespace. It returns `None` when the first committed entry is
+not a recognized summary or its representation is malformed. Reading it changes
+nothing and allocates nothing. Supply it as prior context to your summarizer or
+fact extractor, separately from the new messages returned by `enum_messages`.
+The summary still reaches the model and contributes to `byte_size()`.
+
 Enumeration is for reading, not an eviction plan. **Do not collect its potentially
 gapped indices into `evict_indices`.** Replacement must select a complete, contiguous
-prefix of committed entries, including any tool messages in that prefix:
+prefix of committed entries, including the existing summary and any tool messages
+in that prefix:
 
 ```rust
 // After successfully processing all committed exchanges:

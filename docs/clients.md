@@ -90,6 +90,68 @@ can inspect the effective cap through `request.options().max_output_tokens`.
 This exposes request context, not exact token counting or strict input-budget
 enforcement.
 
+## Inspect Client Errors
+
+Pravah uses Rath 0.3's structured `ClientError`. Inspect its classification
+instead of matching the former error enum variants:
+
+```rust
+use pravah::clients::{ClientError, ErrorKind};
+
+let error = ClientError::new(ErrorKind::Validation, "A model is required.");
+assert_eq!(error.kind(), ErrorKind::Validation);
+```
+
+Direct client callers can inspect provider, operation, HTTP status, request ID,
+retry-after metadata and the source chain. `ErrorBody` is also re-exported under
+`pravah::clients`; accessing `response_body()` is explicit because it may contain
+private content. Do not log raw response bodies by default.
+
+Graph workflows and Chat retain the original Rath error in
+`GraphError::AgentClient { operation, source }`. `AgentClientOperation::Create`
+means the client factory failed; `Execute` means a model request failed. This
+discriminator is separate from Rath's provider-specific `source.operation()`.
+Rath's registry annotates construction failures with the selected provider and
+`client construction` operation; distinct original context and HTTP diagnostics
+remain in its typed cause chain. Pravah preserves the error returned by Rath.
+
+```rust
+use pravah::{AgentClientOperation, GraphError};
+use pravah::clients::ErrorKind;
+
+fn inspect_failure(error: &GraphError) {
+    if let Some(client) = error.client_error() {
+        let kind: ErrorKind = client.kind();
+        let status: Option<u16> = client.http_status();
+        let retry_after: Option<&str> = client.retry_after();
+        // Apply application policy to this metadata; no text parsing is needed.
+    }
+    if let GraphError::AgentClient {
+        operation: AgentClientOperation::Create, source,
+    } = error {
+        // Inspect source.kind() and source.provider() to diagnose client setup.
+    }
+}
+```
+
+The same error propagates from `Chat::send` and `Chat::send_with_key`.
+`client_error()` borrows the original error without copying it, and standard
+`std::error::Error::source()` also exposes it, preserving nested causes.
+`Display` says only `agent client creation failed` or `agent client execution failed`;
+it does not include provider messages, bodies, prompts, or generated output.
+Treat explicit source inspection, error-chain reporting and Debug output as
+diagnostic access, not automatically safe user-facing logging.
+
+Migrate tuple matches `GraphError::AgentClient(_)` to the struct variant above.
+Runtime rejection of an empty tool-call batch is instead
+`GraphError::AgentResponseValidation`; it has no Rath source. Provider-reported
+output exhaustion during execution still becomes `GraphError::AgentOutputLimit`,
+discards partial output, and returns None from `client_error()`.
+
+Pravah adds no automatic retry. The compatibility-only legacy retry layer retains
+its broad provider/transport retry policy; it is not a provider-specific HTTP retry
+policy. Chat's unfinished-turn restrictions are unchanged.
+
 ## Declare and Filter Tools
 
 A toolset function declares the complete set of tool graphs that can be
@@ -230,7 +292,7 @@ example including suspension and typed resume.
 Enable the `mcp` feature to use Streamable HTTP resource servers:
 
 ```toml
-pravah = { version = "0.4.18", features = ["mcp"] }
+pravah = { version = "0.4.19", features = ["mcp"] }
 ```
 
 Register credentials and headers on the runtime `Context`, not in the graph or
@@ -280,42 +342,52 @@ Provider credentials use their usual environment variables:
 The `api_key_env` query parameter can select another environment variable.
 Use `base_url` for compatible proxies or self-hosted endpoints.
 
-## Client Factories
+## Provider Registries
 
-Graph agents use Rath's default client factory unless the runtime `Context`
-supplies another one:
+Graph agents use Rath's built-in providers unless the runtime `Context`
+supplies an application-owned registry:
 
 ```rust
-let ctx = Context::default().with_client_factory(my_factory);
+use pravah::{Context, clients::ProviderRegistry};
+
+let providers = ProviderRegistry::with_builtins()
+    .register("company", my_factory)?;
+let ctx = Context::default().with_providers(providers);
 ```
 
-The factory is runtime-only. Bind a context containing it when a workflow
-starts or restores. This is the single graph-path override for testing,
-tracing, retry, rate limiting, or custom provider clients.
+Use `company:///model` to select that factory. Built-in scheme names cannot
+be replaced. Use `ProviderRegistry::new()` to allow only explicit registrations.
+
+The registry is runtime-only. Bind it through the context when starting or
+restoring. Implement Rath's re-exported `ProviderFactory::llm` for asynchronous
+construction and `LlmBackend` for execution. Return `Client::from_backend(backend)`;
+`Client` is a concrete handle; do not wrap it in `Box<dyn Client>`.
 
 ## Client Layers
 
-Client layers compose around Rath's default factory and can be installed on a
-graph `Context`:
+Compatibility-only client layers can decorate an application provider factory.
+No retries or rate limits are installed by default:
 
 ```rust
-use pravah::clients::{ClientFactory, DefaultClientFactory, Provider};
+use pravah::clients::{Provider, ProviderRegistry};
 use pravah::legacy::{RateLimit, RateLimitLayer, RetryConfig, RetryLayer, TracingLayer};
 use tokio::time::Duration;
 
-let factory = DefaultClientFactory
-    .layer(TracingLayer)
-    .layer(RetryLayer::new(RetryConfig::new(2, Duration::from_millis(250))))
-    .layer(RateLimitLayer::new().with_limit(
-        Provider::OpenAi,
-        RateLimit::new(60_000, 4),
-    ));
+let factory = TracingLayer.layer(my_factory);
+let factory = RetryLayer::new(RetryConfig::new(2, Duration::from_millis(250)))
+    .layer(factory);
+let factory = RateLimitLayer::new()
+    .with_limit(Provider::External("company".into()), RateLimit::new(60_000, 4))
+    .layer(factory);
 
-let ctx = Context::default().with_client_factory(factory);
+let providers = ProviderRegistry::with_builtins().register("company", factory)?;
+let ctx = Context::default().with_providers(providers);
 ```
 
-The same factory can be supplied to compatibility-only `FlowRuntime` with
-`with_factory`.
+Compatibility-only `FlowRuntime` also accepts a registry through `with_providers`.
+Legacy Chat client construction is asynchronous: use `.build().await?` and
+`Chat::from_snapshot(snapshot).await?`. Modern Chat construction remains
+synchronous, as does its snapshot restoration. Modern `send` remains asynchronous.
 
 ## Attachments
 
@@ -323,10 +395,10 @@ Build the initial user `Message` during configuration when it needs files,
 URLs, or inline data:
 
 ```rust
-use pravah::clients::{Attachment, Message};
+use pravah::clients::Message;
 
 let message = Message::user("Describe this image.")
-    .with_attachment(Attachment::image_file("diagram.png"));
+    .with_file("image/png", "diagram.png");
 ```
 
 File attachments are resolved against `Context::working_dir` before provider
@@ -341,7 +413,7 @@ use pravah::clients::{ClientOptions, ClientOutput, Message};
 
 let client = ClientOptions::default()
     .with_preamble("Answer concisely.")
-    .create("ollama:///qwen3:8b?base_url=http://localhost:11434")?;
+    .create("ollama:///qwen3:8b?base_url=http://localhost:11434").await?;
 
 match client.execute(&[Message::user("What is Rust?")]).await?.output {
     ClientOutput::Output(value) => println!("{value}"),

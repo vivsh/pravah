@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
+use super::fetch::{Fetch, FetchError, FetchResponse};
 use super::ids::{EdgeId, NodeId};
 use super::model::TypeSpec;
 use super::registry::ContinuationChildCall;
 use super::value::Value;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -25,12 +28,20 @@ pub(crate) enum ReturnTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Completed child-call result waiting for a continuation node.
-pub(crate) struct ContinuationChildResult {
-    /// Child call id originally requested by the continuation.
-    pub(crate) call_id: String,
-    /// Child frame output value.
-    pub(crate) output: Value,
+#[serde(tag = "kind", rename_all = "snake_case")]
+/// Accepted input retained until its complete continuation transition succeeds.
+pub(crate) enum ContinuationInput {
+    Child {
+        call_id: String,
+        output: Value,
+    },
+    Resume {
+        input: Value,
+    },
+    Fetch {
+        fetch: Fetch,
+        outcome: Result<FetchResponse, FetchError>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +67,7 @@ pub(crate) struct Frame {
     /// Opaque state slots for continuation nodes.
     pub(crate) continuation_states: Vec<Option<Value>>,
     /// Pending child results for continuation nodes.
-    pub(crate) continuation_inboxes: Vec<Vec<ContinuationChildResult>>,
+    pub(crate) continuation_inboxes: Vec<Vec<ContinuationInput>>,
     /// Queued child calls for continuation nodes.
     pub(crate) continuation_child_queues: Vec<Vec<ContinuationChildCall>>,
     /// Last input activation epoch consumed by each node; zero means never run.
@@ -88,7 +99,7 @@ pub struct Suspension {
     /// Runtime owner that receives the resume value.
     pub(crate) target: SuspensionTarget,
     /// Expected resume type and JSON Schema.
-    pub(crate) resume_type: TypeSpec,
+    pub(crate) resume_type: Arc<TypeSpec>,
     /// Payload returned to the caller on suspend.
     pub(crate) payload: Value,
 }
@@ -116,10 +127,22 @@ impl Suspension {
 /// History is stored separately on `Snapshot`; this struct is only graph
 /// execution state.
 pub struct State {
+    pub(crate) execution_id: Uuid,
+    pub(crate) next_fetch_sequence: u64,
     /// Active VM frame stack.
     pub(crate) frames: Vec<Frame>,
     /// Active node- or continuation-owned state when the VM is externally paused.
-    pub(crate) suspension: Option<Suspension>,
+    pub(crate) waiting: Option<Waiting>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum Waiting {
+    Suspend(Suspension),
+    Fetch {
+        frame_depth: usize,
+        node: NodeId,
+        fetch: Fetch,
+    },
 }
 
 impl State {
@@ -130,7 +153,19 @@ impl State {
 
     /// Returns whether the VM is waiting for external input.
     pub fn is_suspended(&self) -> bool {
-        self.suspension.is_some()
+        self.waiting.is_some()
+    }
+
+    /// Returns the host-supplied execution identity retained by snapshots.
+    pub fn execution_id(&self) -> Uuid {
+        self.execution_id
+    }
+
+    pub(crate) fn suspension(&self) -> Option<&Suspension> {
+        match &self.waiting {
+            Some(Waiting::Suspend(value)) => Some(value),
+            _ => None,
+        }
     }
 
     #[cfg(test)]
@@ -145,6 +180,8 @@ impl State {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Result of advancing the edge VM by one public step.
 pub enum Step {
+    /// The VM is waiting for the host to execute this exact request.
+    Fetch(Fetch),
     /// A node ran or a frame exited; call `next()` again.
     Continue,
     /// The root frame exited with this final output value.

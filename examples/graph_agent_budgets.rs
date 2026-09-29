@@ -1,127 +1,47 @@
-//! Deterministic graph-agent turn and tool budgets without a custom controller.
+//! One ordinary model turn and one search call, followed by forced conclusion.
 //!
-//! Run with `cargo run --example graph_agent_budgets --features testing`.
-//! The output cap is forwarded to clients; this scripted client does not count tokens.
+//! Run with --features testing. Both model replies and tool results are local.
 
-#[cfg(feature = "testing")]
-mod support;
+use pravah::testing::{ScriptedFactory, mock_tool_call};
+use pravah::tools::ToolError;
+use pravah::{Chat, Context, GraphError, Toolset};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
-#[cfg(feature = "testing")]
-mod example {
-    use pravah::clients::Message;
-    use pravah::testing::{ScriptedFactory, mock_tool_call};
-    use pravah::tools::ToolError;
-    use pravah::{
-        Agent, AgentConfig, CompiledFlow, Context, Flow, GraphError, Runtime, Step, Toolset,
-        compile,
-    };
-    use schemars::JsonSchema;
-    use serde::{Deserialize, Serialize};
-    use serde_json::json;
-
-    use super::support::ExampleError;
-
-    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-    struct ResearchRequest {
-        question: String,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-    struct ResearchAnswer {
-        answer: String,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-    struct SearchRequest {
-        query: String,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-    struct SearchResult {
-        evidence: String,
-    }
-
-    fn research_tools(tools: Toolset) -> Toolset {
-        tools.tool(search)
-    }
-
-    async fn search(input: SearchRequest, _ctx: Context) -> Result<SearchResult, ToolError> {
-        Ok(SearchResult {
-            evidence: format!("Evidence for {}", input.query),
-        })
-    }
-
-    fn researcher(root: Agent<ResearchRequest>) -> Agent<ResearchAnswer> {
-        root.tools(research_tools).configure(configure_researcher)
-    }
-
-    /// Configures one invocation with compact declarative budgets.
-    async fn configure_researcher(
-        request: ResearchRequest,
-        _ctx: Context,
-    ) -> Result<AgentConfig, GraphError> {
-        Ok(AgentConfig::new(
-            "openai:///scripted",
-            "Use available evidence, then return the structured answer.",
-            Message::user(request.question),
-        )
-        .max_output_tokens(2048)
-        .turn_budget(1)
-        .tool_budget::<SearchRequest>(1))
-    }
-
-    fn research(root: Flow<ResearchRequest>) -> Flow<ResearchAnswer> {
-        root.agent(researcher)
-    }
-
-    /// Runs an exact tool budget followed by Pravah's forced conclusion turn.
-    pub(super) async fn run() -> Result<(), ExampleError> {
-        let factory = ScriptedFactory::new()
-            .then_tool_calls(vec![
-                mock_tool_call("search-1", "search_request", json!({"query": "Pravah"})),
-                mock_tool_call("search-2", "search_request", json!({"query": "budgets"})),
-            ])
-            .then_output(json!({"answer": "One search ran; the budget then forced conclusion."}));
-        let flow = compile(research)?;
-        let ctx = Context::default().with_client_factory(factory);
-        let mut runtime = flow.start(
-            ResearchRequest {
-                question: "Explain the result succinctly.".into(),
-            },
-            ctx,
-        )?;
-        drive(&flow, &mut runtime).await
-    }
-
-    /// Drives the stepwise runtime until the structured agent output is ready.
-    async fn drive(
-        flow: &CompiledFlow<ResearchRequest, ResearchAnswer>,
-        runtime: &mut Runtime,
-    ) -> Result<(), ExampleError> {
-        loop {
-            match runtime.next().await? {
-                Step::Continue => {}
-                Step::Done(value) => {
-                    println!("{:#?}", flow.decode_output(value)?);
-                    return Ok(());
-                }
-                Step::Suspend(_) => {
-                    return Err(ExampleError::unexpected(
-                        "budgeted agent suspended unexpectedly",
-                    ));
-                }
-            }
-        }
-    }
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct Search {
+    query: String,
 }
 
-#[cfg(feature = "testing")]
+fn tools(tools: Toolset) -> Toolset {
+    tools.tool(search)
+}
+
+async fn search(request: Search, _ctx: Context) -> Result<String, ToolError> {
+    println!("Running search: {}", request.query);
+    Ok("Pravah supports durable, stepwise workflows.".into())
+}
+
+/// The second proposed search is unavailable; the next model request must conclude.
 #[tokio::main]
-async fn main() -> Result<(), support::ExampleError> {
-    example::run().await
-}
+async fn main() -> Result<(), GraphError> {
+    let client = ScriptedFactory::new()
+        .then_tool_calls(vec![
+            mock_tool_call("first", "search", json!({"query": "Pravah"})),
+            mock_tool_call("second", "search", json!({"query": "more evidence"})),
+        ])
+        .then_output(json!("One search ran before the agent concluded."));
+    let ctx = Context::default().with_providers(pravah::testing::providers(client)?);
 
-#[cfg(not(feature = "testing"))]
-fn main() {
-    eprintln!("enable the 'testing' feature to run this deterministic example");
+    let mut chat = Chat::builder::<String, String>()
+        .model("test:///scripted")
+        .instructions("Research the question, then give a brief answer.")
+        .tools(tools)
+        .turn_budget(1)
+        .tool_budget::<Search>(1)
+        .build(ctx)?;
+
+    println!("{}", chat.send("What is Pravah?").await?.output);
+    Ok(())
 }

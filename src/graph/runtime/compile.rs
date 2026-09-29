@@ -45,7 +45,7 @@ fn compile_graph_at(
             }
             NodeKind::Builtin { .. }
             | NodeKind::PureHandler { .. }
-            | NodeKind::WorkHandler { .. }
+            | NodeKind::Fetch
             | NodeKind::Suspend { .. }
             | NodeKind::Load { .. }
             | NodeKind::Store { .. }
@@ -86,7 +86,7 @@ pub(super) fn compile_nodes(
         let kind = match &node.kind {
             NodeKind::Builtin { op } => CompiledNodeKind::Builtin { op: op.clone() },
             NodeKind::PureHandler { key } => CompiledNodeKind::PureHandler { key: key.clone() },
-            NodeKind::WorkHandler { key } => CompiledNodeKind::WorkHandler { key: key.clone() },
+            NodeKind::Fetch => CompiledNodeKind::Fetch,
             NodeKind::Load { var, key } => CompiledNodeKind::Load {
                 var: *var,
                 key: key.clone(),
@@ -99,9 +99,11 @@ pub(super) fn compile_nodes(
                 key: key.clone(),
                 payload: Arc::new(payload.clone()),
                 children: Arc::from(children.continuation.clone().into_boxed_slice()),
+                output_validator: crate::graph::agent::prepare_output_validator(payload)?,
             },
             NodeKind::Suspend { payload, .. } => CompiledNodeKind::Suspend {
                 payload: Arc::new(payload.clone()),
+                resume_type: Arc::new(suspend_type(graph, node)?.clone()),
             },
             NodeKind::Subflow { .. } => CompiledNodeKind::Subflow {
                 child_index: children.primary.ok_or_else(|| {
@@ -171,6 +173,23 @@ pub(super) fn compile_nodes(
         });
     }
     Ok(nodes)
+}
+
+/// Resolves immutable resume metadata once, while preparing an authored suspend node.
+fn suspend_type<'a>(
+    graph: &'a UntypedGraph,
+    node: &crate::graph::model::Node,
+) -> Result<&'a crate::graph::model::TypeSpec, GraphError> {
+    node.outputs
+        .first()
+        .and_then(|edge| graph.edge(*edge))
+        .map(|edge| &edge.type_spec)
+        .ok_or_else(|| {
+            GraphError::GraphValidation(format!(
+                "suspend node '{}' output type is missing",
+                node.name
+            ))
+        })
 }
 
 pub(super) fn new_frame(

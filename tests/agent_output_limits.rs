@@ -1,9 +1,12 @@
+#[path = "support/host.rs"]
+mod host;
+use pravah::graph::FetchExecutor;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 
-use pravah::clients::{Client, ClientError, ClientFactory, ClientOptions, Message};
+use pravah::clients::{Client, ClientError, ClientOptions, Message, ModelUrl, ProviderFactory};
 use pravah::testing::{ScriptedFactory, mock_tool_call};
 use pravah::tools::ToolError;
 use pravah::{
@@ -73,11 +76,7 @@ fn workflow(root: Flow<Request>) -> Flow<String> {
 
 /// Allows tests to select invalid declarations and independent turn budgets.
 async fn configure(input: Request, _ctx: Context) -> Result<AgentConfig, GraphError> {
-    let mut config = AgentConfig::new(
-        "openai:///test",
-        "Answer briefly.",
-        Message::user("question"),
-    );
+    let mut config = AgentConfig::new("test:///test", "Answer briefly.", Message::user("question"));
     if let Some(cap) = input.cap {
         config = config.max_output_tokens(cap);
         if input.duplicate {
@@ -96,16 +95,18 @@ struct CheckFactory {
     cap: Option<u32>,
 }
 
-impl ClientFactory for CheckFactory {
-    fn create(&self, model: &str, options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
+impl ProviderFactory for CheckFactory {
+    async fn llm(&self, model: &ModelUrl, options: ClientOptions) -> Result<Client, ClientError> {
         assert_eq!(options.max_output_tokens, self.cap);
-        assert_eq!(options.turn_budget, None);
-        self.script.create(model, options)
+        self.script.llm(model, options).await
     }
 }
 
-fn context(script: ScriptedFactory, cap: Option<u32>) -> Context {
-    Context::default().with_client_factory(CheckFactory { script, cap })
+fn context(script: ScriptedFactory, cap: Option<u32>) -> Result<Context, pravah::GraphError> {
+    Ok(
+        Context::default()
+            .with_providers(pravah::testing::providers(CheckFactory { script, cap })?),
+    )
 }
 
 #[derive(Clone)]
@@ -129,12 +130,14 @@ impl Compactor for ObserveCap {
 }
 
 /// Bounds deterministic test execution without hiding unexpected suspension.
-async fn finish(runtime: &mut Runtime) -> Result<(), TestError> {
+async fn finish(runtime: &mut Runtime, executor: &FetchExecutor) -> Result<(), TestError> {
     for _ in 0..50 {
-        match runtime.next().await? {
+        match host::step(runtime, executor).await? {
             Step::Continue => {}
             Step::Done(_) => return Ok(()),
-            Step::Suspend(_) => return Err(TestError::Missing("unexpected suspension")),
+            Step::Fetch(_) | Step::Suspend(_) => {
+                return Err(TestError::Missing("unexpected suspension"));
+            }
         }
     }
     Err(TestError::Missing("execution did not complete"))
@@ -163,7 +166,7 @@ fn checkpoint_mut(snapshot: &mut Value) -> Result<&mut Value, TestError> {
 /// Setting a valid cap adds no allocation to an already constructed configuration.
 #[test]
 fn setting_a_cap_allocates_nothing() {
-    let config = AgentConfig::new("openai:///test", "Answer.", Message::user("question"));
+    let config = AgentConfig::new("test:///test", "Answer.", Message::user("question"));
     let mut config = Some(config);
     let allocations = allocation_counter::measure(|| {
         config = config.take().map(|config| config.max_output_tokens(2048));
@@ -174,13 +177,16 @@ fn setting_a_cap_allocates_nothing() {
 }
 
 /// Captures committed activation before a model dispatch, without relying on exact step counts.
-async fn activated(runtime: &mut Runtime) -> Result<Snapshot, TestError> {
+async fn activated(runtime: &mut Runtime, executor: &FetchExecutor) -> Result<Snapshot, TestError> {
     for _ in 0..20 {
         let snapshot = runtime.snapshot()?;
         if checkpoint_mut(&mut serde_json::to_value(&snapshot)?).is_ok() {
             return Ok(snapshot);
         }
-        assert!(matches!(runtime.next().await?, Step::Continue));
+        assert!(matches!(
+            host::step(runtime, executor).await?,
+            Step::Continue
+        ));
     }
     Err(TestError::Missing("activation did not finish"))
 }
@@ -192,19 +198,21 @@ async fn request_cap_is_optional_and_visible_to_preparation() -> Result<(), Test
     for cap in [None, Some(2048), Some(u32::MAX)] {
         let script = ScriptedFactory::new().then_output(json!("answer"));
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut runtime = flow
-            .start(
-                Request {
-                    cap,
-                    ..Request::capped()
-                },
-                context(script.clone(), cap),
-            )?
+        let executor = flow
+            .prepared()
+            .executor(context(script.clone(), cap)?)
             .with_compactor(ObserveCap {
                 calls: calls.clone(),
                 cap,
             });
-        finish(&mut runtime).await?;
+        let mut runtime = flow.start(
+            Request {
+                cap,
+                ..Request::capped()
+            },
+            uuid::Uuid::nil(),
+        )?;
+        finish(&mut runtime, &executor).await?;
         assert_eq!(script.calls().len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -224,19 +232,21 @@ async fn tool_loops_and_forced_conclusion_keep_the_cap() -> Result<(), TestError
             )])
             .then_output(json!("answer"));
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut runtime = flow
-            .start(
-                Request {
-                    turns,
-                    ..Request::capped()
-                },
-                context(script.clone(), Some(2048)),
-            )?
+        let executor = flow
+            .prepared()
+            .executor(context(script.clone(), Some(2048))?)
             .with_compactor(ObserveCap {
                 calls: calls.clone(),
                 cap: Some(2048),
             });
-        finish(&mut runtime).await?;
+        let mut runtime = flow.start(
+            Request {
+                turns,
+                ..Request::capped()
+            },
+            uuid::Uuid::nil(),
+        )?;
+        finish(&mut runtime, &executor).await?;
         assert_eq!(script.calls().len(), 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }

@@ -27,7 +27,6 @@ pub mod store;
 pub mod tracing;
 mod validation;
 
-pub use crate::clients::{ClientFactory, ClientFactoryLayer};
 pub use crate::commons::{Agent, AgentConfig};
 pub use crate::context::Context;
 pub use crate::tools::base::{SuspendedValue, Tool, ToolOutput};

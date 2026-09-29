@@ -5,14 +5,12 @@ use crate::history::{CompactionRequest, MessageHistory};
 /// Creates interleaved sessions, a completed tool exchange and a pending user input.
 fn conversation() -> MessageHistory {
     let mut history = MessageHistory::new();
-    history.push(
-        "s",
-        "summary",
-        Message {
-            role: Role::System,
-            ..Message::user("summary")
-        },
-    );
+    history.push("s", "__summary__", {
+        let mut message =
+            Message::user("<pravah_working_memory>\nsummary\n</pravah_working_memory>");
+        message.role = Role::System;
+        message
+    });
     history.push(
         "s",
         "agent",
@@ -36,14 +34,14 @@ fn enumeration_preserves_live_indices_and_borrows() {
         .enum_messages("s", 0)
         .map(|(index, _)| index)
         .collect();
-    assert_eq!(indices, [0, 1, 4, 5, 6, 7]);
+    assert_eq!(indices, [1, 4, 5, 6, 7]);
     let selected: Vec<_> = history.enum_messages("s", 2).collect();
     assert_eq!(
         selected.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
-        [0, 1, 4, 5]
+        [1, 4, 5]
     );
-    assert_eq!(selected[1].1.key.as_deref(), Some("db:1"));
-    assert!(std::ptr::eq(selected[1].1, &history.entries()[1].message));
+    assert_eq!(selected[0].1.key.as_deref(), Some("db:1"));
+    assert!(std::ptr::eq(selected[0].1, &history.entries()[1].message));
     assert_eq!(history.enum_messages("other", 0).count(), 1);
     assert_eq!(history.enum_messages("absent", 0).count(), 0);
     assert_eq!(history.enum_messages("s", usize::MAX).count(), 0);
@@ -112,26 +110,30 @@ fn request_helpers_are_scoped_to_committed_history() -> Result<(), serde_json::E
         session_id: "s",
         model: "test",
         options: &options,
-        framework_messages: &[Message {
-            role: Role::System,
-            ..Message::user("conclude")
+        framework_messages: &[{
+            let mut message = Message::user("conclude");
+            message.role = Role::System;
+            message
         }],
         committed,
         protected,
     };
     assert_eq!(
         request.enum_messages(0).map(|(i, _)| i).collect::<Vec<_>>(),
-        [0, 1, 4, 5, 6]
+        [1, 4, 5, 6]
     );
     assert_eq!(
         request.enum_messages(2).map(|(i, _)| i).collect::<Vec<_>>(),
-        [0, 1, 4]
+        [1, 4]
     );
     assert_eq!(request.turn_count(), 2);
+    assert_eq!(request.summary(), Some("summary"));
     let messages: Vec<_> = committed.iter().map(|entry| &entry.message).collect();
     assert_eq!(request.byte_size()?, serde_json::to_vec(&messages)?.len());
     let allocations = allocation_counter::measure(|| {
-        assert_eq!(request.enum_messages(1).count(), 4);
+        assert_eq!(request.enum_messages(1).count(), 3);
+        assert_eq!(history.enum_messages("s", 1).count(), 4);
+        assert_eq!(request.summary(), Some("summary"));
     });
     assert_eq!(allocations.count_total, 0);
     Ok(())

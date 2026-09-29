@@ -26,7 +26,7 @@ fn view_matches_full_payload() -> Result<(), ValueError> {
     let view = AgentPayloadView::read(&value).expect("execution view");
     let full = decode_payload(&value).expect("full payload");
     assert_eq!(view.agent_id, full.agent_id);
-    assert_eq!(view.output_schema, full.output_schema);
+    assert_eq!(view.output_schema(), &to_value(full.output_schema)?);
     assert_eq!(to_value(&view.tools)?, to_value(&full.tools)?);
     assert!(std::ptr::eq(
         view.agent_id,
@@ -42,13 +42,14 @@ fn view_matches_full_payload() -> Result<(), ValueError> {
     Ok(())
 }
 
-/// Unused input and configuration schemas do not increase execution-view allocations.
+/// Unused schemas, including structured output, do not increase execution-view allocations.
 #[test]
 fn schema_size_does_not_affect_view_allocations() -> Result<(), ValueError> {
     let small = to_value(payload())?;
     let mut json = payload();
     let schema = serde_json::json!({"enum": vec!["large-schema".repeat(1000); 100]});
     json["input_schema"] = schema.clone();
+    json["output_schema"] = schema.clone();
     json["configuration"]["schema"] = schema;
     let large = to_value(json)?;
     let measure = |value: &Value| {

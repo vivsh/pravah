@@ -5,7 +5,7 @@ use super::ids::{EdgeId, HandlerKey, MarkId, NodeId, VarId};
 use super::value::Value;
 
 /// Current serialized untyped graph schema version.
-pub const UNTYPED_GRAPH_SCHEMA_VERSION: u32 = 1;
+pub const UNTYPED_GRAPH_SCHEMA_VERSION: u32 = 2;
 
 /// JSON Schema metadata associated with an edge or variable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -144,8 +144,8 @@ pub enum NodeKind {
     Builtin { op: BuiltinNode },
     /// Synchronous pure transform resolved from the value-handler registry.
     PureHandler { key: HandlerKey },
-    /// One-shot async operation resolved from the work-handler registry.
-    WorkHandler { key: HandlerKey },
+    /// Buffered external request, completed only by explicit outcome delivery.
+    Fetch,
     /// Multi-step VM operation resolved from the continuation registry.
     ///
     /// Continuations can keep checkpoints and call child graphs, but external

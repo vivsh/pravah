@@ -1,3 +1,4 @@
+use crate::clients::ErrorKind;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -6,7 +7,10 @@ use crate::clients::{ClientError, Message, Role, TokenUsage};
 
 mod replacement;
 
-pub(crate) use replacement::{protected_start, validate_message_groups};
+pub(crate) use replacement::{
+    ValidatedCompactionResult, prepare_compaction, protected_start, summary_uuid,
+    validate_message_groups,
+};
 
 /// One history row with Pravah metadata around a wire-format [`Message`].
 /// External code should create entries through [`MessageHistory::push`].
@@ -51,20 +55,54 @@ pub struct MessageHistory {
 }
 
 impl MessageHistory {
+    pub(crate) fn next_position(&self) -> u64 {
+        self.next_position
+    }
+
+    /// Stages deterministic modern entries without mutating history or generating random IDs.
+    pub(crate) fn stage_entries(
+        &self,
+        execution: Uuid,
+        session: &str,
+        agent: &str,
+        messages: Vec<Message>,
+    ) -> Result<Vec<HistoryEntry>, crate::graph::GraphError> {
+        let count = u64::try_from(messages.len()).map_err(|_| {
+            crate::graph::GraphError::HistoryPersistence("history batch too large".into())
+        })?;
+        self.next_position.checked_add(count).ok_or_else(|| {
+            crate::graph::GraphError::HistoryPersistence("history positions exhausted".into())
+        })?;
+        Ok(messages
+            .into_iter()
+            .zip(self.next_position..)
+            .map(|(message, position)| HistoryEntry {
+                id: Uuid::new_v5(
+                    &execution,
+                    format!("pravah.history.v1:{position}").as_bytes(),
+                ),
+                position,
+                session_id: session.into(),
+                agent_id: agent.into(),
+                evicted: false,
+                message,
+            })
+            .collect())
+    }
     /// Creates an empty history with zeroed counters.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Borrows live non-tool messages oldest-first, omitting the newest `skip_recent` non-tool messages.
-    /// Indices refer to all live session entries, including tools; they are not stable row identities.
+    /// Borrows live messages excluding framework summaries and tool calls/results, oldest-first.
+    /// Skips the newest `skip_recent` exposed messages; indices refer to all live session entries.
     /// This selection does not authorize eviction of partial exchanges or tool groups.
     pub fn enum_messages<'a>(
         &'a self,
         session_id: &'a str,
         skip_recent: usize,
     ) -> impl Iterator<Item = (usize, &'a Message)> {
-        super::inspection::enum_messages(self.live_messages(session_id), skip_recent)
+        super::inspection::enum_messages(self.live_entries(session_id), skip_recent)
     }
 
     /// Returns the compact JSON array size of all live session messages, including tool data.
@@ -84,10 +122,16 @@ impl MessageHistory {
         &'a self,
         session_id: &'a str,
     ) -> impl Iterator<Item = &'a Message> + Clone {
+        self.live_entries(session_id).map(|entry| &entry.message)
+    }
+
+    fn live_entries<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> impl Iterator<Item = &'a HistoryEntry> + Clone {
         self.entries
             .iter()
             .filter(move |entry| !entry.evicted && entry.session_id == session_id)
-            .map(|entry| &entry.message)
     }
 
     /// Reconstructs a [`MessageHistory`] from a flat list of stored entries.
@@ -182,8 +226,9 @@ impl MessageHistory {
             last.map(|e| &e.message.role),
             Some(Role::AssistantToolCalls { .. })
         ) {
-            return Err(ClientError::Validation(
-                "history ends with assistant tool calls without tool results".into(),
+            return Err(ClientError::new(
+                ErrorKind::Validation,
+                "history ends with assistant tool calls without tool results",
             ));
         }
         Ok(())
@@ -211,9 +256,10 @@ impl MessageHistory {
         let mut first_position: Option<u64> = None;
         for &rel_idx in &result.evict_indices {
             let entry = session_slice.get(rel_idx).ok_or_else(|| {
-                ClientError::Validation(format!(
-                    "compaction index {rel_idx} out of bounds for session '{session_id}'"
-                ))
+                ClientError::new(
+                    ErrorKind::Validation,
+                    format!("compaction index {rel_idx} out of bounds for session '{session_id}'"),
+                )
             })?;
             if first_position.is_none_or(|p| entry.position < p) {
                 first_position = Some(entry.position);
@@ -238,7 +284,7 @@ impl MessageHistory {
                 id: Uuid::now_v7(),
                 position,
                 session_id: session_id.to_owned(),
-                agent_id: "__summary__".to_owned(),
+                agent_id: super::inspection::SUMMARY_AGENT_ID.to_owned(),
                 evicted: false,
                 message: summary_message,
             };

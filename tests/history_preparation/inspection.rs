@@ -32,9 +32,11 @@ async fn chat_compactor_observes_messages_before_replacement() -> Result<(), Gra
     let factory = ScriptedFactory::new()
         .then_output(serde_json::json!({"text":"first"}))
         .then_output(serde_json::json!({"text":"second"}));
-    let mut chat = Chat::new(tutor, Context::default().with_client_factory(factory))
-        .await?
-        .with_compactor(InspectMessages);
+    let mut chat = Chat::new(
+        tutor,
+        Context::default().with_providers(pravah::testing::providers(factory)?),
+    )?
+    .with_compactor(InspectMessages);
     chat.send_with_key(
         Question {
             text: "old question".into(),
@@ -51,7 +53,7 @@ async fn chat_compactor_observes_messages_before_replacement() -> Result<(), Gra
     let mut chat = Chat::<Question, Answer>::from_snapshot(
         tutor,
         snapshot,
-        Context::default().with_client_factory(factory.clone()),
+        Context::default().with_providers(pravah::testing::providers(factory.clone())?),
     )?
     .with_compactor(InspectMessages);
     chat.send(Question {

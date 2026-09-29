@@ -3,9 +3,11 @@ use crate::history::MessageHistory;
 
 /// Creates complete token usage for history accounting tests.
 pub(super) fn usage(input: u32, output: u32) -> TokenUsage {
-    TokenUsage {
-        input: Some(input),
-        output: Some(output),
+    {
+        let mut usage = TokenUsage::default();
+        usage.input = Some(input);
+        usage.output = Some(output);
+        usage
     }
 }
 
@@ -27,13 +29,7 @@ pub(super) fn push_tool_calls(history: &mut MessageHistory, session: &str, calls
     history.push(
         session,
         "agent",
-        Message {
-            key: None,
-            role: Role::AssistantToolCalls { calls },
-            content: String::new(),
-            attachments: Vec::new(),
-            usage: None,
-        },
+        Message::new(Role::AssistantToolCalls { calls }, String::new()),
     );
 }
 
@@ -49,10 +45,5 @@ pub(super) fn push_user(history: &mut MessageHistory, session: &str, content: &s
 
 /// Creates a deterministic tool call fixture.
 pub(super) fn tool_call(id: &str) -> ToolCall {
-    ToolCall {
-        id: id.into(),
-        name: "f".into(),
-        args: serde_json::json!({}),
-        thought_signatures: None,
-    }
+    ToolCall::new(id.into(), "f".into(), serde_json::json!({}))
 }

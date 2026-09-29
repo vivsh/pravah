@@ -16,13 +16,12 @@ supplies its own context:
 ```rust
 use pravah::{Chat, ChatRequest, Context};
 
-let mut chat = Chat::builder::<String>()
+let mut chat = Chat::builder::<String, String>()
     .model("openai:///gpt-5")
     .instructions("Answer concisely using the available evidence.")
     .turn_budget(6)
     .max_output_tokens(2_000)
-    .build(Context::default())
-    .await?;
+    .build(Context::default())?;
 
 let reply = chat.send(
     ChatRequest::from("Compare these approaches.")
@@ -33,27 +32,39 @@ let reply = chat.send(
 Builder chats always retain their conversation between turns. Output can be
 any supported structured type, not just `String`. Add `.tools(research_tools)`,
 `.tool_budget::<SearchRequest>(2)`, or `.control(control_research)` using the
-ordinary [agent APIs](clients.md). Controllers receive `AgentLoop<ChatRequest>`.
+ordinary [agent APIs](clients.md). Controllers receive `AgentLoop<I>` with the
+original typed input, not its JSON rendering or request envelope.
 Provider-specific options use `.provider_config(...)`.
 
-`send` and `send_with_key` accept anything convertible into the Chat's input type.
-For builder chats, pass `&str`, `String`, `Message`, or `ChatRequest` directly;
-no `.into()` is needed. Use `ChatRequest` when adding per-message context.
+Both construction paths have fixed types `Chat<I, O, S>`. Pass `I` directly to
+`send` or `send_with_key`, or wrap it in `ChatRequest<I>` for per-invocation options.
+String chats also accept `&str`; no `.into()` is needed.
 
-`ChatRequest::new(Message)` and conversions from messages and strings are
-infallible. `send` validates user role, tool selection and resource references
-before accepting the turn. Invalid requests leave the chat ready for a corrected
-submission. Resource existence and authorization are checked during activation;
-failures after acceptance leave an unfinished turn, not a silently retried chat.
+`ChatRequest::from(input)` only moves the input; it performs no serialization and
+cannot fail. There is no `ChatRequest::new`. Inputs implement `Serialize`,
+`DeserializeOwned`, `JsonSchema`, `Send`, and `Sync` and are owned (`'static`);
+neither `Clone` nor `Default` is required.
 
-- `.memory(text)` applies only to this invocation and remains outside message
-  history. Omitting it does not reuse the previous request's memory. Resolved
+Builder chats render inputs as JSON text at activation: structs become JSON
+objects and strings include JSON quoting and escapes. The original typed input
+remains available to controllers and durable execution. To customize the user
+message, preserve a configured key, or add attachments, use a function-defined
+agent. Rath `Message` is not a special input bypass for a typed chat.
+
+`send` validates explicit tool selections and resource references and converts the
+submission before accepting the turn. Such failures leave the chat ready for a
+corrected submission. Message rendering, configuration, resource existence and
+authorization are checked during activation; failures after acceptance leave an
+unfinished turn, not a silently retried chat.
+
+- `.memory(text)` replaces configured memory for this invocation and remains outside message
+  history. Omitting it preserves `AgentConfig.memory`, not the previous request's override. Resolved
   memory can still be present in execution snapshots; do not treat it as secret storage.
 - `.tools(["search_request"])` selects from declared candidate tools. Omission
-  enables all candidates; an empty list enables none. Names must be unique and
+  preserves the configured filter (all candidates for a builder); an empty list enables none. Names must be unique and
   known. Tools are exposed in declaration order, subject to controller decisions
   and budgets. Selection cannot add undeclared tools.
-- `.resources(refs)` replaces builder defaults, including with an empty list.
+- `.resources(refs)` replaces configured resources, including with an empty list.
   MCP registrations and credentials belong in `Context`; see [MCP usage](mcp.md).
 
 Scalar builder setters replace previous values. Invalid/repeated budgets,
@@ -61,17 +72,16 @@ duplicate tools, repeated controllers and missing models fail at build or restor
 Pravah's turn budget is not an exact context-token budget; provider output caps
 are forwarded through Rath and remain provider-dependent.
 
-Configure everything before the terminal `.build(ctx).await?` call:
+Configure everything before the terminal `.build(ctx)?` call:
 
 ```rust
-let mut chat = Chat::builder::<String>()
+let mut chat = Chat::builder::<String, String>()
     .model("openai:///gpt-5")
     .instructions("Answer concisely using the available evidence.")
     .state(initial_state)
     .compactor(working_memory)
     .store(history_store)
-    .build(ctx)
-    .await?;
+    .build(ctx)?;
 ```
 
 State needs neither `Clone` nor `Default`. Repeated state or service setters
@@ -79,10 +89,10 @@ replace previous values; their order does not matter. State moves into the graph
 existing application variable at build, while services remain runtime-only.
 Omitting `.state(...)` selects unit state. There is no `build_with_state` method.
 
-Restore synchronously with the same definition:
+Restore synchronously with the same definition. Instructions alone may change:
 
 ```rust
-let mut restored = Chat::builder::<String>()
+let mut restored = Chat::builder::<String, String>()
     .model("openai:///gpt-5")
     .instructions("Answer concisely using the available evidence.")
     .turn_budget(6)
@@ -95,13 +105,22 @@ For restoration, configure `.store(...)` and `.compactor(...)` on the builder
 before `.restore::<State>(snapshot, ctx)`. State comes only from the snapshot;
 do not supply `.state(...)` when restoring. Restore is unavailable on builders
 carrying non-unit initial state, preventing silent state replacement. Construction and
-restore do not call models or read resources. Changed settings or tool definitions
-reject incompatible snapshots. Committed configuration and resolved resources
-are not evaluated again after restoration. Chat does not expose orchestration
-for resuming unfinished turns; `send` and `set` reject them.
+restore do not call models or read resources. Changed models, budgets, provider options,
+default resources, schemas, or tool definitions still reject incompatible snapshots.
+New instructions apply to the next invocation whose configuration has not yet committed;
+an already-configured invocation keeps its checkpointed instructions until it finishes.
+Committed configuration and resolved resources are not evaluated again after restoration.
+The new prompt can interpret existing history differently; compatibility does not guarantee
+identical agent behavior. Use the manual Chat methods to drive unfinished turns;
+`send` and `set` reject them.
+
+Use the same input, output and state types when restoring. Chat snapshots created
+before typed request envelopes or the separation of instructions from builder settings
+are incompatible; ordinary workflow snapshots are
+unaffected. No migration or automatic resubmission is performed.
 
 See the runnable [builder example](../examples/graph_chat_builder.rs), including
-keyed messages, state, and JSON/CBOR restoration.
+keyed messages, state, and JSON restoration.
 
 ## Define A Chat Agent
 
@@ -127,7 +146,7 @@ async fn configure_tutor(
     .keep_alive())
 }
 
-let mut chat = Chat::new(tutor, Context::default()).await?;
+let mut chat = Chat::new(tutor, Context::default())?;
 ```
 
 `Question` and `Answer` are application types implementing `Serialize`,
@@ -138,7 +157,7 @@ The configuration function runs for each new chat input. It may select the
 model, instructions, initial user message, memory, tools, resources, and
 budgets from the input and `Context`.
 
-Construction is asynchronous and fallible: it validates the chat and leaves it
+Construction is synchronous and fallible: it validates the chat and leaves it
 waiting for input. It does not configure the agent, call a model, resolve MCP
 resources, or record a message. Snapshots are available immediately.
 
@@ -159,7 +178,8 @@ have no application key. A key does not enable deduplication or automatic retry.
 Both builder-created and function-defined chats also support
 `chat.send_with_key(input, "message-42").await?`. The explicit key overrides
 the configured message key for that submission only. Ordinary `send` preserves
-the key supplied by configuration or `ChatRequest`.
+the key supplied by function-defined configuration. Builder messages are unkeyed
+unless submitted with `send_with_key`.
 
 ## Persist Application State
 
@@ -167,7 +187,7 @@ Use `Chat<Input, Output, State>` when application data should travel with the
 conversation checkpoint:
 
 ```rust
-let mut chat = Chat::with_state(tutor, initial_state, ctx).await?;
+let mut chat = Chat::with_state(tutor, initial_state, ctx)?;
 
 let mut state = chat.get()?;
 state.selected_project = Some(project_id);
@@ -199,11 +219,20 @@ automatically placed in prompts or conversation history.
 unfinished execution, `get` and `snapshot` remain available but `set` and `send`
 return `GraphError::ChatNotReady`. There is no automatic retry or in-flight retry
 method. If an agent controller or child tool suspends, `send` returns
-`GraphError::ChatSuspended`, not an assistant response. Use the explicit workflow
-runtime when the application needs arbitrary suspension/resumption or retry control.
+`GraphError::ChatSuspended`, not an assistant response. Use Chat's manual
+`next`, `resume`, and `resume_fetch` methods when the application owns orchestration;
+see [external request delivery](fetch.md).
 
-See the [deterministic state example](../examples/graph_chat_state.rs) for a
-complete conversation with JSON and CBOR restoration.
+Client creation and execution failures from either send method retain their Rath
+diagnostics. Use `error.client_error()` or match
+`GraphError::AgentClient { operation, source }`; see [client error inspection](clients.md#inspect-client-errors).
+Async sends record a portable failure in the continuation before returning the
+original local error. Restoration preserves the portable diagnostics, not the
+original Rust source object, and does not redispatch that completed operation.
+Inspecting an error does not make an unfinished Chat ready for another submission.
+
+See the [deterministic Chat builder example](../examples/graph_chat_builder.rs) for a
+complete conversation with JSON restoration. Snapshots also support CBOR through Serde.
 
 ## Send Typed Messages
 
@@ -224,8 +253,8 @@ chat retains one runtime across turns; callers do not need to operate the
 stepwise execution loop directly.
 
 Provider clients come from the session-bound `Context`. `Context::default()`
-uses Rath's default client factory, while `Context::with_client_factory`
-installs an application-specific factory. A chat uses the same context for
+uses Rath's built-in providers, while `Context::with_providers`
+installs an application-owned `ProviderRegistry`. A chat uses the same context for
 every turn until it is snapshotted and restored with a new context.
 
 ## Tools And Budgets
@@ -291,14 +320,14 @@ iteration, JSON byte size and completed-turn counts. See [history inspection and
 compaction](history.md) for selection, indexing and external memory integration.
 
 For builder chats, use `.store(history_store).compactor(working_memory)` before
-the final `.build(ctx).await?` or synchronous `.restore::<State>(snapshot, ctx)`.
+the final `.build(ctx)?` or synchronous `.restore::<State>(snapshot, ctx)`.
 
 Function-defined chats retain their consuming service methods:
 
 ```rust
 use pravah::{CompactionRequest, Compactor, CompactionResult, HistoryStore};
 
-let chat = Chat::new(tutor, ctx).await?
+let chat = Chat::new(tutor, ctx)?
     .with_store(history_store)
     .with_compactor(working_memory);
 
@@ -332,6 +361,12 @@ read both, but replacement indices refer only to `committed()`. Select a sorted,
 contiguous prefix `0..n` ending at an exchange boundary. A non-empty `summary`
 requires replaced entries; Pravah places it in a tagged system message before
 retained exchanges. `CompactionResult::default()` leaves live history intact.
+
+Read existing memory with `request.summary()`, which borrows the original text
+without its framework wrapper. Both history and request `enum_messages` helpers
+exclude framework summaries and tool messages while preserving original indices.
+Use the summary as prior context, not new conversation evidence. Replacement
+indices must still cover the full prefix, including the old summary.
 
 Pravah invokes the policy once before each model execution attempt, including
 tool-loop redispatch and forced conclusion, and never after the final response.
@@ -369,7 +404,7 @@ summary when needed.
 rewrite it. Legacy compaction remains under `pravah::legacy`.
 
 See [the runnable working-memory example](../examples/graph_chat_working_memory.rs)
-for a fallible policy and restoration with fresh dependencies. Applications
+for a small replacement policy. Applications
 provide the summarizer, storage, retry handling, and any model-specific size
 estimation. Configure a separate per-request output cap with
 [`AgentConfig::max_output_tokens`](clients.md#limit-generated-output); history
@@ -386,4 +421,4 @@ The application remains responsible for:
 - deciding how to retry failed sends.
 
 For a complete runnable conversation, see
-[`examples/chat.rs`](../examples/chat.rs).
+[`examples/graph_chat_builder.rs`](../examples/graph_chat_builder.rs).

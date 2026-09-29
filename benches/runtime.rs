@@ -1,11 +1,9 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
-use futures::future::BoxFuture;
 use pravah::clients::{
-    Client, ClientError, ClientFactory, ClientOptions, ClientOutput, ClientResponse, Message,
-    ModelUrl, Provider,
+    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmBackend, Message,
+    ModelUrl, Provider, ProviderFactory,
 };
 use pravah::graph::{
     Agent, AgentConfig, AgentDecision, AgentLoop, BuiltinNode, CompiledFlow, ContinuationContext,
@@ -67,8 +65,7 @@ struct BenchmarkClient {
     options: ClientOptions,
 }
 
-#[async_trait]
-impl Client for BenchmarkClient {
+impl LlmBackend for BenchmarkClient {
     fn model_url(&self) -> &ModelUrl {
         &self.model_url
     }
@@ -85,14 +82,14 @@ impl Client for BenchmarkClient {
     }
 }
 
-impl ClientFactory for BenchmarkClientFactory {
-    fn create(
+impl ProviderFactory for BenchmarkClientFactory {
+    async fn llm(
         &self,
-        model_url: &str,
+        model_url: &ModelUrl,
         options: ClientOptions,
-    ) -> Result<Box<dyn Client>, ClientError> {
-        Ok(Box::new(BenchmarkClient {
-            model_url: ModelUrl::parse(model_url)?,
+    ) -> Result<Client, ClientError> {
+        Ok(Client::from_backend(BenchmarkClient {
+            model_url: model_url.clone(),
             options,
         }))
     }
@@ -108,14 +105,12 @@ impl ContinuationHandler for AddContinuation {
         _state: Option<Value>,
         inputs: Vec<Value>,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            let input = required_i64(inputs.first(), "continuation input")?;
-            let add = required_i64(payload.get("add"), "continuation payload")?;
-            Ok(ContinuationTransition {
-                outputs: vec![Value::from(input + add)],
-                ..ContinuationTransition::default()
-            })
+    ) -> Result<ContinuationTransition, GraphError> {
+        let input = required_i64(inputs.first(), "continuation input")?;
+        let add = required_i64(payload.get("add"), "continuation payload")?;
+        Ok(ContinuationTransition {
+            outputs: vec![Value::from(input + add)],
+            ..ContinuationTransition::default()
         })
     }
 
@@ -125,12 +120,10 @@ impl ContinuationHandler for AddContinuation {
         _checkpoint: Value,
         _event: ContinuationEvent,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async {
-            Err(GraphError::Invalid(
-                "benchmark continuation cannot advance".into(),
-            ))
-        })
+    ) -> Result<ContinuationTransition, GraphError> {
+        Err(GraphError::Invalid(
+            "benchmark continuation cannot advance".into(),
+        ))
     }
 }
 
@@ -155,7 +148,7 @@ async fn configure_benchmark_agent(
     _ctx: Context,
 ) -> Result<AgentConfig, GraphError> {
     Ok(AgentConfig::new(
-        "openai:///benchmark",
+        "test:///benchmark",
         "Return the structured answer.",
         Message::user(input.prompt),
     ))
@@ -167,7 +160,7 @@ async fn configure_budgeted_benchmark_agent(
     _ctx: Context,
 ) -> Result<AgentConfig, GraphError> {
     Ok(AgentConfig::new(
-        "openai:///benchmark",
+        "test:///benchmark",
         "Return the structured answer.",
         Message::user(input.prompt),
     )
@@ -249,7 +242,7 @@ fn report_agent_allocations(
     name: &str,
     flow: &CompiledFlow<AgentFixture, AgentAnswer>,
 ) -> Result<(), GraphError> {
-    let ctx = context().with_client_factory(BenchmarkClientFactory);
+    let ctx = context().with_providers(pravah::testing::providers(BenchmarkClientFactory)?);
     futures::executor::block_on(run_agent_once(flow, ctx.clone()))?;
     let mut result = Ok(());
     let measured = allocation_counter::measure(|| {
@@ -269,7 +262,7 @@ async fn report_agent(
     iterations: usize,
     flow: &CompiledFlow<AgentFixture, AgentAnswer>,
 ) -> Result<(), GraphError> {
-    let ctx = context().with_client_factory(BenchmarkClientFactory);
+    let ctx = context().with_providers(pravah::testing::providers(BenchmarkClientFactory)?);
     let mut samples = Vec::with_capacity(VM_SAMPLES);
     for _ in 0..VM_SAMPLES {
         let start = Instant::now();
@@ -287,14 +280,18 @@ async fn run_agent_once(
     flow: &CompiledFlow<AgentFixture, AgentAnswer>,
     ctx: Context,
 ) -> Result<(), GraphError> {
+    let executor = flow.prepared().executor(ctx);
     let mut runtime = flow.start(
         AgentFixture {
             prompt: "benchmark".into(),
         },
-        ctx,
+        uuid::Uuid::nil(),
     )?;
     loop {
-        match runtime.next().await? {
+        match runtime.next()? {
+            Step::Fetch(fetch) => {
+                runtime.resume_fetch(fetch.id(), Ok(executor.execute(&fetch).await?))?;
+            }
             Step::Continue => {}
             Step::Done(output) => {
                 black_box(flow.decode_output(output)?);
@@ -420,8 +417,8 @@ async fn report_prepare_each_start(
         let start = Instant::now();
         for _ in 0..iterations {
             let prepared = PreparedGraph::new(graph.clone(), HandlerRegistry::new())?;
-            let mut runtime = prepared.start(Value::from(7_i64), context())?;
-            while matches!(runtime.next().await?, Step::Continue) {}
+            let mut runtime = prepared.start(Value::from(7_i64), uuid::Uuid::nil())?;
+            while matches!(runtime.next()?, Step::Continue) {}
             black_box(runtime);
         }
         samples.push(ns_per_iteration(start.elapsed(), iterations));
@@ -594,15 +591,15 @@ async fn report_vm(
     for _ in 0..VM_SAMPLES {
         let start = Instant::now();
         for _ in 0..iterations {
-            let mut runtime = prepared.start(Value::from(7_i64), context())?;
+            let mut runtime = prepared.start(Value::from(7_i64), uuid::Uuid::nil())?;
             loop {
-                match runtime.next().await? {
+                match runtime.next()? {
                     Step::Continue => {}
                     Step::Done(output) => {
                         black_box(output);
                         break;
                     }
-                    Step::Suspend(_) => {
+                    Step::Fetch(_) | Step::Suspend(_) => {
                         return Err(GraphError::Invalid(
                             "benchmark unexpectedly suspended".into(),
                         ));
@@ -621,12 +618,11 @@ async fn report_snapshot_restore(
     iterations: usize,
     prepared: &PreparedGraph,
 ) -> Result<(), GraphError> {
-    let ctx = context();
-    let mut runtime = prepared.start(Value::from(7_i64), ctx.clone())?;
-    let _ = runtime.next().await?;
+    let mut runtime = prepared.start(Value::from(7_i64), uuid::Uuid::nil())?;
+    let _ = runtime.next()?;
     let snapshot = runtime.snapshot()?;
     report_allocations("vm/snapshot_clone_restore", || {
-        prepared.restore(snapshot.clone(), ctx.clone())
+        prepared.restore(snapshot.clone())
     });
     let encoded = serde_json::to_vec(&snapshot).map_err(|error| GraphError::JsonEncode {
         target: "benchmark snapshot".into(),
@@ -634,13 +630,13 @@ async fn report_snapshot_restore(
     })?;
     report_allocations("vm/snapshot_decode_restore", || {
         let decoded: Snapshot = serde_json::from_slice(&encoded).expect("snapshot should decode");
-        prepared.restore(decoded, ctx.clone())
+        prepared.restore(decoded)
     });
     let mut samples = Vec::with_capacity(VM_SAMPLES);
     for _ in 0..VM_SAMPLES {
         let start = Instant::now();
         for _ in 0..iterations {
-            black_box(prepared.restore(snapshot.clone(), ctx.clone())?);
+            black_box(prepared.restore(snapshot.clone())?);
         }
         samples.push(ns_per_iteration(start.elapsed(), iterations));
     }
@@ -654,15 +650,11 @@ async fn report_json(name: &str, iterations: usize) -> Result<(), GraphError> {
     for _ in 0..VM_SAMPLES {
         let start = Instant::now();
         for _ in 0..iterations {
-            let response = invoker
-                .invoke(
-                    JsonRequest::Start {
-                        version: JSON_WIRE_VERSION,
-                        input: json!(7),
-                    },
-                    context(),
-                )
-                .await?;
+            let response = invoker.invoke(JsonRequest::Start {
+                execution_id: uuid::Uuid::nil(),
+                version: JSON_WIRE_VERSION,
+                input: json!(7),
+            })?;
             black_box(response);
         }
         samples.push(ns_per_iteration(start.elapsed(), iterations));
@@ -673,15 +665,11 @@ async fn report_json(name: &str, iterations: usize) -> Result<(), GraphError> {
 
 async fn report_json_next(name: &str, iterations: usize) -> Result<(), GraphError> {
     let invoker = JsonInvoker::new(two_step_json_graph()?, HandlerRegistry::new())?;
-    let response = invoker
-        .invoke(
-            JsonRequest::Start {
-                version: JSON_WIRE_VERSION,
-                input: json!(7),
-            },
-            context(),
-        )
-        .await?;
+    let response = invoker.invoke(JsonRequest::Start {
+        execution_id: uuid::Uuid::nil(),
+        version: JSON_WIRE_VERSION,
+        input: json!(7),
+    })?;
     let JsonResponse::Continue { snapshot, .. } = response else {
         return Err(GraphError::Invalid(
             "two-step start did not continue".into(),
@@ -696,15 +684,11 @@ async fn report_json_next(name: &str, iterations: usize) -> Result<(), GraphErro
 
 async fn report_json_resume(name: &str, iterations: usize) -> Result<(), GraphError> {
     let invoker = JsonInvoker::new(suspend_json_graph()?, HandlerRegistry::new())?;
-    let response = invoker
-        .invoke(
-            JsonRequest::Start {
-                version: JSON_WIRE_VERSION,
-                input: json!(7),
-            },
-            context(),
-        )
-        .await?;
+    let response = invoker.invoke(JsonRequest::Start {
+        execution_id: uuid::Uuid::nil(),
+        version: JSON_WIRE_VERSION,
+        input: json!(7),
+    })?;
     let JsonResponse::Suspend { snapshot, .. } = response else {
         return Err(GraphError::Invalid("suspend start did not suspend".into()));
     };
@@ -726,7 +710,7 @@ async fn report_json_string(
     for _ in 0..VM_SAMPLES {
         let start = Instant::now();
         for _ in 0..iterations {
-            black_box(invoker.invoke_str(request, context()).await?);
+            black_box(invoker.invoke_str(request)?);
         }
         samples.push(ns_per_iteration(start.elapsed(), iterations));
     }

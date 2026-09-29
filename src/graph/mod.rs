@@ -13,6 +13,8 @@ pub mod chat;
 pub mod diagram;
 /// Error types for graph and VM failures.
 pub mod error;
+/// Buffered requests and outcomes for externally executed operations.
+pub mod fetch;
 /// Dense graph identifier types.
 pub mod ids;
 /// Trusted transport-neutral JSON invocation facade.
@@ -48,9 +50,12 @@ pub use agent::{
     McpResourceRef, ToolFilter, ToolInfo, Toolset,
 };
 pub use builder::UntypedGraphBuilder;
-pub use chat::{Chat, ChatBuilder, ChatRequest, ChatTurn};
+pub use chat::{Chat, ChatBuilder, ChatRequest, ChatStep, ChatTurn};
 pub use diagram::GraphDiagram;
-pub use error::GraphError;
+pub use error::{AgentClientOperation, GraphError};
+pub use fetch::{
+    DynFetchHandler, Fetch, FetchBody, FetchError, FetchExecutor, FetchRequest, FetchResponse,
+};
 pub use ids::{EdgeId, HandlerKey, MarkId, NodeId, VarId};
 pub use json::{JSON_WIRE_VERSION, JsonInvoker, JsonRequest, JsonResponse};
 #[cfg(feature = "mcp")]
@@ -61,8 +66,8 @@ pub use model::{
 };
 pub use registry::{
     ContinuationChildCall, ContinuationContext, ContinuationEvent, ContinuationHandler,
-    ContinuationSuspension, ContinuationTransition, EdgeWrite, HandlerRegistry, RuntimeServices,
-    ValueHandler, WorkHandler,
+    ContinuationSuspension, ContinuationTransition, EdgeWrite, HandlerRegistry, HistoryChange,
+    RuntimeServices, ValueHandler,
 };
 pub use runtime::{GraphFingerprint, PreparedGraph, Runtime, SNAPSHOT_VERSION, Snapshot};
 pub use state::{State, Step, Suspension};

@@ -1,25 +1,29 @@
-use super::super::ChatSubmission;
+use super::super::ChatRequest;
 use crate::graph::{Value, ValueError, from_value, to_value};
 
 /// Envelope decoding agrees with Serde for accepted and malformed submissions.
 #[test]
 fn submission_checks_match_serde() -> Result<(), ValueError> {
     for json in [
+        serde_json::json!({"input":null}),
+        serde_json::json!({"input":[1, 2], "key": null}),
+        serde_json::json!({"input":"hello", "key": "message-1"}),
+        serde_json::json!({"input":"hello", "key": 42}),
+        serde_json::json!({"input":"hello", "extra":true}),
+        serde_json::json!({"input":"hello", "memory":42}),
+        serde_json::json!({"input":"hello", "tools":[42]}),
+        serde_json::json!({"input":"hello", "resources":[42]}),
+        serde_json::json!({"memory":null}),
         serde_json::json!({"input": null}),
-        serde_json::json!({"input": [1, 2], "key": null}),
-        serde_json::json!({"input": "hello", "key": "message-1"}),
-        serde_json::json!({"input": "hello", "key": 42}),
-        serde_json::json!({"input": "hello", "extra": true}),
         serde_json::json!({"key": "message-1"}),
         serde_json::json!([]),
     ] {
         let value = to_value(json)?;
-        let decoded = ChatSubmission::decode(&value);
-        let serde = from_value::<ChatSubmission<Value>>(value);
+        let decoded = ChatRequest::decode(&value);
+        let serde = from_value::<ChatRequest<Value>>(value);
         assert_eq!(decoded.is_ok(), serde.is_ok());
         if let (Ok(decoded), Ok(serde)) = (decoded, serde) {
-            assert_eq!(decoded.input, serde.input);
-            assert_eq!(decoded.key, serde.key);
+            assert_eq!(decoded, serde);
         }
     }
     Ok(())
@@ -32,7 +36,7 @@ fn submission_input_remains_shared() -> Result<(), ValueError> {
     let value = Value::object([("input", input.clone()), ("key", Value::NULL)])?;
     let mut decoded = None;
     let allocations = allocation_counter::measure(|| {
-        decoded = Some(ChatSubmission::decode(&value));
+        decoded = Some(ChatRequest::decode(&value));
     });
     let decoded = decoded
         .transpose()?

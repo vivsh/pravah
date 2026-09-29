@@ -73,10 +73,9 @@ impl Runtime {
             }
         }
         let agent = self.chat_agent_node(boundaries)?;
-        if let Some(Some(checkpoint)) = frame.checkpoints.get(agent.id.0) {
-            let input = checkpoint.get("input").ok_or_else(|| {
-                GraphError::SnapshotValidation("missing Chat checkpoint input".into())
-            })?;
+        if let Some(Some(checkpoint)) = frame.checkpoints.get(agent.id.0)
+            && let Some(input) = checkpoint_input(checkpoint)?
+        {
             validate(input)?;
         }
         Ok(())
@@ -87,7 +86,7 @@ impl Runtime {
         let Some(frame) = self.state.frames.first() else {
             return false;
         };
-        let Some(suspension) = &self.state.suspension else {
+        let Some(suspension) = self.state.suspension() else {
             return false;
         };
         self.state.frames.len() == 1
@@ -120,5 +119,26 @@ impl Runtime {
             .ok_or(GraphError::MissingVariable(variable))?;
         ensure_write_capacity(frame, 1)?;
         self.commit_variable_write(0, variable, value)
+    }
+}
+
+/// Borrows invocation data through explicit effect phases without retaining a decoded copy.
+fn checkpoint_input(checkpoint: &Value) -> Result<Option<&Value>, GraphError> {
+    match checkpoint.get("effect").and_then(Value::as_str) {
+        Some("record") => checkpoint
+            .get("next")
+            .and_then(|next| next.get("checkpoint"))
+            .filter(|value| !value.is_null())
+            .map(checkpoint_input)
+            .transpose()
+            .map(Option::flatten),
+        Some("control" | "prepare" | "generate") => checkpoint
+            .get("checkpoint")
+            .ok_or_else(|| GraphError::SnapshotValidation("missing effect checkpoint".into()))
+            .and_then(checkpoint_input),
+        _ => checkpoint
+            .get("input")
+            .map(Some)
+            .ok_or_else(|| GraphError::SnapshotValidation("missing Chat checkpoint input".into())),
     }
 }

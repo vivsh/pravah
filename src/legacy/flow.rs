@@ -23,7 +23,7 @@ use crate::legacy::state::{
 use crate::legacy::validation::validate;
 use crate::{
     clients::{
-        Client, ClientFactory, ClientOptions, ClientOutput, Message, Role, ToolChoice,
+        Client, ClientOptions, ClientOutput, Message, ProviderRegistry, Role, ToolChoice,
         materialize_messages,
     },
     context::Context,
@@ -108,7 +108,7 @@ struct PendingToolState {
 }
 
 struct DispatchContext<'a> {
-    factory: &'a dyn ClientFactory,
+    factory: &'a ProviderRegistry,
     ctx: Context,
     history: &'a mut MessageHistory,
     store: &'a dyn DynHistoryStore,
@@ -119,7 +119,7 @@ struct DispatchContext<'a> {
 
 #[derive(Clone, Copy)]
 pub(crate) struct StepServices<'a> {
-    pub(crate) factory: &'a dyn ClientFactory,
+    pub(crate) factory: &'a ProviderRegistry,
     pub(crate) memory: &'a dyn DynMemoryFactory,
     pub(crate) store: &'a dyn DynHistoryStore,
 }
@@ -727,7 +727,8 @@ impl FlowGraph {
 }
 
 pub(crate) fn maybe_inject_turn_budget_message(
-    client: &dyn Client,
+    client: &Client,
+    node: &AgentInfo,
     agent_name: &str,
     session_id: &str,
     history: &MessageHistory,
@@ -735,10 +736,15 @@ pub(crate) fn maybe_inject_turn_budget_message(
     turn_offset: usize,
 ) {
     let options = client.options();
-    if options.tools.is_empty() && !client.uses_exit_tool() {
+    if options.tools.is_empty()
+        && matches!(
+            options.response_format,
+            crate::clients::ResponseFormat::Text
+        )
+    {
         return;
     }
-    let Some(budget) = options.turn_budget else {
+    let Some(budget) = node.turn_budget else {
         return;
     };
     let completed = count_complete_turns(&history.session_entries(session_id));
@@ -746,13 +752,11 @@ pub(crate) fn maybe_inject_turn_budget_message(
     if turns_this_invocation + 1 < budget as usize {
         return;
     }
-    let exit_tool_name = (client.uses_exit_tool() && !options.output_type_name.is_empty())
-        .then_some(options.output_type_name.as_str());
-    let text = options
+    let text = node
         .turn_budget_message
         .as_deref()
-        .map(|msg| client.wrap_system_reminder(msg))
-        .unwrap_or_else(|| client.default_turn_budget_message(exit_tool_name));
+        .map(|msg| crate::clients::wrap_system_reminder(&client.provider(), msg))
+        .unwrap_or_else(|| crate::clients::conclusion_message(&client.provider()));
     tracing::warn!(
         agent = %agent_name,
         completed_turns = completed,
@@ -794,21 +798,16 @@ impl FlowGraph {
             "LLM dispatch"
         );
 
-        let options = ClientOptions {
-            output_type_name: node.output_type_name.clone(),
-            turn_budget: node.turn_budget,
-            turn_budget_message: node.turn_budget_message.clone(),
-            provider_config: node.provider_config.clone(),
-            ..ClientOptions::default()
-        }
-        .with_input_schema(node.input_schema.clone())
-        .with_tools(defs)
-        .with_tool_choice(tool_choice)
-        .with_name(agent_name.clone())
-        .with_output_schema(node.output_schema.clone())
-        .with_preamble(preamble.to_owned());
+        let options = ClientOptions::default()
+            .with_provider_config_opt(node.provider_config.clone())
+            .with_input_schema(node.input_schema.clone())
+            .with_tools(defs)
+            .with_tool_choice(tool_choice)
+            .with_name(agent_name.clone())
+            .with_output_schema(node.output_schema.clone())
+            .with_preamble(preamble.to_owned());
 
-        let client = factory.create(&node.model, options).map_err(|e| {
+        let client = factory.llm(&node.model, options).await.map_err(|e| {
             tracing::error!(agent = %agent_name, error = %e, "LLM client creation failed");
             AgentError::LlmFailed {
                 agent: agent_name.clone(),
@@ -839,7 +838,8 @@ impl FlowGraph {
             .map(|s| s.turn_offset)
             .unwrap_or(0);
         maybe_inject_turn_budget_message(
-            &*client,
+            &client,
+            node,
             &agent_name,
             session_id,
             history,
@@ -895,17 +895,18 @@ impl FlowGraph {
                 Ok(FlowStep::Continue)
             }
 
-            ClientOutput::ToolCalls { thought, calls } => {
+            ClientOutput::ToolCalls {
+                text: thought,
+                calls,
+            } => {
                 tracing::debug!(agent = %agent_name, tool_calls = calls.len(), "agent issued tool calls");
-                let atc_msg = Message {
-                    key: None,
-                    role: Role::AssistantToolCalls {
+                let mut atc_msg = Message::new(
+                    Role::AssistantToolCalls {
                         calls: calls.clone(),
                     },
-                    content: thought.unwrap_or_default(),
-                    attachments: Vec::new(),
-                    usage,
-                };
+                    thought.unwrap_or_default(),
+                );
+                atc_msg.usage = usage;
                 record_history(store, history, session_id, &agent_name, atc_msg).await?;
                 states.last_step_was_effect = true;
 

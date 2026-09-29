@@ -1,4 +1,4 @@
-use pravah::clients::{Message, Role};
+use pravah::clients::Role;
 use pravah::testing::ScriptedFactory;
 use pravah::{Chat, ChatBuilder, ChatRequest, Context, GraphError, Snapshot};
 
@@ -27,14 +27,14 @@ enum TestError {
     CborRead(#[from] ciborium::de::Error<std::io::Error>),
 }
 
-fn builder() -> ChatBuilder<String> {
+fn builder() -> ChatBuilder<String, String> {
     Chat::builder()
-        .model("openai:///test")
+        .model("test:///test")
         .instructions("Answer briefly.")
 }
 
-fn context(factory: &ScriptedFactory) -> Context {
-    Context::default().with_client_factory(factory.clone())
+fn context(factory: &ScriptedFactory) -> Result<Context, pravah::GraphError> {
+    Ok(Context::default().with_providers(pravah::testing::providers(factory.clone())?))
 }
 
 struct NoMemory;
@@ -71,13 +71,12 @@ fn copies(snapshot: &Snapshot) -> Result<[Snapshot; 2], TestError> {
 #[tokio::test]
 async fn builder_keyed_stateful_round_trip() -> Result<(), TestError> {
     let factory = ScriptedFactory::new().then_output(serde_json::json!("first"));
-    let mut chat = builder().state(7u32).build(context(&factory)).await?;
+    let mut chat = builder().state(7u32).build(context(&factory)?)?;
     assert!(factory.calls().is_empty());
     assert!(chat.snapshot()?.history().entries().is_empty());
     assert_eq!(chat.get()?, 7);
     chat.set(8)?;
-    let request = ChatRequest::new(Message::user("question").with_key("configured"))
-        .memory("per-turn memory");
+    let request = ChatRequest::from(String::from("question")).memory("per-turn memory");
     assert_eq!(chat.send_with_key(request, "db:42").await?.output, "first");
     let snapshot = chat.snapshot()?;
     let entries = snapshot.history().entries();
@@ -87,7 +86,7 @@ async fn builder_keyed_stateful_round_trip() -> Result<(), TestError> {
         let factory = ScriptedFactory::new().then_output(serde_json::json!("second"));
         let mut restored = builder()
             .compactor(NoMemory)
-            .restore::<u32>(snapshot, context(&factory))?;
+            .restore::<u32>(snapshot, context(&factory)?)?;
         assert!(factory.calls().is_empty());
         assert_eq!(restored.get()?, 8);
         assert_eq!(restored.send("next").await?.output, "second");
@@ -96,13 +95,13 @@ async fn builder_keyed_stateful_round_trip() -> Result<(), TestError> {
     Ok(())
 }
 
-/// Infallible request construction does not accept invalid user roles into the VM.
+/// Infallible request construction does not accept invalid selections into the VM.
 #[tokio::test]
-async fn invalid_role_is_atomic_and_correctable() -> Result<(), TestError> {
+async fn invalid_selection_is_atomic_and_correctable() -> Result<(), TestError> {
     let factory = ScriptedFactory::new().then_output(serde_json::json!("answer"));
-    let mut chat = builder().build(context(&factory)).await?;
+    let mut chat = builder().build(context(&factory)?)?;
     let before = serde_json::to_value(chat.snapshot()?)?;
-    let request = ChatRequest::new(Message::assistant("not a submission"));
+    let request = ChatRequest::from(String::from("not a submission")).tools(["unknown"]);
     assert!(serde_json::to_value(&request).is_ok());
     assert!(matches!(
         chat.send(request).await,

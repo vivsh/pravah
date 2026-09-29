@@ -70,8 +70,6 @@ pub(crate) struct AgentInfo {
     pub(crate) turn_budget: Option<u32>,
     pub(crate) turn_budget_message: Option<String>,
     pub(crate) provider_config: Option<Value>,
-    /// Schema name of the output type, used by clients that require a synthetic exit-tool.
-    pub(crate) output_type_name: String,
 }
 
 pub(crate) struct EitherInfo {

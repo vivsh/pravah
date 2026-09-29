@@ -3,10 +3,9 @@ use std::time::Instant;
 #[path = "chat/cases.rs"]
 mod cases;
 
-use async_trait::async_trait;
 use pravah::clients::{
-    Client, ClientError, ClientFactory, ClientOptions, ClientOutput, ClientResponse, Message,
-    ModelUrl, Provider,
+    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmBackend, Message,
+    ModelUrl, Provider, ProviderFactory,
 };
 use pravah::{
     Agent, AgentConfig, Chat, CompactionRequest, CompactionResult, Compactor, Context, GraphError,
@@ -18,17 +17,16 @@ struct Model {
     options: ClientOptions,
 }
 
-impl ClientFactory for Factory {
-    fn create(&self, model: &str, options: ClientOptions) -> Result<Box<dyn Client>, ClientError> {
-        Ok(Box::new(Model {
-            model: ModelUrl::parse(model)?,
+impl ProviderFactory for Factory {
+    async fn llm(&self, model: &ModelUrl, options: ClientOptions) -> Result<Client, ClientError> {
+        Ok(Client::from_backend(Model {
+            model: model.clone(),
             options,
         }))
     }
 }
 
-#[async_trait]
-impl Client for Model {
+impl LlmBackend for Model {
     fn model_url(&self) -> &ModelUrl {
         &self.model
     }
@@ -63,7 +61,7 @@ fn agent(root: Agent<String>) -> Agent<String> {
 }
 
 async fn configure(input: String, _ctx: Context) -> Result<AgentConfig, GraphError> {
-    Ok(AgentConfig::new("openai:///test", "Answer.", Message::user(input)).keep_alive())
+    Ok(AgentConfig::new("test:///test", "Answer.", Message::user(input)).keep_alive())
 }
 
 /// Measures bounded-history steady-state sends, excluding initialization and warmup.
@@ -71,11 +69,9 @@ fn run(runtime: &tokio::runtime::Runtime) -> Result<(), GraphError> {
     let iterations = iterations();
     let mut samples = Vec::new();
     for _ in 0..5 {
-        let context = Context::default().with_client_factory(Factory);
+        let context = Context::default().with_providers(pravah::testing::providers(Factory)?);
         let construction = Instant::now();
-        let mut chat = runtime
-            .block_on(Chat::new(agent, context))?
-            .with_compactor(BoundHistory);
+        let mut chat = Chat::new(agent, context)?.with_compactor(BoundHistory);
         println!(
             "chat/construction: {} ns",
             construction.elapsed().as_nanos()
@@ -106,11 +102,9 @@ fn run(runtime: &tokio::runtime::Runtime) -> Result<(), GraphError> {
 /// Compares steady-state execution and checkpoint costs with a megabyte of application state.
 fn measure_large_state(runtime: &tokio::runtime::Runtime) -> Result<(), GraphError> {
     let state = vec!["private-state".repeat(1000); 128];
-    let context = Context::default().with_client_factory(Factory);
+    let context = Context::default().with_providers(pravah::testing::providers(Factory)?);
     let construction = Instant::now();
-    let mut chat = runtime
-        .block_on(Chat::with_state(agent, state, context))?
-        .with_compactor(BoundHistory);
+    let mut chat = Chat::with_state(agent, state, context)?.with_compactor(BoundHistory);
     println!(
         "chat/large_construction: {} ns",
         construction.elapsed().as_nanos()
@@ -165,6 +159,9 @@ fn iterations() -> u128 {
 }
 
 fn main() -> Result<(), GraphError> {
+    if std::env::var_os("PRAVAH_BENCH_CONSTRUCTION").is_some() {
+        return cases::construction();
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(|error| GraphError::Invalid(error.to_string()))?;

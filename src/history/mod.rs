@@ -11,7 +11,10 @@ mod tests;
 pub(crate) use compactor::DynCompactor;
 pub use compactor::{CompactionRequest, CompactionResult, Compactor};
 pub use entries::{HistoryEntry, MessageHistory};
-pub(crate) use entries::{protected_start, validate_message_groups};
+pub(crate) use entries::{
+    ValidatedCompactionResult, prepare_compaction, protected_start, summary_uuid,
+    validate_message_groups,
+};
 pub(crate) use legacy_compactor::{DynHistoryCompactor, count_complete_turns};
 pub(crate) use legacy_compactor::{HistoryCompactor, NoopCompactor};
 pub(crate) use store::DynHistoryStore;

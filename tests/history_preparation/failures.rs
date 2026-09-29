@@ -46,21 +46,24 @@ fn workflow(root: Flow<Question>) -> Flow<Answer> {
 pub(super) async fn before_dispatch(
     policy: impl Compactor + 'static,
     factory: &ScriptedFactory,
-) -> Result<Runtime, GraphError> {
+) -> Result<(Runtime, FetchExecutor), GraphError> {
     let flow = compile(workflow)?;
-    let mut execution = flow
-        .start(
-            Question {
-                text: "protected".into(),
-            },
-            Context::default().with_client_factory(factory.clone()),
-        )?
+    let executor = flow
+        .prepared()
+        .executor(Context::default().with_providers(pravah::testing::providers(factory.clone())?))
         .with_compactor(policy);
+    let mut execution = flow.start(
+        Question {
+            text: "protected".into(),
+        },
+        uuid::Uuid::nil(),
+    )?;
     for _ in 0..10 {
-        execution.next().await?;
         if !execution.snapshot()?.history().is_empty() {
-            return Ok(execution);
+            assert!(matches!(execution.next()?, Step::Fetch(_)));
+            return Ok((execution, executor));
         }
+        host::step(&mut execution, &executor).await?;
     }
     Err(GraphError::Invalid("did not reach dispatch".into()))
 }
@@ -69,9 +72,9 @@ pub(super) async fn before_dispatch(
 #[tokio::test]
 async fn policy_failure_makes_zero_calls_and_preserves_snapshot() -> Result<(), GraphError> {
     let factory = ScriptedFactory::new().then_output(serde_json::json!({"text":"ok"}));
-    let mut execution = before_dispatch(Failing, &factory).await?;
+    let (mut execution, executor) = before_dispatch(Failing, &factory).await?;
     let before = execution.snapshot()?;
-    match execution.next().await {
+    match host::step(&mut execution, &executor).await {
         Err(GraphError::HistoryCompaction { source, .. }) => {
             assert!(source.is::<PreparationFailure>())
         }
@@ -83,17 +86,15 @@ async fn policy_failure_makes_zero_calls_and_preserves_snapshot() -> Result<(), 
         serde_json::to_value(execution.snapshot()?).expect("snapshot")
     );
     let flow = compile(workflow)?;
-    let mut restored = flow
-        .restore(
-            before,
-            Context::default().with_client_factory(factory.clone()),
-        )?
+    let mut restored = flow.restore(before)?;
+    let executor = flow
+        .prepared()
+        .executor(Context::default().with_providers(pravah::testing::providers(factory.clone())?))
         .with_compactor(Summarize);
-    for _ in 0..10 {
-        if matches!(restored.next().await?, Step::Done(_)) {
-            break;
-        }
-    }
+    assert!(matches!(
+        host::finish(&mut restored, &executor).await?,
+        Step::Done(_)
+    ));
     assert_eq!(factory.calls().len(), 1);
     Ok(())
 }
@@ -103,10 +104,10 @@ async fn policy_failure_makes_zero_calls_and_preserves_snapshot() -> Result<(), 
 async fn runtime_rejects_protected_and_out_of_range_eviction() -> Result<(), GraphError> {
     for indices in [vec![0], vec![99], vec![0, 0]] {
         let factory = ScriptedFactory::new();
-        let mut execution = before_dispatch(Invalid { indices }, &factory).await?;
+        let (mut execution, executor) = before_dispatch(Invalid { indices }, &factory).await?;
         let before = serde_json::to_value(execution.snapshot()?).expect("snapshot");
         assert!(matches!(
-            execution.next().await,
+            host::step(&mut execution, &executor).await,
             Err(GraphError::HistoryCompactionValidation { .. })
         ));
         assert_eq!(

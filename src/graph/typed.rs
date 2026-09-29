@@ -1,10 +1,8 @@
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use either::Either;
-use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -16,7 +14,7 @@ use super::model::{NodeKind, TypeSpec, UntypedGraph, VarInit, VarKey, VarScope};
 use super::registry::{ContinuationHandler, HandlerRegistry};
 use super::runtime::{PreparedGraph, Runtime, Snapshot};
 use super::value::{Value, from_value, to_value};
-use crate::Context;
+use uuid::Uuid;
 
 mod build;
 mod chat;
@@ -126,6 +124,44 @@ impl<I> TypedGraphBuilder<I>
 where
     I: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
 {
+    pub(crate) fn function_tool<O>(&self, handler: super::agent::FunctionTool) -> TypedEdge<O>
+    where
+        O: Serialize + DeserializeOwned + JsonSchema + Send + Sync + 'static,
+    {
+        let output = with_state(&self.state, |state| {
+            let key = state.next_handler_key("function_tool");
+            let payload = match to_value(std::collections::BTreeMap::from([(
+                "tool_handler_key",
+                key.as_str(),
+            )])) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    state.errors.push(error.to_string());
+                    return self.root;
+                }
+            };
+            if let Err(error) = state
+                .registry
+                .insert_effect_continuation(key.as_str(), handler)
+            {
+                state.errors.push(error.to_string());
+            }
+            let output = state.builder.edge("tool_out", type_spec::<O>());
+            state.builder.node(
+                "tool",
+                NodeKind::Continuation {
+                    key,
+                    payload,
+                    children: Vec::new(),
+                },
+                vec![self.root],
+                vec![output],
+            );
+            output
+        })
+        .unwrap_or(self.root);
+        typed_edge(self.state.clone(), output)
+    }
     /// Starts a typed builder using the input type as the graph name.
     pub fn new() -> Self {
         Self::new_with_internal_name(I::schema_name())
@@ -268,24 +304,6 @@ where
             return typed_edge(Arc::clone(&self.state), left.edge);
         }
         add_merge_node::<(A, B), Out, H>(left.state, vec![left.edge, right.edge], func)
-    }
-
-    /// Adds a one-shot async work node.
-    pub fn work<T, P, Fut, H>(&self, input: TypedEdge<T>, func: H) -> TypedEdge<P>
-    where
-        T: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
-        P: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
-        Fut: Future<Output = Result<P, GraphError>> + Send + 'static,
-        H: Fn(T, Context) -> Fut + Send + Sync + 'static,
-    {
-        if !self.same_graph(&input) {
-            push_error(
-                &self.state,
-                "work: input edge belongs to another typed builder",
-            );
-            return typed_edge(Arc::clone(&self.state), input.edge);
-        }
-        add_work_node(input.state, input.edge, func)
     }
 
     /// Adds a multi-step continuation node by handler type.
@@ -582,32 +600,6 @@ where
         Flow::from_typed(edge)
     }
 
-    /// Adds a one-shot async work node in fluent style.
-    pub fn work<P, Fut, H>(self, func: H) -> Flow<P>
-    where
-        P: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
-        Fut: Future<Output = Result<P, GraphError>> + Send + 'static,
-        H: Fn(T, Context) -> Fut + Send + Sync + 'static,
-    {
-        self.work_named(format!("work_to_{}", P::schema_name()), func)
-    }
-
-    /// Adds a one-shot async work node with an internal display name.
-    pub fn work_named<P, Fut, H>(self, name: impl Into<String>, func: H) -> Flow<P>
-    where
-        P: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
-        Fut: Future<Output = Result<P, GraphError>> + Send + 'static,
-        H: Fn(T, Context) -> Fut + Send + Sync + 'static,
-    {
-        let edge = add_work_node_named::<T, P, Fut, H>(
-            Arc::clone(&self.state),
-            self.edge,
-            name.into(),
-            func,
-        );
-        Flow::from_typed(edge)
-    }
-
     /// Adds a first-class suspend point.
     ///
     /// `next()` pauses here and `resume()` supplies the output value.
@@ -872,24 +864,24 @@ where
     I: 'static + Serialize + DeserializeOwned + JsonSchema,
     O: 'static + Serialize + DeserializeOwned + JsonSchema,
 {
-    /// Starts an isolated execution with its invocation context.
+    /// Starts an isolated execution with a host-supplied UUID namespace.
     ///
     /// Fails before execution exists when the typed input cannot enter the VM
     /// value domain or does not satisfy the graph entry schema.
-    pub fn start(&self, input: I, ctx: Context) -> Result<Runtime, GraphError> {
+    pub fn start(&self, input: I, execution_id: Uuid) -> Result<Runtime, GraphError> {
         let input = to_value(input).map_err(|err| GraphError::ValueConversion {
             target: "workflow input".into(),
             reason: err.to_string(),
         })?;
-        self.prepared.start(input, ctx)
+        self.prepared.start(input, execution_id)
     }
 
-    /// Restores an execution and attaches its new runtime-only context.
+    /// Restores an execution without calling handlers or attaching runtime services.
     ///
     /// Fails when the snapshot version, graph fingerprint, or VM state is
     /// incompatible; the supplied snapshot is never partially restored.
-    pub fn restore(&self, snapshot: Snapshot, ctx: Context) -> Result<Runtime, GraphError> {
-        self.prepared.restore(snapshot, ctx)
+    pub fn restore(&self, snapshot: Snapshot) -> Result<Runtime, GraphError> {
+        self.prepared.restore(snapshot)
     }
 
     /// Decodes a raw runtime output value into the typed output.
@@ -900,5 +892,23 @@ where
                 O::schema_name()
             ))
         })
+    }
+}
+
+impl Flow<super::fetch::FetchRequest> {
+    /// Emits an external request and waits for explicit response or failure delivery.
+    pub fn fetch(self) -> Flow<Result<super::fetch::FetchResponse, super::fetch::FetchError>> {
+        let output = with_state(&self.state, |state| {
+            let output = state.builder.edge(
+                "fetch_out",
+                type_spec::<Result<super::fetch::FetchResponse, super::fetch::FetchError>>(),
+            );
+            state
+                .builder
+                .node("fetch", NodeKind::Fetch, vec![self.edge], vec![output]);
+            output
+        })
+        .unwrap_or(self.edge);
+        Flow::from_typed(typed_edge(self.state, output))
     }
 }

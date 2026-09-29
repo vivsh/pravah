@@ -5,8 +5,9 @@ use pravah::graph::{JSON_WIRE_VERSION, JsonInvoker, JsonRequest, SNAPSHOT_VERSIO
 #[tokio::test]
 async fn snapshots_preserve_caps_with_fresh_dependencies() -> Result<(), TestError> {
     let flow = compile(workflow)?;
-    let mut original = flow.start(Request::capped(), Context::default())?;
-    let snapshot = activated(&mut original).await?;
+    let executor = flow.prepared().executor(Context::default());
+    let mut original = flow.start(Request::capped(), uuid::Uuid::nil())?;
+    let snapshot = activated(&mut original, &executor).await?;
     let json = serde_json::to_vec(&snapshot)?;
     let mut cbor = Vec::new();
     ciborium::into_writer(&snapshot, &mut cbor)?;
@@ -17,13 +18,15 @@ async fn snapshots_preserve_caps_with_fresh_dependencies() -> Result<(), TestErr
     for copy in copies {
         let script = ScriptedFactory::new().then_output(json!("restored"));
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut restored = flow
-            .restore(copy, context(script.clone(), Some(2048)))?
+        let mut restored = flow.restore(copy)?;
+        let executor = flow
+            .prepared()
+            .executor(context(script.clone(), Some(2048))?)
             .with_compactor(ObserveCap {
                 calls: calls.clone(),
                 cap: Some(2048),
             });
-        finish(&mut restored).await?;
+        finish(&mut restored, &executor).await?;
         assert_eq!(script.calls().len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -34,8 +37,9 @@ async fn snapshots_preserve_caps_with_fresh_dependencies() -> Result<(), TestErr
 #[tokio::test]
 async fn malformed_resolved_caps_and_old_checkpoints_are_rejected() -> Result<(), TestError> {
     let flow = compile(workflow)?;
-    let mut runtime = flow.start(Request::capped(), Context::default())?;
-    let snapshot = serde_json::to_value(activated(&mut runtime).await?)?;
+    let executor = flow.prepared().executor(Context::default());
+    let mut runtime = flow.start(Request::capped(), uuid::Uuid::nil())?;
+    let snapshot = serde_json::to_value(activated(&mut runtime, &executor).await?)?;
     for cap in [
         json!(0),
         json!(-1),
@@ -49,7 +53,7 @@ async fn malformed_resolved_caps_and_old_checkpoints_are_rejected() -> Result<()
             .ok_or(TestError::Missing("resolved cap"))?;
         *cap_field = cap;
         assert!(matches!(
-            flow.restore(serde_json::from_value(corrupted)?, Context::default()),
+            flow.restore(serde_json::from_value(corrupted)?),
             Err(GraphError::SnapshotValidation(_))
         ));
     }
@@ -58,7 +62,7 @@ async fn malformed_resolved_caps_and_old_checkpoints_are_rejected() -> Result<()
         .get_mut("version")
         .ok_or(TestError::Missing("checkpoint version"))? = json!(4);
     assert!(matches!(
-        flow.restore(serde_json::from_value(obsolete)?, Context::default()),
+        flow.restore(serde_json::from_value(obsolete)?),
         Err(GraphError::UnsupportedVersion {
             format: "agent checkpoint",
             ..
@@ -71,30 +75,26 @@ async fn malformed_resolved_caps_and_old_checkpoints_are_rejected() -> Result<()
 /// Snapshot and wire version gates prevent older continuations from silently losing cap semantics.
 #[tokio::test]
 async fn old_snapshot_and_wire_formats_are_rejected() -> Result<(), TestError> {
-    assert_eq!(SNAPSHOT_VERSION, 9);
-    assert_eq!(JSON_WIRE_VERSION, 7);
+    assert_eq!(SNAPSHOT_VERSION, 10);
+    assert_eq!(JSON_WIRE_VERSION, 8);
     let flow = compile(workflow)?;
-    let runtime = flow.start(Request::capped(), Context::default())?;
+    let runtime = flow.start(Request::capped(), uuid::Uuid::nil())?;
     let mut snapshot = serde_json::to_value(runtime.snapshot()?)?;
     *snapshot
         .get_mut("snapshot_version")
         .ok_or(TestError::Missing("snapshot version"))? = json!(8);
     assert!(matches!(
-        flow.restore(serde_json::from_value(snapshot)?, Context::default()),
+        flow.restore(serde_json::from_value(snapshot)?),
         Err(GraphError::SnapshotVersion { got: 8, .. })
     ));
     let (graph, registry) = flow.into_parts();
     let invoker = JsonInvoker::new(graph, registry)?;
     assert!(matches!(
-        invoker
-            .invoke(
-                JsonRequest::Start {
-                    version: 6,
-                    input: json!({})
-                },
-                Context::default()
-            )
-            .await,
+        invoker.invoke(JsonRequest::Start {
+            execution_id: uuid::Uuid::nil(),
+            version: 6,
+            input: json!({})
+        },),
         Err(GraphError::UnsupportedVersion { .. })
     ));
     Ok(())

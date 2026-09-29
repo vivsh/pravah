@@ -1,6 +1,6 @@
 //! Integration tests for parallel and queued tool dispatch.
 
-use pravah::clients::ClientError;
+use pravah::clients::{ClientError, ErrorKind};
 use pravah::legacy::ToolOutput;
 use pravah::legacy::{
     Agent, AgentConfig, AgentError, Flow, FlowError, FlowRuntime, FlowStep, Node, Toolbox,
@@ -107,7 +107,7 @@ macro_rules! simple_agent {
         impl Agent for $in {
             type Output = $out;
             fn configure() -> AgentConfig {
-                AgentConfig::new($preamble, "test://model")
+                AgentConfig::new($preamble, "test:///model")
             }
         }
     };
@@ -170,7 +170,7 @@ impl Flow for UnknownParallelIn {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_two_distinct_tools_run_in_parallel() {
+async fn test_two_distinct_tools_run_in_parallel() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![
             mock_tool_call("c1", "echo", json!({ "text": "hello" })),
@@ -182,14 +182,15 @@ async fn test_two_distinct_tools_run_in_parallel() {
         text: "test".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.summary, "done");
     assert_eq!(spy.calls().len(), 2);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_unknown_tool_alongside_known_gets_error_result() {
+async fn test_unknown_tool_alongside_known_gets_error_result() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![
             mock_tool_call("c1", "echo", json!({ "text": "hi" })),
@@ -201,14 +202,16 @@ async fn test_unknown_tool_alongside_known_gets_error_result() {
         text: "test".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.summary, "recovered");
     assert_eq!(spy.calls().len(), 2);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_all_unknown_tools_in_one_turn_re_dispatch_immediately() {
+async fn test_all_unknown_tools_in_one_turn_re_dispatch_immediately()
+-> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![
             mock_tool_call("c1", "ghost1", json!({})),
@@ -220,14 +223,15 @@ async fn test_all_unknown_tools_in_one_turn_re_dispatch_immediately() {
         text: "test".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.summary, "ok");
     assert_eq!(spy.calls().len(), 2);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_same_tool_three_times_drains_queue_serially() {
+async fn test_same_tool_three_times_drains_queue_serially() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![
             mock_tool_call("c1", "echo", json!({ "text": "first" })),
@@ -240,14 +244,15 @@ async fn test_same_tool_three_times_drains_queue_serially() {
         text: "test".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.summary, "3-done");
     assert_eq!(spy.calls().len(), 2);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_parallel_plus_serial_queue_combined() {
+async fn test_parallel_plus_serial_queue_combined() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![
             mock_tool_call("c1", "echo", json!({ "text": "a" })),
@@ -260,14 +265,16 @@ async fn test_parallel_plus_serial_queue_combined() {
         text: "test".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.summary, "combo");
     assert_eq!(spy.calls().len(), 2);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_duplicate_call_id_across_different_tools_is_rejected() {
+async fn test_duplicate_call_id_across_different_tools_is_rejected()
+-> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new().then_tool_calls(vec![
         mock_tool_call("c1", "echo", json!({ "text": "hi" })),
         mock_tool_call("c1", "reverse", json!({ "text": "world" })),
@@ -276,21 +283,25 @@ async fn test_duplicate_call_id_across_different_tools_is_rejected() {
         text: "test".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     let err = run_to_err(rt).await;
     match err {
         FlowError::Agent(AgentError::DuplicateToolCall { .. }) => {}
         other => panic!("expected DuplicateToolCall, got: {other}"),
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_llm_error_on_first_dispatch_propagates_as_agent_error() {
-    let factory =
-        ScriptedFactory::new().then_err(ClientError::Provider("upstream rate limited".into()));
+async fn test_llm_error_on_first_dispatch_propagates_as_agent_error()
+-> Result<(), pravah::GraphError> {
+    let factory = ScriptedFactory::new().then_err(ClientError::new(
+        ErrorKind::Provider,
+        "upstream rate limited",
+    ));
     let rt = FlowRuntime::new(LlmFailIn { x: 0 })
         .unwrap()
-        .with_factory(factory);
+        .with_providers(pravah::testing::providers(factory)?);
     let err = run_to_err(rt).await;
     match err {
         FlowError::Agent(AgentError::LlmFailed { reason, .. }) => {
@@ -301,16 +312,18 @@ async fn test_llm_error_on_first_dispatch_propagates_as_agent_error() {
         }
         other => panic!("expected LlmFailed, got: {other}"),
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_llm_error_on_re_dispatch_propagates_as_agent_error() {
+async fn test_llm_error_on_re_dispatch_propagates_as_agent_error() -> Result<(), pravah::GraphError>
+{
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call("c1", "echo", json!({ "text": "hi" }))])
-        .then_err(ClientError::Provider("second call failed".into()));
+        .then_err(ClientError::new(ErrorKind::Provider, "second call failed"));
     let rt = FlowRuntime::new(LlmFailIn { x: 0 })
         .unwrap()
-        .with_factory(factory);
+        .with_providers(pravah::testing::providers(factory)?);
     let err = run_to_err(rt).await;
     match err {
         FlowError::Agent(AgentError::LlmFailed { reason, .. }) => {
@@ -321,14 +334,16 @@ async fn test_llm_error_on_re_dispatch_propagates_as_agent_error() {
         }
         other => panic!("expected LlmFailed, got: {other}"),
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_exhausted_scripted_factory_propagates_as_llm_failed() {
+async fn test_exhausted_scripted_factory_propagates_as_llm_failed() -> Result<(), pravah::GraphError>
+{
     let factory = ScriptedFactory::new();
     let rt = FlowRuntime::new(LlmFailIn { x: 0 })
         .unwrap()
-        .with_factory(factory);
+        .with_providers(pravah::testing::providers(factory)?);
     let err = run_to_err(rt).await;
     match err {
         FlowError::Agent(AgentError::LlmFailed { reason, .. }) => {
@@ -336,23 +351,29 @@ async fn test_exhausted_scripted_factory_propagates_as_llm_failed() {
         }
         other => panic!("expected LlmFailed from exhausted factory, got: {other}"),
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_empty_llm_response_propagates_as_llm_failed() {
-    let factory = ScriptedFactory::new().then_err(ClientError::EmptyResponse);
+async fn test_empty_llm_response_propagates_as_llm_failed() -> Result<(), pravah::GraphError> {
+    let factory = ScriptedFactory::new().then_err(ClientError::new(
+        ErrorKind::InvalidResponse,
+        "empty response",
+    ));
     let rt = FlowRuntime::new(LlmFailIn { x: 0 })
         .unwrap()
-        .with_factory(factory);
+        .with_providers(pravah::testing::providers(factory)?);
     let err = run_to_err(rt).await;
     match err {
         FlowError::Agent(AgentError::LlmFailed { .. }) => {}
         other => panic!("expected LlmFailed, got: {other}"),
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_factory_exhausted_after_tool_results_propagates_as_llm_failed() {
+async fn test_factory_exhausted_after_tool_results_propagates_as_llm_failed()
+-> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new().then_tool_calls(vec![mock_tool_call(
         "c1",
         "echo",
@@ -360,7 +381,7 @@ async fn test_factory_exhausted_after_tool_results_propagates_as_llm_failed() {
     )]);
     let rt = FlowRuntime::new(LlmFailIn { x: 0 })
         .unwrap()
-        .with_factory(factory);
+        .with_providers(pravah::testing::providers(factory)?);
     let err = run_to_err(rt).await;
     match err {
         FlowError::Agent(AgentError::LlmFailed { reason, .. }) => {
@@ -368,4 +389,5 @@ async fn test_factory_exhausted_after_tool_results_propagates_as_llm_failed() {
         }
         other => panic!("expected LlmFailed after tool result, got: {other}"),
     }
+    Ok(())
 }

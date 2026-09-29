@@ -44,7 +44,7 @@ async fn configure(input: String, ctx: Context) -> Result<AgentConfig, GraphErro
     if let Some(calls) = ctx.deps().get::<std::sync::atomic::AtomicUsize>() {
         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
-    Ok(AgentConfig::new("openai:///test", "Answer.", Message::user(input)).keep_alive())
+    Ok(AgentConfig::new("test:///test", "Answer.", Message::user(input)).keep_alive())
 }
 
 /// Makes codec round trips usable for pristine, idle and unfinished executions.
@@ -64,8 +64,8 @@ fn initial_state() -> Session {
     }
 }
 
-fn context(script: ScriptedFactory) -> Context {
-    Context::default().with_client_factory(script)
+fn context(script: ScriptedFactory) -> Result<Context, pravah::GraphError> {
+    Ok(Context::default().with_providers(pravah::testing::providers(script)?))
 }
 
 /// Verifies the complete typed-state path without requiring Default or Clone on state.
@@ -78,9 +78,8 @@ async fn state_is_part_of_the_existing_snapshot() -> Result<(), TestError> {
             project: "private".into(),
             visits: 0,
         },
-        context(script.clone()),
-    )
-    .await?;
+        context(script.clone())?,
+    )?;
     assert!(script.calls().is_empty());
     assert!(chat.snapshot()?.history().entries().is_empty());
     assert_eq!(chat.get()?.visits, 0);
@@ -94,7 +93,7 @@ async fn state_is_part_of_the_existing_snapshot() -> Result<(), TestError> {
     let mut restored = Chat::<String, String, Session>::from_snapshot(
         assistant,
         snapshot,
-        context(fresh.clone()),
+        context(fresh.clone())?,
     )?;
     assert_eq!(restored.get()?.visits, 1);
     assert_eq!(restored.send("again").await?.output, "second");

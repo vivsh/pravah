@@ -1,167 +1,54 @@
-//! Typed graph workflow with maps, variables, branches, subflows, and `each`.
+//! Compose reusable functions, select a branch, and process a collection.
 //!
-//! This example is deterministic and requires no external services.
-//! `Amount` intentionally does not implement `Clone`; storing local state does
-//! not require cloning application flow values.
+//! No async runtime, provider credentials, or external services are needed.
+
+mod support;
 
 use either::Either;
-use pravah::{CompiledFlow, Context, Flow, FlowConf, GraphError, Step, compile};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use pravah::{Flow, Step, compile};
+use support::ExampleError;
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct Amount {
-    value: i64,
+fn add_three(root: Flow<u32>) -> Flow<u32> {
+    root.map(|score| score.saturating_add(3))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct Bonus {
-    value: i64,
+/// Reuses one subflow twice, then labels the result through two typed branches.
+fn score(root: Flow<u32>) -> Flow<String> {
+    root.flow(add_three)
+        .flow(add_three)
+        .either(|score| {
+            if score >= 10 {
+                Either::Left(score)
+            } else {
+                Either::Right(score)
+            }
+        })
+        .branch(
+            |high| high.map(|score| format!("{score}: high")),
+            |low| low.map(|score| format!("{score}: low")),
+        )
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct AddThreeFlow {
-    value: i64,
+fn score_batch(root: Flow<Vec<u32>>) -> Flow<Vec<String>> {
+    root.each(score)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct Small {
-    value: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct Large {
-    value: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct ChoiceFlow {
-    value: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct BatchFlow {
-    values: Vec<AddThreeFlow>,
-}
-
-fn add_three(root: Flow<AddThreeFlow>) -> Flow<Amount> {
-    root.map(|input| Amount {
-        value: input.value + 3,
-    })
-}
-
-fn choose(root: Flow<ChoiceFlow>) -> Flow<Amount> {
-    root.either(|input| {
-        if input.value < 10 {
-            Either::Left(Small { value: input.value })
-        } else {
-            Either::Right(Large { value: input.value })
-        }
-    })
-    .branch(
-        |small| {
-            small.map(|input| Amount {
-                value: input.value + 1,
-            })
-        },
-        |large| {
-            large.map(|input| Amount {
-                value: input.value * 2,
-            })
-        },
-    )
-}
-
-fn batch(root: Flow<BatchFlow>) -> Flow<Vec<Amount>> {
-    root.map(|input| input.values).each(add_three)
-}
-
-fn amount(root: Flow<Amount>) -> Flow<Amount> {
-    let bonus = root.local(Bonus { value: 10 });
-
-    root.load(&bonus, |mut amount, bonus| {
-        amount.value += bonus.value;
-        amount
-    })
-    .map(|amount| AddThreeFlow {
-        value: amount.value,
-    })
-    .flow(add_three)
-    .store(&bonus, |amount, _old_bonus| Bonus {
-        value: amount.value,
-    })
-    .map(|mut amount| {
-        amount.value *= 2;
-        amount
-    })
-}
-
-#[tokio::main]
-async fn main() -> Result<(), GraphError> {
-    let flow = compile(amount)?;
-    println!(
-        "typed graph has {} nodes and {} edges",
-        flow.graph().nodes.len(),
-        flow.graph().edges.len()
-    );
-
-    let ctx = Context::new(FlowConf::default());
-    let mut runtime = flow.start(Amount { value: 5 }, ctx.clone())?;
+/// Drives the workflow explicitly; every input is processed by the same reusable flow.
+fn main() -> Result<(), ExampleError> {
+    let workflow = compile(score_batch)?;
+    let mut execution = workflow.start(vec![1, 5, 10], uuid::Uuid::now_v7())?;
 
     loop {
-        match runtime.next().await? {
-            Step::Continue => {
-                println!(
-                    "continue; active frame depth = {}",
-                    runtime.state().frame_depth()
-                );
-            }
-            Step::Done(value) => {
-                let output = flow.decode_output(value)?;
-                println!("done: {output:?}");
-                break;
-            }
-            Step::Suspend(payload) => {
-                return Err(GraphError::Invalid(format!(
-                    "typed graph unexpectedly suspended: {payload}"
-                )));
-            }
-        }
-    }
-
-    run_to_done(compile(choose)?, ChoiceFlow { value: 12 }, ctx.clone()).await?;
-    run_to_done(
-        compile(batch)?,
-        BatchFlow {
-            values: vec![AddThreeFlow { value: 1 }, AddThreeFlow { value: 2 }],
-        },
-        ctx.clone(),
-    )
-    .await?;
-    Ok(())
-}
-
-async fn run_to_done<I, O>(
-    flow: CompiledFlow<I, O>,
-    input: I,
-    ctx: Context,
-) -> Result<(), GraphError>
-where
-    I: 'static + Serialize + for<'de> Deserialize<'de> + JsonSchema,
-    O: 'static + std::fmt::Debug + Serialize + for<'de> Deserialize<'de> + JsonSchema,
-{
-    let mut runtime = flow.start(input, ctx)?;
-    loop {
-        match runtime.next().await? {
+        match execution.next()? {
             Step::Continue => {}
             Step::Done(value) => {
-                println!("done: {:?}", flow.decode_output(value)?);
+                for score in workflow.decode_output(value)? {
+                    println!("{score}");
+                }
                 return Ok(());
             }
-            Step::Suspend(payload) => {
-                return Err(GraphError::Invalid(format!(
-                    "typed graph unexpectedly suspended: {payload}"
-                )));
+            Step::Fetch(_) | Step::Suspend(_) => {
+                return Err(ExampleError::from("pure workflow requested input"));
             }
         }
     }

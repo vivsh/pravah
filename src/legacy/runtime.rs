@@ -3,12 +3,12 @@ use std::sync::Arc;
 use super::{flow::StepServices, nodes::FlowNode};
 use crate::{
     Context,
-    clients::{DefaultClientFactory, Message, Role},
+    clients::{Message, ProviderRegistry, Role},
     history::{
         DynHistoryCompactor, DynHistoryStore, MessageHistory, NoopCompactor, NoopHistoryStore,
     },
     legacy::{
-        ClientFactory, Flow, FlowError, FlowGraph, FlowStep, NodeId,
+        Flow, FlowError, FlowGraph, FlowStep, NodeId,
         inspect::FlowInspector,
         memory::{DynMemoryFactory, NoopMemoryFactory},
         state::{AgentContinuation, Callable, FlowState},
@@ -107,7 +107,7 @@ pub struct FlowRuntime<I: Flow> {
     state: FlowState,
     callables: Vec<FlowCall>,
     history: MessageHistory,
-    factory: Arc<dyn ClientFactory>,
+    factory: Arc<ProviderRegistry>,
     memory: Arc<dyn DynMemoryFactory>,
     compactor: Box<dyn DynHistoryCompactor>,
     store: Box<dyn DynHistoryStore>,
@@ -154,7 +154,7 @@ impl<I: Flow> FlowRuntime<I> {
             state,
             callables,
             history,
-            factory: Arc::new(DefaultClientFactory),
+            factory: Arc::new(ProviderRegistry::with_builtins()),
             memory: Arc::new(NoopMemoryFactory),
             compactor: Box::new(NoopCompactor),
             store: Box::new(NoopHistoryStore),
@@ -224,8 +224,8 @@ impl<I: Flow> FlowRuntime<I> {
         Ok(())
     }
 
-    /// Replaces the default [`ClientFactory`].
-    pub fn with_factory(mut self, factory: impl ClientFactory + 'static) -> Self {
+    /// Replaces runtime-only provider routing; reattach it after restoration.
+    pub fn with_providers(mut self, factory: ProviderRegistry) -> Self {
         self.factory = Arc::new(factory);
         self
     }
@@ -538,7 +538,7 @@ impl<I: Flow> FlowRuntime<I> {
             state: snapshot.state,
             history: snapshot.history,
             callables,
-            factory: Arc::new(DefaultClientFactory),
+            factory: Arc::new(ProviderRegistry::with_builtins()),
             memory: Arc::new(NoopMemoryFactory),
             compactor: Box::new(NoopCompactor),
             store: Box::new(NoopHistoryStore),

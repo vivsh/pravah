@@ -1,16 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 
-use crate::Context;
-use crate::clients::{ClientOptions, Message};
 use crate::history::{
-    CompactionRequest, Compactor, DynCompactor, DynHistoryStore, HistoryEntry, HistoryStore,
-    MessageHistory, NoopHistoryStore, count_complete_turns, protected_start,
-    validate_message_groups,
+    CompactionResult, Compactor, DynCompactor, DynHistoryStore, HistoryEntry, HistoryStore,
+    MessageHistory, NoopHistoryStore,
 };
 
 use super::error::GraphError;
@@ -19,10 +14,10 @@ use super::model::TypeSpec;
 use super::value::Value;
 
 #[derive(Clone)]
-/// Runtime-owned service bundle shared by edge handlers.
+/// External executor service bundle for history persistence and preparation.
 ///
-/// Configure history behavior through `Runtime::with_compactor` and
-/// `Runtime::with_store`; graph serialization never contains these services.
+/// Configure history behavior through `FetchExecutor::with_compactor` and
+/// `FetchExecutor::with_store`; snapshots never contain these services.
 pub struct RuntimeServices {
     compactor: Option<Arc<dyn DynCompactor>>,
     store: Arc<dyn DynHistoryStore>,
@@ -58,156 +53,60 @@ impl RuntimeServices {
     pub(crate) fn store(&self) -> &dyn DynHistoryStore {
         self.store.as_ref()
     }
+
+    pub(crate) fn compactor(&self) -> Option<&dyn DynCompactor> {
+        self.compactor.as_deref()
+    }
 }
 
-#[derive(Clone)]
-/// Context passed to continuation handlers while they advance.
-///
-/// It carries the execution's bound `Context`, runtime services, and controlled
-/// history access without smuggling services into `Context::deps()`.
-pub struct ContinuationContext {
-    ctx: Context,
-    services: Arc<RuntimeServices>,
-    history: Arc<Mutex<MessageHistory>>,
+/// Immutable execution information supplied to a synchronous continuation.
+#[derive(Clone, Copy)]
+pub struct ContinuationContext<'a> {
+    execution_id: uuid::Uuid,
+    history: &'a MessageHistory,
+    output_validator: Option<&'a jsonschema::Validator>,
 }
 
-impl ContinuationContext {
+impl<'a> ContinuationContext<'a> {
     pub(crate) fn new(
-        ctx: Context,
-        services: Arc<RuntimeServices>,
-        history: Arc<Mutex<MessageHistory>>,
+        execution_id: uuid::Uuid,
+        history: &'a MessageHistory,
+        output_validator: Option<&'a jsonschema::Validator>,
     ) -> Self {
         Self {
-            ctx,
-            services,
+            execution_id,
             history,
+            output_validator,
         }
     }
-
-    /// Returns the ordinary per-call request context.
-    pub fn context(&self) -> &Context {
-        &self.ctx
+    /// Returns the execution namespace used for deterministic identities.
+    pub fn execution_id(&self) -> uuid::Uuid {
+        self.execution_id
     }
-
-    /// Returns runtime-owned services available to continuation handlers.
-    pub fn services(&self) -> &RuntimeServices {
-        self.services.as_ref()
-    }
-
-    /// Appends one message to runtime history after recording it in the store.
-    pub async fn push_history(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-        message: Message,
-    ) -> Result<(), GraphError> {
-        self.push_history_batch(session_id, agent_id, vec![message])
-            .await
-    }
-
-    /// Appends a validated message batch without exposing partial in-memory history.
-    ///
-    /// Stores must deduplicate retries by the stable entry position. A store can
-    /// observe a prefix when a later write fails, but the runtime commits the
-    /// batch only after every entry has been accepted.
-    pub async fn push_history_batch(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-        messages: Vec<Message>,
-    ) -> Result<(), GraphError> {
-        let mut history = self.history.lock().await;
-        let mut staged = history.clone();
-        let mut entries = Vec::with_capacity(messages.len());
-        for message in messages {
-            let entry = staged.prepare_entry(session_id, agent_id, message);
-            staged.commit_entry(entry.clone());
-            entries.push(entry);
-        }
-        for entry in &entries {
-            self.services
-                .store()
-                .record_dyn(entry)
-                .await
-                .map_err(|err| GraphError::HistoryPersistence(err.to_string()))?;
-        }
-        *history = staged;
-        Ok(())
-    }
-
-    /// Returns live messages for one history session.
-    pub async fn history_for_session(&self, session_id: &str) -> Vec<Message> {
-        self.history.lock().await.for_session(session_id)
-    }
-
-    /// Returns live history rows for one session.
-    pub async fn history_entries_for_session(&self, session_id: &str) -> Vec<HistoryEntry> {
+    /// Borrows the sole runtime-owned history. Handlers return changes rather than mutating it.
+    pub fn history(&self) -> &'a MessageHistory {
         self.history
-            .lock()
-            .await
-            .session_entries(session_id)
-            .into_iter()
-            .cloned()
-            .collect()
     }
 
-    /// Validates that one history session is provider-safe to dispatch.
-    pub async fn validate_history_for_session(&self, session_id: &str) -> Result<(), GraphError> {
-        self.history
-            .lock()
-            .await
-            .validate_for_session(session_id)
-            .map_err(|err| GraphError::Invalid(format!("agent history is invalid: {err}")))
+    pub(crate) fn output_validator(&self) -> Option<&'a jsonschema::Validator> {
+        self.output_validator
     }
+}
 
-    /// Counts complete model turns in one history session.
-    pub async fn complete_turn_count(&self, session_id: &str) -> usize {
-        let entries = self.history_entries_for_session(session_id).await;
-        let refs = entries.iter().collect::<Vec<_>>();
-        count_complete_turns(&refs)
-    }
-
-    /// Prepares and atomically replaces completed session history for one model request.
-    /// The returned messages are exactly the successfully prepared history for dispatch.
-    pub(crate) async fn compact_history(
-        &self,
-        session_id: &str,
-        model: &str,
-        options: &ClientOptions,
-        framework_messages: &[Message],
-    ) -> Result<Vec<Message>, GraphError> {
-        let invalid = |reason| GraphError::HistoryCompactionValidation {
-            session_id: session_id.to_owned(),
-            reason,
-        };
-        let Some(compactor) = &self.services.compactor else {
-            let messages = self.history_for_session(session_id).await;
-            validate_message_groups(&messages).map_err(invalid)?;
-            return Ok(messages);
-        };
-        let owned = self.history_entries_for_session(session_id).await;
-        let refs = owned.iter().collect::<Vec<_>>();
-        validate_message_groups(refs.iter().map(|entry| &entry.message)).map_err(invalid)?;
-        let (committed, protected) = refs.split_at(protected_start(&refs));
-        let request = CompactionRequest {
-            session_id,
-            model,
-            options,
-            framework_messages,
-            committed,
-            protected,
-        };
-        let result = compactor.compact_dyn(request, self.ctx.clone()).await?;
-        self.history
-            .lock()
-            .await
-            .replace_compacted_history(session_id, &refs, result)
-            .map_err(invalid)
-    }
+/// Concrete history changes committed atomically with a continuation transition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HistoryChange {
+    /// Appends an acknowledged batch at its prevalidated stable positions.
+    Append(Vec<HistoryEntry>),
+    /// Replaces a validated completed prefix without changing cumulative usage.
+    Compact {
+        session_id: String,
+        decision: CompactionResult,
+    },
 }
 
 /// Intermediate edge write emitted by a continuation transition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EdgeWrite {
     /// Edge to write.
     pub edge: EdgeId,
@@ -218,6 +117,11 @@ pub struct EdgeWrite {
 /// Event delivered to an active continuation checkpoint.
 #[derive(Debug, Clone)]
 pub enum ContinuationEvent {
+    /// An external outcome already accepted durably by the runtime.
+    Fetch {
+        fetch: super::fetch::Fetch,
+        outcome: Result<super::fetch::FetchResponse, super::fetch::FetchError>,
+    },
     /// A child graph completed and produced an output for this call id.
     ChildResult { call_id: String, output: Value },
     /// External input supplied to a continuation-owned suspension.
@@ -227,7 +131,7 @@ pub enum ContinuationEvent {
 }
 
 /// External suspension requested by an active continuation handler.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContinuationSuspension {
     /// Expected resume type and schema exposed at invocation boundaries.
     pub resume_type: TypeSpec,
@@ -247,8 +151,12 @@ pub struct ContinuationChildCall {
 }
 
 /// Result of starting/advancing a generic multi-step continuation node.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContinuationTransition {
+    /// External operation to emit with this checkpoint, mutually exclusive with suspension and child calls.
+    pub fetch: Option<super::fetch::FetchRequest>,
+    /// History edits validated and committed together with the VM transition.
+    pub history: Vec<HistoryChange>,
     /// Serialized checkpoint to keep the continuation active.
     pub checkpoint: Option<Value>,
     /// Optional opaque handler state stored beside the checkpoint.
@@ -278,31 +186,6 @@ where
     }
 }
 
-/// Async one-shot handler for work nodes.
-///
-/// Use this for operations that complete within one VM dispatch.
-pub trait WorkHandler: Send + Sync {
-    /// Runs the work node with its input values and request context.
-    fn call<'a>(
-        &'a self,
-        inputs: Vec<Value>,
-        ctx: Context,
-    ) -> BoxFuture<'a, Result<Vec<Value>, GraphError>>;
-}
-
-impl<F> WorkHandler for F
-where
-    F: Fn(Vec<Value>, Context) -> BoxFuture<'static, Result<Vec<Value>, GraphError>> + Send + Sync,
-{
-    fn call<'a>(
-        &'a self,
-        inputs: Vec<Value>,
-        ctx: Context,
-    ) -> BoxFuture<'a, Result<Vec<Value>, GraphError>> {
-        Box::pin(self(inputs, ctx))
-    }
-}
-
 /// Multi-step handler for continuation nodes.
 ///
 /// Use this for agents, external protocols, or other state machines that need
@@ -322,8 +205,8 @@ pub trait ContinuationHandler: Send + Sync {
         payload: &'a Value,
         state: Option<Value>,
         inputs: Vec<Value>,
-        ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>>;
+        ctx: ContinuationContext<'_>,
+    ) -> Result<ContinuationTransition, GraphError>;
 
     /// Advances an active continuation checkpoint with a VM event.
     fn advance<'a>(
@@ -331,8 +214,8 @@ pub trait ContinuationHandler: Send + Sync {
         payload: &'a Value,
         checkpoint: Value,
         event: ContinuationEvent,
-        ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>>;
+        ctx: ContinuationContext<'_>,
+    ) -> Result<ContinuationTransition, GraphError>;
 }
 
 #[derive(Default, Clone)]
@@ -342,11 +225,31 @@ pub trait ContinuationHandler: Send + Sync {
 /// before building an `Runtime`.
 pub struct HandlerRegistry {
     value_handlers: HashMap<String, Arc<dyn ValueHandler>>,
-    work_handlers: HashMap<String, Arc<dyn WorkHandler>>,
+    fetch_handlers: HashMap<String, Arc<dyn super::fetch::DynFetchHandler>>,
     continuation_handlers: HashMap<String, Arc<dyn ContinuationHandler>>,
 }
 
 impl HandlerRegistry {
+    /// Registers one immutable implementation for VM transitions and external execution.
+    pub(crate) fn insert_effect_continuation<H>(
+        &mut self,
+        key: &str,
+        handler: H,
+    ) -> Result<&mut Self, GraphError>
+    where
+        H: ContinuationHandler + super::fetch::DynFetchHandler + 'static,
+    {
+        if self.continuation_handlers.contains_key(key) || self.fetch_handlers.contains_key(key) {
+            return Err(GraphError::GraphValidation(
+                "duplicate effect handler key".into(),
+            ));
+        }
+        let handler = Arc::new(handler);
+        self.continuation_handlers
+            .insert(key.into(), handler.clone());
+        self.fetch_handlers.insert(key.into(), handler);
+        Ok(self)
+    }
     /// Creates an empty handler registry.
     pub fn new() -> Self {
         Self::default()
@@ -371,22 +274,19 @@ impl HandlerRegistry {
         Ok(self)
     }
 
-    /// Registers a one-shot async work handler under a unique key.
-    pub fn insert_work<H>(
+    /// Registers an external callback; it is never called by synchronous stepping.
+    pub fn insert_fetch<H: super::fetch::DynFetchHandler + 'static>(
         &mut self,
         key: impl Into<String>,
         handler: H,
-    ) -> Result<&mut Self, GraphError>
-    where
-        H: WorkHandler + 'static,
-    {
+    ) -> Result<&mut Self, GraphError> {
         let key = key.into();
-        if self.work_handlers.contains_key(&key) {
-            return Err(GraphError::Invalid(format!(
-                "duplicate work handler key '{key}'"
-            )));
+        if self.fetch_handlers.contains_key(&key) {
+            return Err(GraphError::GraphValidation(
+                "duplicate Fetch handler key".into(),
+            ));
         }
-        self.work_handlers.insert(key, Arc::new(handler));
+        self.fetch_handlers.insert(key, Arc::new(handler));
         Ok(self)
     }
 
@@ -414,9 +314,9 @@ impl HandlerRegistry {
         self.value_handlers.get(key.as_str()).cloned()
     }
 
-    /// Resolves an async work handler by graph key.
-    pub fn work(&self, key: &HandlerKey) -> Option<Arc<dyn WorkHandler>> {
-        self.work_handlers.get(key.as_str()).cloned()
+    /// Resolves an external callback for the executor.
+    pub fn fetch(&self, key: &HandlerKey) -> Option<Arc<dyn super::fetch::DynFetchHandler>> {
+        self.fetch_handlers.get(key.as_str()).cloned()
     }
 
     /// Resolves a continuation handler by graph key.
@@ -429,9 +329,9 @@ impl HandlerRegistry {
         self.value_handlers.contains_key(key)
     }
 
-    /// Returns whether a work handler key is registered.
-    pub fn has_work(&self, key: &str) -> bool {
-        self.work_handlers.contains_key(key)
+    /// Returns whether a Fetch handler key is registered.
+    pub fn has_fetch(&self, key: &str) -> bool {
+        self.fetch_handlers.contains_key(key)
     }
 
     /// Returns whether a continuation handler key is registered.
@@ -448,10 +348,10 @@ impl HandlerRegistry {
                 )));
             }
         }
-        for key in other.work_handlers.keys() {
-            if self.work_handlers.contains_key(key) {
+        for key in other.fetch_handlers.keys() {
+            if self.fetch_handlers.contains_key(key) {
                 return Err(GraphError::Invalid(format!(
-                    "duplicate work handler key '{key}'"
+                    "duplicate Fetch handler key '{key}'"
                 )));
             }
         }
@@ -469,9 +369,9 @@ impl HandlerRegistry {
                 .iter()
                 .map(|(key, handler)| (key.clone(), Arc::clone(handler))),
         );
-        self.work_handlers.extend(
+        self.fetch_handlers.extend(
             other
-                .work_handlers
+                .fetch_handlers
                 .iter()
                 .map(|(key, handler)| (key.clone(), Arc::clone(handler))),
         );
@@ -491,9 +391,9 @@ impl HandlerRegistry {
                 .iter()
                 .map(|(key, handler)| (namespaced_handler_key(prefix, key), Arc::clone(handler))),
         );
-        self.work_handlers.extend(
+        self.fetch_handlers.extend(
             other
-                .work_handlers
+                .fetch_handlers
                 .iter()
                 .map(|(key, handler)| (namespaced_handler_key(prefix, key), Arc::clone(handler))),
         );

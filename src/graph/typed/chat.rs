@@ -1,6 +1,6 @@
 use super::*;
 use crate::graph::NodeId;
-use crate::graph::chat::ChatSubmission;
+use crate::graph::chat::ChatRequest;
 
 /// Builds one prepared chat graph and returns its authored application access points.
 pub(crate) fn build_chat_graph<I, O, S>(
@@ -24,15 +24,15 @@ where
             VarInit::Uninitialized,
         )
     };
-    let request = root.clone().suspend::<ChatSubmission<I>>();
+    let request = root.clone().suspend::<ChatRequest<I>>();
     let bootstrap_edge = request.edge;
     let start = request.mark();
-    let response: Flow<O> = Flow::from_typed(add_agent_node::<ChatSubmission<I>, O>(
+    let response: Flow<O> = Flow::from_typed(add_agent_node::<ChatRequest<I>, O>(
         Arc::clone(&request.state),
         request.edge,
         agent.for_chat(),
     ));
-    let next_request = response.suspend::<ChatSubmission<I>>();
+    let next_request = response.suspend::<ChatRequest<I>>();
     let response_edge = next_request.edge;
     let _loop_edge = next_request.goto(start);
     let compiled = root.map(|value| value).finish::<()>()?;

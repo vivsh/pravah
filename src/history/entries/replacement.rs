@@ -2,11 +2,84 @@ use std::collections::BTreeSet;
 
 use super::*;
 use crate::history::CompactionResult;
+use crate::history::inspection::{SUMMARY_AGENT_ID, SUMMARY_PREFIX, SUMMARY_SUFFIX};
 
 /// Fully validated operation-local changes; never stored in snapshots or runtime services.
-struct ValidatedCompactionResult {
+pub(crate) struct ValidatedCompactionResult {
     remove_ids: Vec<Uuid>,
     summary: Option<HistoryEntry>,
+}
+
+impl ValidatedCompactionResult {
+    pub(crate) fn summary_message(&self) -> Option<&Message> {
+        self.summary.as_ref().map(|entry| &entry.message)
+    }
+
+    pub(crate) fn removed_count(&self) -> usize {
+        self.remove_ids.len()
+    }
+
+    /// Updates an operation-local borrowed preview without copying any retained message.
+    pub(crate) fn preview<'a>(&'a self, session: &str, entries: &mut Vec<&'a HistoryEntry>) {
+        let insert_at = entries.iter().position(|entry| entry.session_id == session);
+        entries.retain(|entry| self.retains(session, entry));
+        if let Some(summary) = &self.summary {
+            entries.insert(
+                insert_at.unwrap_or(entries.len()).min(entries.len()),
+                summary,
+            );
+        }
+    }
+
+    fn retains(&self, session: &str, entry: &HistoryEntry) -> bool {
+        entry.session_id != session || (!entry.evicted && !self.remove_ids.contains(&entry.id))
+    }
+
+    #[cfg(test)]
+    fn messages(&self, current: &[&HistoryEntry]) -> Vec<Message> {
+        self.summary
+            .iter()
+            .map(|entry| &entry.message)
+            .chain(
+                current
+                    .iter()
+                    .skip(self.remove_ids.len())
+                    .map(|entry| &entry.message),
+            )
+            .cloned()
+            .collect()
+    }
+}
+
+/// Validates a full replacement against borrowed history before staging any mutation.
+pub(crate) fn prepare_compaction(
+    session_id: &str,
+    entries: &[&HistoryEntry],
+    decision: CompactionResult,
+    summary_id: Option<Uuid>,
+) -> Result<ValidatedCompactionResult, String> {
+    validate_message_groups(entries.iter().map(|entry| &entry.message))?;
+    let replacement = validate_replacement(session_id, entries, decision, summary_id)?;
+    validate_message_groups(
+        replacement
+            .summary
+            .iter()
+            .map(|entry| &entry.message)
+            .chain(
+                entries
+                    .iter()
+                    .skip(replacement.remove_ids.len())
+                    .map(|entry| &entry.message),
+            ),
+    )?;
+    Ok(replacement)
+}
+
+pub(crate) fn summary_uuid(execution: Uuid, session: &str, position: u64) -> Uuid {
+    Uuid::new_v5(
+        &execution,
+        format!("pravah.summary.v1:{session}:{position}").as_bytes(),
+    )
 }
 
 /// Protects the newest user input and all its tool rounds until final model output.
@@ -61,11 +134,24 @@ pub(crate) fn validate_message_groups<'a>(
 impl MessageHistory {
     /// Validates a replacement and returns the exact prepared request history after commit.
     /// Policy and validation failures occur before any mutation, including tombstone pruning.
+    #[cfg(test)]
     pub(crate) fn replace_compacted_history(
         &mut self,
         session_id: &str,
         observed: &[&HistoryEntry],
         decision: CompactionResult,
+    ) -> Result<Vec<Message>, String> {
+        self.replace_compacted_history_with_id(session_id, observed, decision, None)
+    }
+
+    /// Validates the entire candidate before commit, with caller-selected modern identity.
+    #[cfg(test)]
+    fn replace_compacted_history_with_id(
+        &mut self,
+        session_id: &str,
+        observed: &[&HistoryEntry],
+        decision: CompactionResult,
+        summary_id: Option<Uuid>,
     ) -> Result<Vec<Message>, String> {
         let current = self.session_entries(session_id);
         if !current
@@ -75,33 +161,24 @@ impl MessageHistory {
         {
             return Err("session history changed during preparation".into());
         }
-        validate_message_groups(current.iter().map(|entry| &entry.message))?;
-        let replacement = validate_replacement(session_id, &current, decision)?;
-        let mut messages = Vec::with_capacity(current.len());
-        if let Some(summary) = &replacement.summary {
-            messages.push(summary.message.clone());
-        }
-        messages.extend(
-            current
-                .iter()
-                .skip(replacement.remove_ids.len())
-                .map(|e| e.message.clone()),
-        );
-        validate_message_groups(&messages)?;
+        let replacement = prepare_compaction(session_id, &current, decision, summary_id)?;
+        let messages = replacement.messages(&current);
         self.commit_replacement(session_id, replacement);
         Ok(messages)
     }
 
     /// Removes only this session's replaced entries and tombstones without touching accounting.
-    fn commit_replacement(&mut self, session_id: &str, replacement: ValidatedCompactionResult) {
+    pub(crate) fn commit_replacement(
+        &mut self,
+        session_id: &str,
+        replacement: ValidatedCompactionResult,
+    ) {
         let insert_at = self
             .entries
             .iter()
             .position(|entry| entry.session_id == session_id);
-        self.entries.retain(|entry| {
-            entry.session_id != session_id
-                || (!entry.evicted && !replacement.remove_ids.contains(&entry.id))
-        });
+        self.entries
+            .retain(|entry| replacement.retains(session_id, entry));
         if let Some(summary) = replacement.summary {
             self.entries.insert(
                 insert_at
@@ -118,6 +195,7 @@ fn validate_replacement(
     session_id: &str,
     entries: &[&HistoryEntry],
     decision: CompactionResult,
+    summary_id: Option<Uuid>,
 ) -> Result<ValidatedCompactionResult, String> {
     validate_indices(entries, &decision.evict_indices)?;
     let count = decision.evict_indices.len();
@@ -138,7 +216,7 @@ fn validate_replacement(
             if text.trim().is_empty() {
                 return Err("summary text must not be empty".into());
             }
-            Some(summary_entry(session_id, first.position, text))
+            Some(summary_entry(session_id, first.position, text, summary_id))
         }
         None => None,
     };
@@ -168,18 +246,16 @@ fn validate_indices(entries: &[&HistoryEntry], indices: &[usize]) -> Result<(), 
 }
 
 /// Creates a text-only system summary without changing append positions or usage accounting.
-fn summary_entry(session_id: &str, position: u64, text: String) -> HistoryEntry {
-    let mut entry = HistoryEntry::new(
-        session_id,
-        "__summary__",
-        Message {
-            key: None,
-            role: Role::System,
-            content: format!("<pravah_working_memory>\n{text}\n</pravah_working_memory>"),
-            attachments: Vec::new(),
-            usage: None,
-        },
-    );
-    entry.position = position;
-    entry
+fn summary_entry(session_id: &str, position: u64, text: String, id: Option<Uuid>) -> HistoryEntry {
+    HistoryEntry {
+        id: id.unwrap_or_else(Uuid::now_v7),
+        position,
+        session_id: session_id.into(),
+        agent_id: SUMMARY_AGENT_ID.into(),
+        evicted: false,
+        message: Message::new(
+            Role::System,
+            [SUMMARY_PREFIX, text.as_str(), SUMMARY_SUFFIX].concat(),
+        ),
+    }
 }

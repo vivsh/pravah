@@ -52,12 +52,15 @@ impl Compactor for ReadContext {
     }
 }
 
-fn context(service: Arc<MemoryService>, factory: ScriptedFactory) -> Context {
+fn context(
+    service: Arc<MemoryService>,
+    factory: ScriptedFactory,
+) -> Result<Context, pravah::GraphError> {
     let mut deps = Deps::default();
     deps.insert(service);
-    Context::default()
+    Ok(Context::default()
         .with_deps(deps)
-        .with_client_factory(factory)
+        .with_providers(pravah::testing::providers(factory)?))
 }
 
 fn factory() -> ScriptedFactory {
@@ -81,12 +84,10 @@ fn copies(snapshot: &Snapshot) -> Result<[Snapshot; 2], TestError> {
 async fn each_chat_uses_its_bound_context() -> Result<(), GraphError> {
     let first = MemoryService::new("first account facts");
     let second = MemoryService::new("second account facts");
-    let mut first_chat = Chat::new(tutor, context(first.clone(), factory()))
-        .await?
-        .with_compactor(ReadContext);
-    let mut second_chat = Chat::new(tutor, context(second.clone(), factory()))
-        .await?
-        .with_compactor(ReadContext);
+    let mut first_chat =
+        Chat::new(tutor, context(first.clone(), factory())?)?.with_compactor(ReadContext);
+    let mut second_chat =
+        Chat::new(tutor, context(second.clone(), factory())?)?.with_compactor(ReadContext);
     for chat in [&mut first_chat, &mut second_chat] {
         chat.send(Question {
             text: "hello".into(),
@@ -107,9 +108,8 @@ async fn each_chat_uses_its_bound_context() -> Result<(), GraphError> {
 #[tokio::test]
 async fn restore_uses_fresh_context_for_preparation() -> Result<(), TestError> {
     let original = MemoryService::new("original account facts");
-    let mut chat = Chat::new(tutor, context(original.clone(), factory()))
-        .await?
-        .with_compactor(ReadContext);
+    let mut chat =
+        Chat::new(tutor, context(original.clone(), factory())?)?.with_compactor(ReadContext);
     chat.send(Question {
         text: "first".into(),
     })
@@ -119,7 +119,7 @@ async fn restore_uses_fresh_context_for_preparation() -> Result<(), TestError> {
         let fresh = MemoryService::new("restored account facts");
         let client = factory();
         let mut restored =
-            Chat::<_, _>::from_snapshot(tutor, copy, context(fresh.clone(), client.clone()))?
+            Chat::<_, _>::from_snapshot(tutor, copy, context(fresh.clone(), client.clone())?)?
                 .with_compactor(ReadContext);
         assert_eq!(fresh.calls.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -146,9 +146,9 @@ async fn restore_uses_fresh_context_for_preparation() -> Result<(), TestError> {
 #[tokio::test]
 async fn missing_dependency_preserves_history_and_checkpoint() -> Result<(), TestError> {
     let client = factory();
-    let mut runtime = failures::before_dispatch(ReadContext, &client).await?;
+    let (mut runtime, executor) = failures::before_dispatch(ReadContext, &client).await?;
     let before = serde_json::to_value(runtime.snapshot()?)?;
-    let result = runtime.next().await;
+    let result = host::step(&mut runtime, &executor).await;
     assert!(
         matches!(result, Err(GraphError::HistoryCompaction { source, .. })
         if source.is::<DepsError>())
@@ -162,21 +162,23 @@ async fn missing_dependency_preserves_history_and_checkpoint() -> Result<(), Tes
 #[tokio::test]
 async fn unfinished_dispatch_uses_restored_context() -> Result<(), TestError> {
     let old_client = factory();
-    let runtime = failures::before_dispatch(ReadContext, &old_client).await?;
+    let (runtime, _) = failures::before_dispatch(ReadContext, &old_client).await?;
     let snapshot = runtime.snapshot()?;
     let flow = pravah::compile(|root: pravah::Flow<Question>| root.agent(tutor))?;
     for copy in copies(&snapshot)? {
         let service = MemoryService::new("restored service");
         let client = factory();
-        let mut restored = flow
-            .restore(copy, context(service.clone(), client.clone()))?
+        let mut restored = flow.restore(copy)?;
+        let executor = flow
+            .prepared()
+            .executor(context(service.clone(), client.clone())?)
             .with_compactor(ReadContext);
         assert_eq!(
             serde_json::to_value(restored.snapshot()?)?,
             serde_json::to_value(&snapshot)?
         );
         assert_eq!(service.calls.load(Ordering::SeqCst), 0);
-        restored.next().await?;
+        host::finish(&mut restored, &executor).await?;
         assert_eq!(service.calls.load(Ordering::SeqCst), 1);
         assert_eq!(client.calls().len(), 1);
     }

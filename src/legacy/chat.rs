@@ -279,7 +279,7 @@ impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
     }
 
     /// Builds the session, connecting to the provider specified by `url`.
-    pub fn build(mut self) -> Result<Chat<Input, Output>, ChatError> {
+    pub async fn build(mut self) -> Result<Chat<Input, Output>, ChatError> {
         if let Some(env) = self.environment {
             self.options.preamble = Some(match self.options.preamble.take() {
                 Some(p) => format!("{p}\n\n{env}"),
@@ -287,7 +287,7 @@ impl<Input: ChatType, Output: ChatType> ChatBuilder<Input, Output> {
             });
         }
         let options = build_typed_options::<Input, Output>(self.options)?;
-        let client = options.clone().create(&self.url)?;
+        let client = options.clone().create(&self.url).await?;
         Ok(Chat {
             session_id: self
                 .session_id
@@ -323,7 +323,7 @@ where
     session_id: String,
     url: String,
     options: ClientOptions,
-    client: Box<dyn Client>,
+    client: Client,
     history: MessageHistory,
     compactor: Box<dyn DynHistoryCompactor>,
     store: Box<dyn DynHistoryStore>,
@@ -351,8 +351,8 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
     /// The provider client is re-created fresh; it is never serialized.
     /// Compactor and store revert to no-ops; re-attach with
     /// [`with_compactor`](Self::with_compactor) and [`with_store`](Self::with_store).
-    pub fn from_snapshot(snap: ChatSnapshot<Input, Output>) -> Result<Self, ChatError> {
-        let client = snap.options.clone().create(&snap.url)?;
+    pub async fn from_snapshot(snap: ChatSnapshot<Input, Output>) -> Result<Self, ChatError> {
+        let client = snap.options.clone().create(&snap.url).await?;
         Ok(Self {
             session_id: snap.session_id,
             url: snap.url,
@@ -446,16 +446,7 @@ impl<Input: ChatType, Output: ChatType> Chat<Input, Output> {
     ) -> Result<DispatchTurn<Output>, ChatError> {
         let mut msgs = self.history.for_session(&self.session_id);
         if let Some(text) = env {
-            msgs.insert(
-                0,
-                Message {
-                    key: None,
-                    role: Role::System,
-                    content: text,
-                    attachments: Vec::new(),
-                    usage: None,
-                },
-            );
+            msgs.insert(0, Message::new(Role::System, text));
         }
         msgs.push(msg.clone());
         let materialized = materialize_messages(&msgs, ctx).await?;
@@ -556,10 +547,10 @@ fn build_typed_options<Input: ChatType, Output: ChatType>(
     if let Some(schema) = Input::schema()? {
         options = options.with_input_schema(schema);
     }
-    if let Some(schema) = Output::schema()? {
-        options = options.with_output_schema(schema);
-    }
-    Ok(options.with_response_format(Output::wire_kind().response_format()))
+    Ok(match Output::schema()? {
+        Some(schema) => options.with_output_schema(schema),
+        None => options.with_response_format(Output::wire_kind().response_format()),
+    })
 }
 
 fn build_reply(text: &str, usage: Option<TokenUsage>) -> Message {
@@ -582,69 +573,5 @@ fn decode_client_output<Output: ChatType>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-    struct DraftInput {
-        topic: String,
-    }
-
-    #[derive(Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-    struct DraftOutput {
-        answer: String,
-    }
-
-    /// String chat stays in plain-text mode and sends unquoted content.
-    #[test]
-    fn string_chat_type_stays_text() {
-        assert_eq!(String::wire_kind(), ChatWireKind::Text);
-        assert!(String::schema().unwrap().is_none());
-        assert_eq!("hello", "hello".to_string().encode_input().unwrap());
-    }
-
-    /// Non-string chat types use JSON mode and derive a schema.
-    #[test]
-    fn json_chat_type_uses_json_wire_format() {
-        let input = DraftInput {
-            topic: "ownership".into(),
-        };
-        assert_eq!(DraftInput::wire_kind(), ChatWireKind::Json);
-        assert!(DraftInput::schema().unwrap().is_some());
-        assert_eq!(input.encode_input().unwrap(), r#"{"topic":"ownership"}"#);
-    }
-
-    /// Typed options use the output type to decide provider response mode.
-    #[test]
-    fn typed_options_use_output_type_for_response_mode() {
-        let text = build_typed_options::<DraftInput, String>(ClientOptions::default()).unwrap();
-        assert!(text.input_schema.is_some());
-        assert!(text.output_schema.is_none());
-        assert_eq!(text.response_format, ResponseFormat::Text);
-
-        let json = build_typed_options::<String, DraftOutput>(ClientOptions::default()).unwrap();
-        assert!(json.input_schema.is_none());
-        assert!(json.output_schema.is_some());
-        assert_eq!(json.response_format, ResponseFormat::Json);
-    }
-
-    /// Text output rejects structured provider values.
-    #[test]
-    fn text_output_rejects_structured_values() {
-        let err = String::decode_output(serde_json::json!({ "answer": "ok" })).unwrap_err();
-        assert!(matches!(err, ChatError::UnexpectedOutput));
-    }
-
-    /// JSON output decodes from the provider value into the typed result.
-    #[test]
-    fn json_output_decodes_from_value() {
-        let output = DraftOutput::decode_output(serde_json::json!({ "answer": "ok" })).unwrap();
-        assert_eq!(
-            output,
-            DraftOutput {
-                answer: "ok".into(),
-            }
-        );
-    }
-}
+#[path = "tests/chat.rs"]
+mod tests;

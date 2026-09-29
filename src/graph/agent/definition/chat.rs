@@ -1,5 +1,5 @@
 use super::*;
-use crate::graph::chat::ChatSubmission;
+use crate::graph::chat::ChatRequest;
 
 impl<T> Agent<T> {
     /// Unwraps Chat's durable submission without changing application callback types.
@@ -9,9 +9,18 @@ impl<T> Agent<T> {
             configure.call = Arc::new(move |value, data, ctx| {
                 let original = Arc::clone(&original);
                 async move {
-                    let request = ChatSubmission::decode(&value)
+                    let request = ChatRequest::decode(&value)
                         .map_err(|e| GraphError::AgentConfigValidation(e.to_string()))?;
                     let mut config = original(request.input, data, ctx).await?;
+                    if let Some(memory) = request.memory {
+                        config.memory = Some(memory);
+                    }
+                    if let Some(tools) = request.tools {
+                        config = config.tool_filter(crate::graph::ToolFilter::only(tools));
+                    }
+                    if let Some(resources) = request.resources {
+                        config.resources = resources;
+                    }
                     if let Some(key) = request.key {
                         config.message.key = Some(key);
                     }
@@ -20,10 +29,16 @@ impl<T> Agent<T> {
                 .boxed()
             });
         }
+        self.unwrap_chat_controller();
+        self
+    }
+
+    /// Keeps controller observations typed over the invocation input, not the Chat envelope.
+    fn unwrap_chat_controller(&mut self) {
         if let Some(controller) = self.definition.controller.as_mut() {
             let original = Arc::clone(&controller.call);
             controller.call = Arc::new(move |mut data, ctx| {
-                let input = ChatSubmission::decode(&data.input);
+                let input = ChatRequest::decode(&data.input);
                 match input {
                     Ok(request) => {
                         data.input = request.input;
@@ -39,6 +54,5 @@ impl<T> Agent<T> {
                 }
             });
         }
-        self
     }
 }

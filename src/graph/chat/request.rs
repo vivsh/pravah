@@ -1,33 +1,25 @@
-use crate::clients::{Message, Role};
 use crate::graph::agent::validate_tool_names;
-use crate::graph::{GraphError, McpResourceRef, Value};
-use schemars::{JsonSchema, Schema, SchemaGenerator};
+use crate::graph::{GraphError, McpResourceRef, Value, ValueError, from_value};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-mod schema;
 
 /// One Chat submission with invocation-local context and tool/resource selection.
 /// Construction and serialization do not validate policy; `send` rejects invalid requests.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ChatRequest {
-    pub(super) message: Message,
-    pub(super) memory: Option<String>,
-    pub(super) tools: Option<Vec<String>>,
-    pub(super) resources: Option<Vec<McpResourceRef>>,
+pub struct ChatRequest<I> {
+    pub(crate) input: I,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) memory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resources: Option<Vec<McpResourceRef>>,
 }
 
-impl ChatRequest {
-    /// Collects a message; only user-role messages are accepted when sent.
-    pub fn new(message: Message) -> Self {
-        Self {
-            message,
-            memory: None,
-            tools: None,
-            resources: None,
-        }
-    }
-
+impl<I> ChatRequest<I> {
     /// Supplies text memory for this invocation only, outside conversation history.
     pub fn memory(mut self, memory: impl Into<String>) -> Self {
         self.memory = Some(memory.into());
@@ -40,25 +32,25 @@ impl ChatRequest {
         self
     }
 
-    /// Replaces builder-default MCP references for this invocation, including with an empty list.
+    /// Replaces configured MCP references for this invocation, including with an empty list.
     pub fn resources(mut self, resources: impl IntoIterator<Item = McpResourceRef>) -> Self {
         self.resources = Some(resources.into_iter().collect());
         self
     }
 
-    /// Borrows the submitted message, including its optional application key.
-    pub fn message(&self) -> &Message {
-        &self.message
+    /// Borrows the original typed input without rendering or converting it.
+    pub fn input(&self) -> &I {
+        &self.input
     }
     /// Borrows this invocation's memory, if supplied.
     pub fn memory_text(&self) -> Option<&str> {
         self.memory.as_deref()
     }
-    /// Borrows the explicit selection; `None` selects all declared candidates.
+    /// Borrows the explicit selection; `None` preserves the configured tool filter.
     pub fn selected_tools(&self) -> Option<&[String]> {
         self.tools.as_deref()
     }
-    /// Borrows resource overrides; `None` uses builder defaults.
+    /// Borrows resource overrides; `None` preserves configured resources.
     pub fn selected_resources(&self) -> Option<&[McpResourceRef]> {
         self.resources.as_deref()
     }
@@ -66,9 +58,6 @@ impl ChatRequest {
     /// Checks semantic constraints without resolving resources or mutating the execution.
     pub(super) fn validate(&self, payload: &Value) -> Result<(), GraphError> {
         let check = || -> Result<(), String> {
-            if !matches!(self.message.role, Role::User) {
-                return Err("message must have the user role".into());
-            }
             if let Some(names) = &self.tools {
                 let tools = payload
                     .get("tools")
@@ -90,28 +79,39 @@ impl ChatRequest {
     }
 }
 
-impl From<Message> for ChatRequest {
-    fn from(value: Message) -> Self {
-        Self::new(value)
+impl<I> From<I> for ChatRequest<I> {
+    fn from(input: I) -> Self {
+        Self {
+            input,
+            key: None,
+            memory: None,
+            tools: None,
+            resources: None,
+        }
     }
 }
-impl From<String> for ChatRequest {
-    fn from(value: String) -> Self {
-        Self::new(Message::user(value))
-    }
-}
-impl From<&str> for ChatRequest {
+impl From<&str> for ChatRequest<String> {
     fn from(value: &str) -> Self {
-        Self::new(Message::user(value))
+        Self::from(value.to_owned())
     }
 }
 
-impl JsonSchema for ChatRequest {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "ChatRequest".into()
-    }
-    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
-        schema::request_schema(generator)
+impl ChatRequest<Value> {
+    /// Decodes options without recursively copying the shared domain input.
+    pub(crate) fn decode(value: &Value) -> Result<Self, ValueError> {
+        let invalid = || ValueError::Unsupported("invalid chat request envelope".into());
+        let mut fields = value.object_entries().ok_or_else(invalid)?;
+        if fields.any(|(key, _)| !matches!(key, "input" | "key" | "memory" | "tools" | "resources"))
+        {
+            return Err(invalid());
+        }
+        Ok(Self {
+            input: value.get("input").ok_or_else(invalid)?.clone(),
+            key: from_value(value.get("key").cloned().unwrap_or(Value::NULL))?,
+            memory: from_value(value.get("memory").cloned().unwrap_or(Value::NULL))?,
+            tools: from_value(value.get("tools").cloned().unwrap_or(Value::NULL))?,
+            resources: from_value(value.get("resources").cloned().unwrap_or(Value::NULL))?,
+        })
     }
 }
 

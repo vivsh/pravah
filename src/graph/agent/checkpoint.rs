@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::clients::TokenUsage;
-use crate::graph::value::Value;
+use crate::graph::{
+    GraphError,
+    value::{Value, from_value},
+};
 
 use super::budget::AgentBudgetState;
 use super::config::ResolvedAgentConfig;
@@ -13,13 +16,30 @@ pub(super) struct EdgeAgentCheckpoint {
     pub(super) phase: EdgeAgentPhase,
     pub(super) session_id: String,
     pub(super) input: Value,
-    pub(super) resolved: ResolvedAgentConfig,
+    pub(super) resolved: Value,
     pub(super) selected_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) budget: Option<AgentBudgetState>,
     pub(super) guidance: Option<String>,
     pub(super) metrics: AgentLoopMetrics,
     pub(super) control_state: Option<Value>,
+}
+
+impl EdgeAgentCheckpoint {
+    /// Decodes immutable configuration only for validation or provider request construction.
+    pub(super) fn resolved_config(&self) -> Result<ResolvedAgentConfig, GraphError> {
+        from_value(self.resolved.clone()).map_err(|error| {
+            GraphError::SnapshotValidation(format!("invalid resolved configuration: {error}"))
+        })
+    }
+
+    pub(super) fn configured_tools(&self) -> Result<Vec<String>, GraphError> {
+        super::effect_values::read_field(&self.resolved, "tools")
+    }
+
+    pub(super) fn keep_alive(&self) -> Result<bool, GraphError> {
+        super::effect_values::read_field(&self.resolved, "keep_alive")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

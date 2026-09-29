@@ -129,25 +129,7 @@ where
     Fut: Future<Output = Result<O, ToolError>> + Send + 'static,
 {
     let builder = crate::graph::TypedGraphBuilder::<I>::new();
-    let root = builder.root();
-    let output = builder.work(root, move |input, ctx| {
-        let fut = func(input, ctx);
-        async move {
-            match fut.await {
-                Ok(output) => serde_json::to_value(output)
-                    .map(|value| EdgeToolResult::Success { value })
-                    .and_then(serde_json::to_value)
-                    .map_err(|err| GraphError::Invalid(format!("tool serialize failed: {err}"))),
-                Err(err) if !err.is_fatal() => serde_json::to_value(EdgeToolResult::Error {
-                    value: err.to_json(""),
-                })
-                .map_err(|encode| {
-                    GraphError::Invalid(format!("tool error serialize failed: {encode}"))
-                }),
-                Err(err) => Err(GraphError::Invalid(err.to_string())),
-            }
-        }
-    });
+    let output = builder.function_tool::<JsonValue>(super::function_tool::FunctionTool::new(func));
     builder.finish(output).map_err(|err| err.to_string())
 }
 
@@ -292,14 +274,13 @@ pub(super) fn persist_checkpoint(
     checkpoint: EdgeAgentCheckpoint,
 ) -> Result<ContinuationTransition, GraphError> {
     Ok(ContinuationTransition {
-        checkpoint: Some(to_value(checkpoint).map_err(|err| {
-            GraphError::Invalid(format!("failed to encode agent  checkpoint: {err}"))
-        })?),
+        checkpoint: Some(checkpoint.into_value()?),
         state: None,
         outputs: Vec::new(),
         writes: Vec::new(),
         child_calls: Vec::new(),
         suspension: None,
+        ..Default::default()
     })
 }
 
@@ -337,6 +318,13 @@ pub(crate) fn validate_agent_snapshot_state(
     }
     let payload = decode_payload(payload)?;
     if let Some(checkpoint) = checkpoint {
+        if checkpoint.get("effect").is_some() {
+            super::effects::validate_effect_checkpoint(&payload.tools, checkpoint)?;
+            if let Some(state) = state {
+                restore_agent_state(Some(state.clone()))?;
+            }
+            return Ok(true);
+        }
         let checkpoint: EdgeAgentCheckpoint = from_value(checkpoint.clone()).map_err(|err| {
             GraphError::SnapshotValidation(format!("failed to decode agent checkpoint: {err}"))
         })?;
@@ -360,25 +348,49 @@ pub(super) fn validate_checkpoint(
     tools: &[AgentToolPayload],
     checkpoint: &EdgeAgentCheckpoint,
 ) -> Result<(), GraphError> {
+    let resolved = checkpoint.resolved_config()?;
+    validate_resolved_config(&resolved)?;
+    validate_progress(tools, checkpoint, &resolved.tools)
+}
+
+/// Validates immutable configuration at activation and restore, before it becomes trusted state.
+pub(super) fn validate_resolved_config(resolved: &ResolvedAgentConfig) -> Result<(), GraphError> {
+    validate_resolved_resources(&resolved.resources)?;
+    if resolved.max_output_tokens == Some(0) {
+        return Err(GraphError::SnapshotValidation(
+            "agent checkpoint max output tokens is zero".into(),
+        ));
+    }
+    if resolved.model.trim().is_empty() {
+        return Err(GraphError::SnapshotValidation(
+            "agent checkpoint model is empty".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks mutable progress without reconstructing configuration validated at activation or restore.
+pub(super) fn validate_checkpoint_progress(
+    tools: &[AgentToolPayload],
+    checkpoint: &EdgeAgentCheckpoint,
+) -> Result<(), GraphError> {
+    validate_progress(tools, checkpoint, &checkpoint.configured_tools()?)
+}
+
+/// Keeps tool, budget and phase relationships checked at every internal transition.
+fn validate_progress(
+    tools: &[AgentToolPayload],
+    checkpoint: &EdgeAgentCheckpoint,
+    configured_tools: &[String],
+) -> Result<(), GraphError> {
     if checkpoint.session_id.is_empty() {
         return Err(GraphError::SnapshotValidation(
             "agent checkpoint session id is empty".into(),
         ));
     }
-    validate_resolved_tools(tools, &checkpoint.resolved.tools)?;
-    validate_selected_tools(tools, checkpoint)?;
-    validate_budget_state(&checkpoint.resolved.tools, checkpoint.budget.as_ref())?;
-    validate_resolved_resources(&checkpoint.resolved.resources)?;
-    if checkpoint.resolved.max_output_tokens == Some(0) {
-        return Err(GraphError::SnapshotValidation(
-            "agent checkpoint max output tokens is zero".into(),
-        ));
-    }
-    if checkpoint.resolved.model.trim().is_empty() {
-        return Err(GraphError::SnapshotValidation(
-            "agent checkpoint model is empty".into(),
-        ));
-    }
+    validate_resolved_tools(tools, configured_tools)?;
+    validate_selected_tools(tools, checkpoint, configured_tools)?;
+    validate_budget_state(configured_tools, checkpoint.budget.as_ref())?;
     validate_checkpoint_phase(tools, checkpoint)
 }
 
@@ -390,10 +402,8 @@ fn validate_resolved_tools(
     let expected = tools
         .iter()
         .filter(|tool| selected.contains(&tool.name))
-        .map(|tool| tool.name.as_str())
-        .collect::<Vec<_>>();
-    let actual = selected.iter().map(String::as_str).collect::<Vec<_>>();
-    if expected != actual {
+        .map(|tool| tool.name.as_str());
+    if !expected.eq(selected.iter().map(String::as_str)) {
         return Err(GraphError::SnapshotValidation(
             "agent checkpoint tools are unknown, duplicated, or unordered".into(),
         ));
@@ -405,12 +415,13 @@ fn validate_resolved_tools(
 fn validate_selected_tools(
     tools: &[AgentToolPayload],
     checkpoint: &EdgeAgentCheckpoint,
+    configured_tools: &[String],
 ) -> Result<(), GraphError> {
     validate_resolved_tools(tools, &checkpoint.selected_tools)?;
     if checkpoint
         .selected_tools
         .iter()
-        .any(|tool| !checkpoint.resolved.tools.contains(tool))
+        .any(|tool| !configured_tools.contains(tool))
     {
         return Err(GraphError::SnapshotValidation(
             "agent checkpoint selects a tool outside its configured set".into(),
@@ -591,7 +602,7 @@ fn checkpoint_point_for_validation(phase: &EdgeAgentPhase) -> Option<AgentInterv
 pub(super) fn completed_agent_state(
     checkpoint: &EdgeAgentCheckpoint,
 ) -> Result<Option<Value>, GraphError> {
-    if !checkpoint.resolved.keep_alive {
+    if !checkpoint.keep_alive()? {
         return Ok(None);
     }
     to_value(EdgeAgentSavedState {
@@ -607,33 +618,14 @@ pub(super) fn transition_with_children(
     child_calls: Vec<ContinuationChildCall>,
 ) -> Result<ContinuationTransition, GraphError> {
     Ok(ContinuationTransition {
-        checkpoint: Some(to_value(checkpoint).map_err(|err| {
-            GraphError::Invalid(format!("failed to encode agent  checkpoint: {err}"))
-        })?),
+        checkpoint: Some(checkpoint.into_value()?),
         state: None,
         outputs: Vec::new(),
         writes: Vec::new(),
         child_calls,
         suspension: None,
+        ..Default::default()
     })
-}
-
-/// Combines authored instructions and resolved context without assuming the message format.
-pub(super) fn effective_preamble(resolved: &ResolvedAgentConfig) -> String {
-    let mut sections = Vec::new();
-    if !resolved.instructions.is_empty() {
-        sections.push(resolved.instructions.clone());
-    }
-    if let Some(memory) = &resolved.memory {
-        sections.push(format!("<memory>\n{memory}\n</memory>"));
-    }
-    for resource in &resolved.resources {
-        sections.push(format!(
-            "<resource server=\"{}\" uri=\"{}\">\n{}\n</resource>",
-            resource.server, resource.uri, resource.text
-        ));
-    }
-    sections.join("\n\n")
 }
 
 pub(super) fn schema_for<T: JsonSchema>() -> JsonValue {

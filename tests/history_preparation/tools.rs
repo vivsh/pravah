@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use super::*;
-use pravah::clients::{Client, ClientError, ClientFactory, ClientOptions, ToolChoice};
+use pravah::clients::{Client, ClientError, ClientOptions, ModelUrl, ProviderFactory, ToolChoice};
 use pravah::testing::mock_tool_call;
 use pravah::tools::ToolError;
 use pravah::{AgentDecision, AgentInterventionPoint, AgentLoop, Flow, Toolset, compile};
@@ -33,7 +33,7 @@ fn workflow(root: Flow<Question>) -> Flow<Answer> {
 /// Supplies runtime memory and provider settings alongside a single ordinary model turn.
 async fn configure(question: Question, _ctx: Context) -> Result<AgentConfig, GraphError> {
     Ok(AgentConfig::new(
-        "openai:///test",
+        "test:///test",
         "Answer briefly.",
         Message::user(question.text).with_key("research:42"),
     )
@@ -57,14 +57,14 @@ async fn control(loop_: AgentLoop<Question>, _ctx: Context) -> Result<AgentDecis
 
 struct OverrideFactory(ScriptedFactory);
 
-impl ClientFactory for OverrideFactory {
-    fn create(
+impl ProviderFactory for OverrideFactory {
+    async fn llm(
         &self,
-        model: &str,
+        model: &ModelUrl,
         mut options: ClientOptions,
-    ) -> Result<Box<dyn Client>, ClientError> {
+    ) -> Result<Client, ClientError> {
         options.temperature = Some(0.25);
-        self.0.create(model, options)
+        self.0.llm(model, options).await
     }
 }
 
@@ -145,7 +145,10 @@ fn verify_options(options: &ClientOptions) {
             .as_deref()
             .is_some_and(|p| p.contains("<memory>\nknown preference"))
     );
-    assert!(options.output_schema.is_some());
+    assert!(matches!(
+        options.response_format,
+        pravah::clients::ResponseFormat::JsonSchema { .. }
+    ));
 }
 
 fn scripted_tools() -> ScriptedFactory {
@@ -164,9 +167,10 @@ async fn request_view_matches_tool_loop_and_conclusion() -> Result<(), GraphErro
     let policy = ObserveTools::default();
     let mut chat = Chat::new(
         researcher,
-        Context::default().with_client_factory(OverrideFactory(factory.clone())),
-    )
-    .await?
+        Context::default().with_providers(pravah::testing::providers(OverrideFactory(
+            factory.clone(),
+        ))?),
+    )?
     .with_compactor(policy.clone());
     chat.send(Question {
         text: "research".into(),
@@ -187,20 +191,26 @@ async fn request_view_matches_tool_loop_and_conclusion() -> Result<(), GraphErro
 async fn tool_loop_rejects_protected_eviction() -> Result<(), GraphError> {
     let factory = scripted_tools();
     let flow = compile(workflow)?;
-    let mut runtime = flow
-        .start(
-            Question {
-                text: "research".into(),
-            },
-            Context::default().with_client_factory(OverrideFactory(factory.clone())),
-        )?
+    let executor = flow
+        .prepared()
+        .executor(
+            Context::default().with_providers(pravah::testing::providers(OverrideFactory(
+                factory.clone(),
+            ))?),
+        )
         .with_compactor(ObserveTools {
             reject_tools: true,
             ..ObserveTools::default()
         });
-    for _ in 0..50 {
+    let mut runtime = flow.start(
+        Question {
+            text: "research".into(),
+        },
+        uuid::Uuid::nil(),
+    )?;
+    for _ in 0..100 {
         let before = serde_json::to_value(runtime.snapshot()?).expect("snapshot");
-        match runtime.next().await {
+        match host::step(&mut runtime, &executor).await {
             Err(GraphError::HistoryCompactionValidation { .. }) => {
                 assert_eq!(
                     serde_json::to_value(runtime.snapshot()?).expect("snapshot"),

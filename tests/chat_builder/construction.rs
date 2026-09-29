@@ -40,8 +40,7 @@ async fn final_build_moves_state_and_services() -> Result<(), TestError> {
         .state(State {
             project: "Pravah".into(),
         })
-        .build(context(&factory))
-        .await?;
+        .build(context(&factory)?)?;
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(store.record_count(), 0);
     assert!(factory.calls().is_empty());
@@ -65,7 +64,7 @@ async fn check_restored(snapshot: Snapshot) -> Result<(), TestError> {
     let mut chat = builder()
         .store(store.clone())
         .compactor(CountCalls(calls.clone()))
-        .restore::<State>(snapshot, context(&factory))?;
+        .restore::<State>(snapshot, context(&factory)?)?;
     assert_eq!(chat.get()?.project, "Pravah");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(store.record_count(), 0);
@@ -89,8 +88,7 @@ async fn service_setters_replace_previous_values() -> Result<(), TestError> {
         .store(old_store.clone())
         .compactor(CountCalls(current.clone()))
         .store(new_store.clone())
-        .build(context(&factory))
-        .await?;
+        .build(context(&factory)?)?;
     chat.send("question").await?;
     assert_eq!(previous.load(Ordering::SeqCst), 0);
     assert_eq!(current.load(Ordering::SeqCst), 1);
@@ -103,18 +101,28 @@ async fn service_setters_replace_previous_values() -> Result<(), TestError> {
 #[tokio::test]
 async fn services_do_not_change_initial_snapshot() -> Result<(), TestError> {
     let factory = ScriptedFactory::new();
-    let plain = builder().state(7u32).build(context(&factory)).await?;
+    let plain = builder().state(7u32).build(context(&factory)?)?;
     let calls = Arc::new(AtomicUsize::new(0));
     let configured = builder()
         .state(7u32)
         .store(CapturingHistoryStore::new())
         .compactor(CountCalls(calls.clone()))
-        .build(context(&factory))
-        .await?;
-    assert_eq!(
-        serde_json::to_value(plain.snapshot()?)?,
-        serde_json::to_value(configured.snapshot()?)?
+        .build(context(&factory)?)?;
+    let mut plain = serde_json::to_value(plain.snapshot()?)?;
+    let mut configured = serde_json::to_value(configured.snapshot()?)?;
+    assert_ne!(
+        plain["state"]["execution_id"],
+        configured["state"]["execution_id"]
     );
+    plain["state"]
+        .as_object_mut()
+        .ok_or(TestError::Missing("state"))?
+        .remove("execution_id");
+    configured["state"]
+        .as_object_mut()
+        .ok_or(TestError::Missing("state"))?
+        .remove("execution_id");
+    assert_eq!(plain, configured);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(factory.calls().is_empty());
     Ok(())

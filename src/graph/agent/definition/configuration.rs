@@ -18,31 +18,55 @@ pub(super) fn validate_absent(data: Option<&ConfigurationData>) -> Result<(), Gr
     Ok(())
 }
 
-/// Checks the registered data type and full schema before a graph can execute.
-fn validate_data<D: DeserializeOwned + JsonSchema>(
-    data: Option<&ConfigurationData>,
-) -> Result<(), GraphError> {
-    let validate = || -> Result<(), String> {
-        let data = data.ok_or("configure data is missing")?;
-        let expected = serde_json::to_value(schemars::schema_for!(D)).map_err(|e| e.to_string())?;
-        if data.schema != expected {
-            return Err("configure data schema differs from handler".into());
+/// Immutable registered type contract; it never owns an invocation's settings value.
+pub(super) struct ConfigurationValidator {
+    schema: serde_json::Value,
+    validator: jsonschema::Validator,
+    decode: fn(&Value) -> Result<(), GraphError>,
+}
+
+impl ConfigurationValidator {
+    fn new<D: DeserializeOwned>(schema: serde_json::Value) -> Result<Self, String> {
+        let validator = jsonschema::validator_for(&schema).map_err(|error| error.to_string())?;
+        Ok(Self {
+            schema,
+            validator,
+            decode: validate_decode::<D>,
+        })
+    }
+
+    /// Validates incoming definition data against the fixed registered contract without recompiling.
+    pub(super) fn validate(&self, data: Option<&ConfigurationData>) -> Result<(), GraphError> {
+        let data =
+            data.ok_or_else(|| GraphError::GraphValidation("configure data is missing".into()))?;
+        if data.schema != self.schema {
+            return Err(GraphError::GraphValidation(
+                "configure data schema differs from handler".into(),
+            ));
         }
-        let validator = jsonschema::validator_for(&data.schema).map_err(|e| e.to_string())?;
-        let json = serde_json::to_value(&data.value).map_err(|e| e.to_string())?;
-        validator.validate(&json).map_err(|e| e.to_string())?;
-        from_value::<D>(data.value.clone()).map_err(|e| e.to_string())?;
-        Ok(())
-    };
-    validate().map_err(GraphError::GraphValidation)
+        let json = serde_json::to_value(&data.value)
+            .map_err(|error| GraphError::GraphValidation(error.to_string()))?;
+        self.validator
+            .validate(&json)
+            .map_err(|error| GraphError::GraphValidation(error.to_string()))?;
+        (self.decode)(&data.value)
+    }
+}
+
+fn validate_decode<D: DeserializeOwned>(value: &Value) -> Result<(), GraphError> {
+    from_value::<D>(value.clone())
+        .map(|_| ())
+        .map_err(|error| GraphError::GraphValidation(error.to_string()))
 }
 
 impl<T> Agent<T> {
-    /// Registers definition data and its typed activation function without capturing the data.
+    /// Registers graph-owned settings and invocation instructions owned by the callable.
+    /// Only instructions may change on restore; activation checkpoints the resolved value.
     pub(crate) fn configure_with<O, D, Fut, E>(
         mut self,
         data: D,
-        configure: fn(T, D, Context) -> Fut,
+        instructions: String,
+        configure: fn(T, D, String, Context) -> Fut,
     ) -> Agent<O>
     where
         T: 'static + DeserializeOwned + JsonSchema + Send + Sync,
@@ -56,11 +80,17 @@ impl<T> Agent<T> {
                 .errors
                 .push("agent configure may only be declared once".into());
         } else {
-            match encode_data(data) {
-                Ok(data) => self.definition.configuration = Some(data),
+            match prepare_data(data) {
+                Ok((data, contract)) => {
+                    self.definition.configuration = Some(data);
+                    self.definition.configure = Some(data_configurator::<T, O, D, Fut, E>(
+                        instructions,
+                        configure,
+                        contract,
+                    ));
+                }
                 Err(error) => self.definition.errors.push(error.to_string()),
             }
-            self.definition.configure = Some(data_configurator::<T, O, D, Fut, E>(configure));
         }
         Agent {
             definition: self.definition,
@@ -69,8 +99,12 @@ impl<T> Agent<T> {
     }
 }
 
-/// Keeps the callable independent of settings ownership; activation receives graph-owned data.
-fn data_configurator<T, O, D, Fut, E>(configure: fn(T, D, Context) -> Fut) -> AgentConfigurator
+/// Owns only replaceable instructions; every other setting comes from the graph payload.
+fn data_configurator<T, O, D, Fut, E>(
+    instructions: String,
+    configure: fn(T, D, String, Context) -> Fut,
+    contract: Arc<ConfigurationValidator>,
+) -> AgentConfigurator
 where
     T: 'static + DeserializeOwned + Send,
     O: JsonSchema,
@@ -79,8 +113,9 @@ where
     E: Error + Send + Sync + 'static,
 {
     AgentConfigurator {
-        validate_data: validate_data::<D>,
+        data: Some(contract),
         call: Arc::new(move |input, data, ctx| {
+            let instructions = instructions.clone();
             async move {
                 let input = from_value(input)
                     .map_err(|e| GraphError::AgentConfigValidation(e.to_string()))?;
@@ -89,7 +124,7 @@ where
                 })?;
                 let data = from_value(data)
                     .map_err(|e| GraphError::AgentConfigValidation(e.to_string()))?;
-                configure(input, data, ctx)
+                configure(input, data, instructions, ctx)
                     .await
                     .map_err(|e| GraphError::AgentConfiguration {
                         agent: O::schema_name().into_owned(),
@@ -101,9 +136,17 @@ where
     }
 }
 
-fn encode_data<D: Serialize + JsonSchema>(data: D) -> Result<ConfigurationData, String> {
-    Ok(ConfigurationData {
-        value: to_value(data).map_err(|e| e.to_string())?,
-        schema: serde_json::to_value(schemars::schema_for!(D)).map_err(|e| e.to_string())?,
-    })
+/// Serializes graph-owned settings and prepares the independent registered type contract once.
+fn prepare_data<D: Serialize + DeserializeOwned + JsonSchema>(
+    data: D,
+) -> Result<(ConfigurationData, Arc<ConfigurationValidator>), String> {
+    let schema = serde_json::to_value(schemars::schema_for!(D)).map_err(|e| e.to_string())?;
+    let contract = Arc::new(ConfigurationValidator::new::<D>(schema.clone())?);
+    Ok((
+        ConfigurationData {
+            value: to_value(data).map_err(|e| e.to_string())?,
+            schema,
+        },
+        contract,
+    ))
 }

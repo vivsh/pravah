@@ -26,8 +26,7 @@ pub fn from_json_with_registry(
 ) -> Result<UntypedGraph, GraphError> {
     let graph = from_json(input)?;
     let has_value = |key: &str| registry.has_value(key);
-    let has_work = |key: &str| registry.has_work(key);
     let has_continuation = |key: &str| registry.has_continuation(key);
-    super::validation::validate_registry_keys(&graph, &has_value, &has_work, &has_continuation)?;
+    super::validation::validate_registry_keys(&graph, &has_value, &has_continuation)?;
     Ok(graph)
 }

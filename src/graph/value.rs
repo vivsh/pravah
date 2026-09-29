@@ -1,5 +1,6 @@
 //! Compact, format-neutral values carried by the graph VM.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
@@ -48,7 +49,7 @@ enum Repr {
     F64(f64),
     String(Arc<str>),
     Array(Arc<Vec<Value>>),
-    Object(Arc<Vec<(Arc<str>, Value)>>),
+    Object(Arc<Vec<(Cow<'static, str>, Value)>>),
 }
 
 /// A compact OpenAPI-compatible value used by Pravah's runtime.
@@ -103,12 +104,15 @@ impl Value {
     {
         let entries = entries
             .into_iter()
-            .map(|(key, value)| (Arc::from(key.into()), value))
+            .map(|(key, value)| (Cow::Owned(key.into()), value))
             .collect::<Vec<_>>();
         Self::from_shared_object(entries)
     }
 
-    fn from_shared_object(mut entries: Vec<(Arc<str>, Value)>) -> Result<Self, ValueError> {
+    /// Builds a checked object, borrowing static field names and owning dynamic keys.
+    pub(crate) fn from_shared_object(
+        mut entries: Vec<(Cow<'static, str>, Value)>,
+    ) -> Result<Self, ValueError> {
         entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         for pair in entries.windows(2) {
             if pair[0].0 == pair[1].0 {

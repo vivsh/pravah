@@ -6,8 +6,9 @@ pub(super) fn validate_snapshot_state(
     root_index: usize,
     state: &State,
 ) -> Result<(), GraphError> {
+    super::fetch::validate_fetch_state(callables, state)?;
     if state.frames.is_empty() {
-        if state.suspension.is_some() {
+        if state.waiting.is_some() {
             return Err(GraphError::SnapshotValidation(
                 "completed snapshot cannot retain a suspension".into(),
             ));
@@ -239,7 +240,7 @@ pub(super) fn validate_snapshot_state(
             }
         }
     }
-    if let Some(suspension) = &state.suspension {
+    if let Some(suspension) = state.suspension() {
         validate_snapshot_suspension(callables, state, suspension)?;
     }
     Ok(())
@@ -473,7 +474,7 @@ pub(super) fn validate_snapshot_suspension(
                         node.name
                     ))
                 })?;
-            if expected != &suspension.resume_type || !inputs_ready(frame, compiled_node)? {
+            if expected != suspension.resume_type.as_ref() || !inputs_ready(frame, compiled_node)? {
                 return Err(GraphError::SnapshotValidation(format!(
                     "snapshot suspension node '{}' has inconsistent resume state",
                     node.name

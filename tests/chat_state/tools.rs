@@ -46,9 +46,8 @@ async fn tools_and_history_preparation_do_not_touch_state() -> Result<(), TestEr
         .then_output(json!("first"))
         .then_output(json!("second"));
     let state = vec![vec!["private-state".repeat(100); 16]; 16];
-    let mut chat = Chat::with_state(researcher, state, context(script.clone()))
-        .await?
-        .with_compactor(Summarize);
+    let mut chat =
+        Chat::with_state(researcher, state, context(script.clone())?)?.with_compactor(Summarize);
     let before = serde_json::to_value(chat.snapshot()?)?;
     chat.send("first").await?;
     for snapshot in roundtrips(&chat.snapshot()?)? {
@@ -97,7 +96,7 @@ async fn nested_suspensions_are_distinct() -> Result<(), TestError> {
             "lookup",
             json!({"query":"pause"}),
         )]);
-        let mut chat = Chat::with_state(agent, initial_state(), context(script)).await?;
+        let mut chat = Chat::with_state(agent, initial_state(), context(script)?)?;
         assert!(matches!(
             chat.send("question").await,
             Err(GraphError::ChatSuspended)

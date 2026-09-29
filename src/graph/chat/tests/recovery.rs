@@ -1,9 +1,9 @@
 use super::super::*;
 use crate::testing::ScriptedFactory;
 
-fn builder() -> ChatBuilder<String> {
+fn builder() -> ChatBuilder<String, String> {
     Chat::builder()
-        .model("openai:///test")
+        .model("test:///test")
         .instructions("Answer briefly")
 }
 
@@ -22,46 +22,57 @@ fn snapshots(snapshot: &Snapshot) -> Result<[Snapshot; 2], GraphError> {
     Ok([json, cbor])
 }
 
-/// Pre-activation submissions and committed configuration both survive restoration exactly once.
+/// New prompts apply before configuration commits, never to an already-configured invocation.
 #[tokio::test]
 async fn restores_each_configuration_boundary() -> Result<(), GraphError> {
     for committed in [false, true] {
         let original = ScriptedFactory::new();
-        let mut chat = builder()
-            .build(Context::default().with_client_factory(original.clone()))
-            .await?;
-        chat.runtime
-            .resume(ChatSubmission {
-                input: ChatRequest::from("question").memory("memory"),
-                key: Some("durable".into()),
-            })
-            .await?;
+        let mut chat = builder().build(
+            Context::default().with_providers(crate::testing::providers(original.clone())?),
+        )?;
+        let mut request = ChatRequest::<String>::from("question").memory("memory");
+        request.key = Some("durable".into());
+        chat.runtime.resume(request)?;
         if committed {
-            chat.runtime.next().await?;
+            while chat.snapshot()?.history().entries().is_empty() {
+                crate::graph::tests::host::step(&mut chat.runtime, &chat.executor).await?;
+            }
             assert_eq!(chat.snapshot()?.history().entries().len(), 1);
         }
         assert!(original.calls().is_empty());
         for snapshot in snapshots(&chat.snapshot()?)? {
-            complete_restored(snapshot).await?;
+            let expected = if committed {
+                "Answer briefly"
+            } else {
+                "Updated instructions"
+            };
+            complete_restored(snapshot, expected).await?;
         }
     }
     Ok(())
 }
 
 /// Drives the preserved continuation privately without broadening the public Chat lifecycle API.
-async fn complete_restored(snapshot: Snapshot) -> Result<(), GraphError> {
-    let factory = ScriptedFactory::new().then_output(serde_json::json!("answer"));
-    let mut restored = builder().restore::<()>(
-        snapshot,
-        Context::default().with_client_factory(factory.clone()),
-    )?;
+async fn complete_restored(snapshot: Snapshot, expected: &'static str) -> Result<(), GraphError> {
+    let factory = ScriptedFactory::new()
+        .then_output(serde_json::json!("answer"))
+        .then_output(serde_json::json!("next answer"));
+    let mut restored = builder()
+        .instructions("Updated instructions")
+        .compactor(ExpectInstructions(expected))
+        .restore::<()>(
+            snapshot,
+            Context::default().with_providers(crate::testing::providers(factory.clone())?),
+        )?;
     assert!(matches!(
         restored.send("another").await,
         Err(GraphError::ChatNotReady { .. })
     ));
     let mut complete = false;
     for _ in 0..20 {
-        if let Step::Suspend(_) = restored.runtime.next().await? {
+        if let Step::Suspend(_) =
+            crate::graph::tests::host::step(&mut restored.runtime, &restored.executor).await?
+        {
             complete = true;
             break;
         }
@@ -74,22 +85,47 @@ async fn complete_restored(snapshot: Snapshot) -> Result<(), GraphError> {
         snapshot.history().entries()[0].message.key.as_deref(),
         Some("durable")
     );
+    let mut restored = restored.with_compactor(ExpectInstructions("Updated instructions"));
+    restored.send("next question").await?;
+    assert_eq!(factory.calls().len(), 2);
+    assert_eq!(restored.snapshot()?.history().entries().len(), 4);
     Ok(())
+}
+
+struct ExpectInstructions(&'static str);
+
+impl crate::Compactor for ExpectInstructions {
+    type Error = std::convert::Infallible;
+
+    /// Checks the effective client instructions after restore, before the model is dispatched.
+    async fn compact(
+        &self,
+        request: crate::CompactionRequest<'_>,
+        _ctx: Context,
+    ) -> Result<crate::CompactionResult, Self::Error> {
+        assert!(
+            request
+                .options()
+                .preamble
+                .as_deref()
+                .unwrap_or_default()
+                .contains(self.0)
+        );
+        Ok(crate::CompactionResult::default())
+    }
 }
 
 /// Semantic corruption in either a retained input edge or active checkpoint is rejected on restore.
 #[tokio::test]
 async fn rejects_corrupt_persisted_requests() -> Result<(), GraphError> {
     for committed in [false, true] {
-        let mut chat = builder().build(Context::default()).await?;
+        let mut chat = builder().build(Context::default())?;
         chat.runtime
-            .resume(ChatSubmission {
-                input: ChatRequest::from("question"),
-                key: None,
-            })
-            .await?;
+            .resume(ChatRequest::<String>::from("question"))?;
         if committed {
-            chat.runtime.next().await?;
+            while chat.snapshot()?.history().entries().is_empty() {
+                crate::graph::tests::host::step(&mut chat.runtime, &chat.executor).await?;
+            }
         }
         let mut json = serde_json::to_value(chat.snapshot()?)
             .map_err(|e| GraphError::SnapshotValidation(e.to_string()))?;
@@ -107,8 +143,8 @@ async fn rejects_corrupt_persisted_requests() -> Result<(), GraphError> {
 
 /// Finds serialized request values by their schema fields, independent of numeric graph IDs.
 fn corrupt_message(value: &mut serde_json::Value) -> bool {
-    if let Some(message) = value.get_mut("message") {
-        message["role"]["role"] = serde_json::json!("assistant");
+    if value.get("input").is_some_and(serde_json::Value::is_string) {
+        value["tools"] = serde_json::json!(["undeclared"]);
         return true;
     }
     let mut found = false;

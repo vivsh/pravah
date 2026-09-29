@@ -157,7 +157,6 @@ impl FlowBuilder {
             turn_budget: config.turn_budget,
             turn_budget_message: config.turn_budget_message,
             provider_config: config.provider_config,
-            output_type_name: output_str,
         };
         self.flow
             .nodes

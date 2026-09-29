@@ -1,6 +1,8 @@
 use schemars::JsonSchema;
 
-use crate::clients::{ToolDefinition, schema::sanitize_strict};
+use crate::clients::ToolDefinition;
+mod normalize;
+use normalize::sanitize_strict;
 
 use super::base::pascal_to_snake;
 
@@ -13,9 +15,9 @@ pub(crate) fn tool_definition<T: JsonSchema>() -> Result<ToolDefinition, String>
         .and_then(|value| value.as_str())
         .unwrap_or("")
         .to_owned();
-    Ok(ToolDefinition {
-        name: pascal_to_snake(&T::schema_name()),
+    Ok(ToolDefinition::new(
+        pascal_to_snake(&T::schema_name()),
         description,
-        parameters: sanitize_strict(raw),
-    })
+        sanitize_strict(raw)?,
+    ))
 }

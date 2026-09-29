@@ -201,65 +201,6 @@ where
     typed_edge(state, output)
 }
 
-pub(super) fn add_work_node<T, P, Fut, H>(
-    state: Arc<Mutex<TypedBuildState>>,
-    input_edge: EdgeId,
-    func: H,
-) -> TypedEdge<P>
-where
-    T: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
-    P: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
-    Fut: Future<Output = Result<P, GraphError>> + Send + 'static,
-    H: Fn(T, Context) -> Fut + Send + Sync + 'static,
-{
-    let name = format!("work_to_{}", P::schema_name());
-    add_work_node_named(state, input_edge, name, func)
-}
-
-pub(super) fn add_work_node_named<T, P, Fut, H>(
-    state: Arc<Mutex<TypedBuildState>>,
-    input_edge: EdgeId,
-    name: String,
-    func: H,
-) -> TypedEdge<P>
-where
-    T: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
-    P: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
-    Fut: Future<Output = Result<P, GraphError>> + Send + 'static,
-    H: Fn(T, Context) -> Fut + Send + Sync + 'static,
-{
-    let func = Arc::new(func);
-    let output = with_state(&state, |guard| {
-        let key = guard.next_handler_key(&name);
-        let handler_name = name.clone();
-        if let Err(err) = guard
-            .registry
-            .insert_work(key.as_str(), move |inputs, ctx| {
-                let func = Arc::clone(&func);
-                let handler_name = handler_name.clone();
-                let fut: BoxFuture<'static, Result<Vec<Value>, GraphError>> =
-                    Box::pin(async move {
-                        let input = decode_one::<T>(inputs, &handler_name)?;
-                        encode_one(func(input, ctx).await, &handler_name)
-                    });
-                fut
-            })
-        {
-            guard.errors.push(err.to_string());
-        }
-        let output = guard.builder.edge(format!("{name}_out"), type_spec::<P>());
-        guard.builder.node(
-            name,
-            NodeKind::WorkHandler { key },
-            vec![input_edge],
-            vec![output],
-        );
-        output
-    })
-    .unwrap_or(input_edge);
-    typed_edge(state, output)
-}
-
 pub(super) fn add_continuation_node<O, H, P>(
     state: Arc<Mutex<TypedBuildState>>,
     input_edge: EdgeId,
@@ -597,7 +538,7 @@ where
         };
         if let Err(err) = guard
             .registry
-            .insert_continuation(key.as_str(), build.handler)
+            .insert_effect_continuation(key.as_str(), build.handler)
         {
             guard.errors.push(err.to_string());
             return input_edge;

@@ -1,6 +1,7 @@
 use super::*;
 use pravah::Flow;
 use pravah::clients::ClientError;
+use pravah::clients::ErrorKind;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -10,16 +11,16 @@ use std::sync::{
 #[tokio::test]
 async fn failed_turn_roundtrips_keep_fresh_services_idle() -> Result<(), TestError> {
     let calls = Arc::new(AtomicUsize::new(0));
-    let script = ScriptedFactory::new().then_err(ClientError::Validation("offline".into()));
+    let script =
+        ScriptedFactory::new().then_err(ClientError::new(ErrorKind::Validation, "offline"));
     let mut chat = Chat::with_state(
         assistant,
         initial_state(),
-        lifecycle::counted_context(script, calls.clone()),
-    )
-    .await?;
+        lifecycle::counted_context(script, calls.clone())?,
+    )?;
     assert!(matches!(
         chat.send("question").await,
-        Err(GraphError::AgentClient(_))
+        Err(GraphError::AgentClient { .. })
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     for snapshot in roundtrips(&chat.snapshot()?)? {
@@ -28,7 +29,7 @@ async fn failed_turn_roundtrips_keep_fresh_services_idle() -> Result<(), TestErr
         let mut restored = Chat::<String, String, Session>::from_snapshot(
             assistant,
             snapshot,
-            lifecycle::counted_context(script.clone(), fresh.clone()),
+            lifecycle::counted_context(script.clone(), fresh.clone())?,
         )?;
         assert_eq!(restored.get()?, initial_state());
         assert!(matches!(
@@ -48,7 +49,7 @@ async fn failed_turn_roundtrips_keep_fresh_services_idle() -> Result<(), TestErr
 /// Rejects missing state, bad values and corrupted stable variable identities or epochs.
 #[tokio::test]
 async fn malformed_state_is_rejected() -> Result<(), TestError> {
-    let chat = Chat::with_state(assistant, initial_state(), Context::default()).await?;
+    let chat = Chat::with_state(assistant, initial_state(), Context::default())?;
     let original = serde_json::to_value(chat.snapshot()?)?;
     let corruptions = [
         ("/state/frames/0/variables", json!([])),
@@ -93,7 +94,7 @@ async fn old_chat_graph_is_rejected() -> Result<(), TestError> {
         .goto(start);
     let flow = root.map(|value| value).finish::<String>()?;
     let old = flow
-        .start("question".into(), Context::default())?
+        .start("question".into(), uuid::Uuid::nil())?
         .snapshot()?;
     assert!(matches!(
         Chat::<String, String>::from_snapshot(assistant, old, Context::default()),

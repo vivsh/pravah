@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::clients::{ClientFactory, DefaultClientFactory};
+use crate::clients::ProviderRegistry;
 use crate::deps::{Deps, DepsError};
 #[cfg(feature = "mcp")]
 use crate::graph::{McpError, McpResourceInfo, McpServer};
@@ -33,16 +33,16 @@ struct ContextInner {
     deps: Deps,
     http_client: Option<reqwest::Client>,
     http_timeout_secs: u64,
-    client_factory: Arc<dyn ClientFactory>,
+    providers: Arc<ProviderRegistry>,
     #[cfg(feature = "mcp")]
     mcp_servers: Arc<BTreeMap<String, McpServer>>,
 }
 
-/// Runtime-only dependencies and policy bound to a workflow execution.
+/// Runtime-only dependencies and policy supplied to external execution.
 ///
-/// Graph workflows attach a context when they start or restore. Tools and
-/// handlers receive shared clones while the context itself remains outside
-/// snapshots.
+/// Modern workflows attach a context to a `FetchExecutor`; Chat owns that
+/// executor for its session. Tools and callbacks receive shared clones, while
+/// the synchronous VM and its snapshots contain no live context.
 /// Cloning is cheap because the inner state is reference-counted.
 #[derive(Clone)]
 pub struct Context(Arc<ContextInner>);
@@ -65,7 +65,7 @@ impl Context {
             deps: Deps::default(),
             http_client: None,
             http_timeout_secs: conf.http_timeout_secs.unwrap_or(30),
-            client_factory: Arc::new(DefaultClientFactory),
+            providers: Arc::new(ProviderRegistry::with_builtins()),
             #[cfg(feature = "mcp")]
             mcp_servers: Arc::new(BTreeMap::new()),
         }))
@@ -92,14 +92,14 @@ impl Context {
         }))
     }
 
-    /// Replaces the LLM client factory used by graph agents in this context.
+    /// Replaces provider routing used by graph agents in this context.
     ///
-    /// The factory is runtime-only and must be installed again after restoring
+    /// The registry is runtime-only and must be installed again after restoring
     /// a serialized workflow snapshot.
-    pub fn with_client_factory(self, client_factory: impl ClientFactory + 'static) -> Self {
+    pub fn with_providers(self, providers: ProviderRegistry) -> Self {
         let inner = Arc::unwrap_or_clone(self.0);
         Self(Arc::new(ContextInner {
-            client_factory: Arc::new(client_factory),
+            providers: Arc::new(providers),
             ..inner
         }))
     }
@@ -154,8 +154,8 @@ impl Context {
         self.0.deps.require::<T>()
     }
 
-    pub(crate) fn client_factory(&self) -> &dyn ClientFactory {
-        self.0.client_factory.as_ref()
+    pub(crate) fn providers(&self) -> &ProviderRegistry {
+        self.0.providers.as_ref()
     }
 
     #[cfg(feature = "mcp")]
@@ -165,20 +165,5 @@ impl Context {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::clients::ClientOptions;
-
-    use super::*;
-
-    /// Verifies graph contexts provide Rath's default client factory without setup.
-    #[test]
-    fn context_installs_default_graph_client_factory() {
-        let context = Context::default();
-        let client = context
-            .client_factory()
-            .create("ollama:///qwen3:8b", ClientOptions::default())
-            .expect("default client factory should create an Ollama client");
-
-        assert_eq!(client.model_url().model, "qwen3:8b");
-    }
-}
+#[path = "tests/context.rs"]
+mod tests;

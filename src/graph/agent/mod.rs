@@ -8,10 +8,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
-use crate::clients::{
-    ClientOptions, ClientOutput, Message, Role, ToolCall, ToolChoice, ToolDefinition,
-    materialize_messages,
-};
+use crate::clients::{ClientOutput, Message, Role, ToolCall, ToolDefinition};
 use crate::context::Context;
 use crate::tools::ToolError;
 
@@ -26,14 +23,25 @@ use super::{CompiledFlow, HandlerRegistry};
 
 mod budget;
 #[cfg(test)]
+#[path = "tests/budget.rs"]
 mod budget_tests;
 mod checkpoint;
 mod config;
 mod control;
 mod definition;
+mod effect_values;
+mod effects;
 mod execution;
+mod function_tool;
+pub(crate) use function_tool::FunctionTool;
+mod external;
+pub(crate) use external::execute_hook;
 mod intervention;
+mod output;
 mod payload;
+mod preparation;
+mod request;
+pub(crate) use output::prepare_output_validator;
 pub(crate) mod support;
 mod tool_execution;
 
@@ -54,8 +62,8 @@ use definition::{AgentConfigurator, AgentController};
 use payload::AgentPayloadView;
 use support::*;
 
-const PAYLOAD_VERSION: u32 = 4;
-const CHECKPOINT_VERSION: u32 = 5;
+const PAYLOAD_VERSION: u32 = 5;
+const CHECKPOINT_VERSION: u32 = 6;
 
 /// Validates the identity duplicated in an agent's generic continuation payload.
 pub(crate) fn validate_payload_handler(
@@ -89,6 +97,12 @@ pub(crate) fn validate_payload_handler(
 
 /// Rewrites identities duplicated inside a typed agent continuation payload.
 pub(crate) fn namespace_payload_handler(payload: &mut Value, handler_key: &str) {
+    if payload.get("tool_handler_key").is_some() {
+        if let Ok(value) = Value::object([("tool_handler_key", Value::from(handler_key))]) {
+            *payload = value;
+        }
+        return;
+    }
     let Ok(mut agent): Result<AgentPayload, _> = from_value(payload.clone()) else {
         return;
     };

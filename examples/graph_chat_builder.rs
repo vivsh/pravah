@@ -1,107 +1,52 @@
-//! Callback-free chat, per-request memory, keyed messages and durable application state.
+//! A typed chat with request memory, message keys, and persistent application state.
 //!
-//! Run with `cargo run --example graph_chat_builder --features testing`. No credentials needed.
+//! Run with --features testing. Scripted replies make this example fully offline.
 
-#[cfg(feature = "testing")]
 mod support;
 
-#[cfg(feature = "testing")]
-mod example {
-    use super::support::ExampleError;
-    use pravah::testing::{CapturingHistoryStore, ScriptedFactory};
-    use pravah::{
-        Chat, ChatBuilder, ChatRequest, CompactionRequest, CompactionResult, Compactor, Context,
-        Snapshot,
-    };
+use pravah::testing::ScriptedFactory;
+use pravah::{Chat, ChatBuilder, ChatRequest, Context};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use support::ExampleError;
 
-    struct WorkingMemory;
-
-    impl Compactor for WorkingMemory {
-        type Error = std::convert::Infallible;
-        /// Inspects completed history without replacing any messages in this example.
-        async fn compact(
-            &self,
-            request: CompactionRequest<'_>,
-            _ctx: Context,
-        ) -> Result<CompactionResult, Self::Error> {
-            println!(
-                "Completed turns available for compaction: {}",
-                request.turn_count()
-            );
-            Ok(CompactionResult::default())
-        }
-    }
-
-    fn assistant() -> ChatBuilder<String> {
-        Chat::builder()
-            .model("openai:///scripted")
-            .instructions("Help the user review their project.")
-            .turn_budget(4)
-            .max_output_tokens(512)
-    }
-
-    /// Saves a keyed exchange and restores it with fresh services using JSON and CBOR.
-    pub(super) async fn run() -> Result<(), ExampleError> {
-        let factory =
-            ScriptedFactory::new().then_output(serde_json::json!("Start with usability."));
-        let ctx = Context::default().with_client_factory(factory);
-        let mut chat = assistant()
-            .state("Pravah".to_owned())
-            .compactor(WorkingMemory)
-            .store(CapturingHistoryStore::new())
-            .build(ctx)
-            .await?;
-        println!(
-            "Initial snapshot: {} bytes",
-            serde_json::to_vec(&chat.snapshot()?)?.len()
-        );
-        chat.set("Pravah chat".to_owned())?;
-        let request = ChatRequest::from("What should I review?").memory(format!(
-            "Current project: {}. Prefer concise answers.",
-            chat.get()?
-        ));
-        println!(
-            "{}",
-            chat.send_with_key(request, "message-42").await?.output
-        );
-        let snapshot = chat.snapshot()?;
-        let json = serde_json::to_vec(&snapshot)?;
-        let mut cbor = Vec::new();
-        ciborium::into_writer(&snapshot, &mut cbor)
-            .map_err(|error| ExampleError::unexpected(error.to_string()))?;
-        let copies: [Snapshot; 2] = [
-            serde_json::from_slice(&json)?,
-            ciborium::from_reader(cbor.as_slice())
-                .map_err(|error| ExampleError::unexpected(error.to_string()))?,
-        ];
-        for snapshot in copies {
-            continue_chat(snapshot).await?;
-        }
-        Ok(())
-    }
-
-    /// Reuses the definition, not live clients; memory is explicitly supplied per invocation.
-    async fn continue_chat(snapshot: Snapshot) -> Result<(), ExampleError> {
-        let factory =
-            ScriptedFactory::new().then_output(serde_json::json!("Test the first conversation."));
-        let ctx = Context::default().with_client_factory(factory);
-        let mut chat = assistant()
-            .compactor(WorkingMemory)
-            .store(CapturingHistoryStore::new())
-            .restore::<String>(snapshot, ctx)?;
-        println!("Restored project: {}", chat.get()?);
-        println!("{}", chat.send("How do I start?").await?.output);
-        Ok(())
-    }
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct Question {
+    topic: String,
 }
 
-#[cfg(feature = "testing")]
+fn assistant() -> ChatBuilder<Question, String> {
+    Chat::builder()
+        .model("test:///scripted")
+        .instructions("Suggest one practical next step.")
+}
+
+fn context(reply: &str) -> Result<Context, pravah::GraphError> {
+    let client = ScriptedFactory::new().then_output(serde_json::json!(reply));
+    Ok(Context::default().with_providers(pravah::testing::providers(client)?))
+}
+
+/// Saves one conversation, restores it with fresh dependencies, then sends another question.
 #[tokio::main]
-async fn main() -> Result<(), support::ExampleError> {
-    example::run().await
-}
+async fn main() -> Result<(), ExampleError> {
+    let mut chat = assistant()
+        .state("Pravah".to_owned())
+        .build(context("Start by reviewing the examples.")?)?;
+    chat.set("Pravah documentation".to_owned())?;
 
-#[cfg(not(feature = "testing"))]
-fn main() {
-    eprintln!("enable the 'testing' feature to run this deterministic example");
+    let question = ChatRequest::from(Question { topic: chat.get()? })
+        .memory("The reader prefers short, runnable examples.");
+    let reply = chat.send_with_key(question, "question-42").await?;
+    println!("{}", reply.output);
+
+    let saved = serde_json::to_vec(&chat.snapshot()?)?;
+    let mut chat = assistant().restore::<String>(
+        serde_json::from_slice(&saved)?,
+        context("Keep each example focused on one feature.")?,
+    )?;
+    println!("Restored project: {}", chat.get()?);
+
+    let reply = chat.send(Question { topic: chat.get()? }).await?;
+    println!("{}", reply.output);
+    Ok(())
 }

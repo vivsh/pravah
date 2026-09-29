@@ -2,7 +2,6 @@
 
 use pravah::GraphError;
 use pravah::clients::ClientError;
-use pravah::legacy::FlowError;
 use thiserror::Error;
 
 /// Structured failures that can be reported by the example programs.
@@ -14,9 +13,6 @@ pub(crate) enum ExampleError {
     /// A graph workflow operation failed.
     #[error(transparent)]
     Graph(#[from] GraphError),
-    /// A compatibility-only legacy flow operation failed.
-    #[error(transparent)]
-    Legacy(#[from] FlowError),
     /// Local file access failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -28,9 +24,14 @@ pub(crate) enum ExampleError {
     Unexpected(String),
 }
 
-impl ExampleError {
-    /// Creates an error for an outcome that the example does not support.
-    pub(crate) fn unexpected(message: impl Into<String>) -> Self {
-        Self::Unexpected(message.into())
+impl From<String> for ExampleError {
+    fn from(message: String) -> Self {
+        Self::Unexpected(message)
+    }
+}
+
+impl From<&str> for ExampleError {
+    fn from(message: &str) -> Self {
+        Self::Unexpected(message.to_owned())
     }
 }

@@ -11,11 +11,12 @@ struct Settings {
 async fn configure(
     input: String,
     settings: Settings,
+    instructions: String,
     _ctx: Context,
 ) -> Result<AgentConfig, GraphError> {
     Ok(AgentConfig::new(
         settings.model,
-        "instructions",
+        instructions,
         Message::user(input),
     ))
 }
@@ -27,6 +28,7 @@ fn registered_data_contract_is_checked() -> Result<(), GraphError> {
         Settings {
             model: "openai:///test".into(),
         },
+        "instructions".into(),
         configure,
     );
     let definition = agent.definition;
@@ -55,6 +57,7 @@ fn ordinary_configuration_rejects_definition_data() -> Result<(), GraphError> {
         Settings {
             model: "openai:///test".into(),
         },
+        "instructions".into(),
         configure,
     );
     assert!(configuration::validate_absent(agent.definition.configuration.as_ref()).is_err());

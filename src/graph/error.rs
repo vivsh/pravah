@@ -2,9 +2,44 @@ use thiserror::Error;
 
 use super::ids::{EdgeId, HandlerKey, NodeId, VarId};
 
+/// Graph boundary at which a Rath client failed, distinct from Rath's provider operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentClientOperation {
+    /// Creating a client from the invocation's resolved configuration.
+    Create,
+    /// Executing one model request through an existing client.
+    Execute,
+}
+
+impl std::fmt::Display for AgentClientOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Create => "creation",
+            Self::Execute => "execution",
+        })
+    }
+}
+
 #[derive(Debug, Error)]
 /// Error type for graph construction, validation, and VM execution failures.
 pub enum GraphError {
+    /// A delivered portable failure could not be handled by the owning continuation.
+    #[error("external operation failed")]
+    FetchFailed {
+        /// Portable diagnostics, not the original local Rust error object.
+        #[source]
+        source: super::fetch::FetchError,
+    },
+    /// An HTTP transport failed; its source omits the potentially private URL.
+    #[error("Fetch HTTP transport failed")]
+    FetchTransport {
+        /// Transport diagnostics; request contents are not part of Display.
+        #[source]
+        source: reqwest::Error,
+    },
+    /// An external request or delivered outcome has an invalid protocol envelope.
+    #[error("invalid Fetch: {0}")]
+    FetchValidation(String),
     /// A Chat request failed validation before the suspended execution accepted it.
     #[error("invalid chat request: {reason}")]
     ChatRequestValidation {
@@ -98,9 +133,19 @@ pub enum GraphError {
     #[error("agent conclusion failed for '{agent}': {reason}")]
     AgentConclusion { agent: String, reason: String },
 
-    /// An LLM client could not be created or executed.
-    #[error("agent client operation failed: {0}")]
-    AgentClient(String),
+    /// An LLM client failed; diagnostics are retained but omitted from Display.
+    #[error("agent client {operation} failed")]
+    AgentClient {
+        /// Whether client creation or model execution failed.
+        operation: AgentClientOperation,
+        /// Original Rath error; bodies and diagnostic text may contain private content.
+        #[source]
+        source: crate::clients::ClientError,
+    },
+
+    /// The runtime rejected a client response, rather than receiving a Rath error.
+    #[error("agent response is invalid: {0}")]
+    AgentResponseValidation(String),
 
     /// The provider exhausted its generation-token cap; partial output is discarded.
     #[error("agent '{agent}' reached the output token limit for provider '{provider:?}'")]
@@ -182,4 +227,16 @@ pub enum GraphError {
     /// Snapshot data was produced by an incompatible runtime version.
     #[error("snapshot version {got} is unsupported; expected {expected}")]
     SnapshotVersion { got: u32, expected: u32 },
+}
+
+impl GraphError {
+    /// Borrows the original Rath error for client creation or execution failures.
+    /// Returns None for runtime validation and the separate AgentOutputLimit error.
+    /// Inspect response bodies explicitly; do not log private diagnostics by default.
+    pub fn client_error(&self) -> Option<&crate::clients::ClientError> {
+        match self {
+            Self::AgentClient { source, .. } => Some(source),
+            _ => None,
+        }
+    }
 }

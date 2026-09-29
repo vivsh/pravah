@@ -1,9 +1,8 @@
-use async_trait::async_trait;
 use tokio::time::Duration;
 
 use crate::clients::{
-    Client, ClientError, ClientFactory, ClientFactoryLayer, ClientOptions, ClientResponse, Message,
-    ModelUrl,
+    Client, ClientError, ClientOptions, ClientResponse, ErrorKind, LlmBackend, Message, ModelUrl,
+    ProviderFactory,
 };
 
 /// Retry settings for transient client failures.
@@ -54,11 +53,16 @@ impl RetryConfig {
     }
 }
 
-/// Returns `true` when the failure should be retried.
+/// Preserves the legacy broad provider/transport retry policy using Rath classifications.
 fn is_retryable(err: &ClientError) -> bool {
     matches!(
-        err,
-        ClientError::Provider(_) | ClientError::EmptyResponse | ClientError::Other(_)
+        err.kind(),
+        ErrorKind::Provider
+            | ErrorKind::Http
+            | ErrorKind::Transport
+            | ErrorKind::Timeout
+            | ErrorKind::InvalidResponse
+            | ErrorKind::Other
     )
 }
 
@@ -68,12 +72,11 @@ fn backoff_delay(config: &RetryConfig, attempt: u32) -> Duration {
 }
 
 struct RetryingClient {
-    inner: Box<dyn Client>,
+    inner: Client,
     config: RetryConfig,
 }
 
-#[async_trait]
-impl Client for RetryingClient {
+impl LlmBackend for RetryingClient {
     fn model_url(&self) -> &ModelUrl {
         self.inner.model_url()
     }
@@ -107,7 +110,7 @@ impl Client for RetryingClient {
 
 /// Client-factory wrapper that retries transient LLM failures with exponential backoff.
 /// Retries apply only to `execute()`.
-pub struct RetryingFactory<F: ClientFactory> {
+pub struct RetryingFactory<F: ProviderFactory> {
     inner: F,
     config: RetryConfig,
 }
@@ -125,7 +128,7 @@ impl RetryLayer {
     }
 }
 
-impl<F: ClientFactory> RetryingFactory<F> {
+impl<F: ProviderFactory> RetryingFactory<F> {
     /// Wraps `inner` with the default retry policy.
     pub fn new(inner: F) -> Self {
         Self {
@@ -141,68 +144,26 @@ impl<F: ClientFactory> RetryingFactory<F> {
     }
 }
 
-impl<F: ClientFactory> ClientFactory for RetryingFactory<F> {
-    fn create(
+impl<F: ProviderFactory> ProviderFactory for RetryingFactory<F> {
+    async fn llm(
         &self,
-        model_url: &str,
+        model_url: &ModelUrl,
         options: ClientOptions,
-    ) -> Result<Box<dyn Client>, ClientError> {
-        let inner = self.inner.create(model_url, options)?;
-        Ok(Box::new(RetryingClient {
+    ) -> Result<Client, ClientError> {
+        let inner = self.inner.llm(model_url, options).await?;
+        Ok(Client::from_backend(RetryingClient {
             inner,
             config: self.config.clone(),
         }))
     }
 }
 
-impl<F: ClientFactory> ClientFactoryLayer<F> for RetryLayer {
-    type Factory = RetryingFactory<F>;
-
-    fn layer(self, inner: F) -> Self::Factory {
+impl RetryLayer {
+    /// Wraps a provider factory with this execution policy.
+    pub fn layer<F: ProviderFactory>(self, inner: F) -> RetryingFactory<F> {
         RetryingFactory::new(inner).with_config(self.config)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `is_retryable` only accepts transient errors.
-    #[test]
-    fn test_retryable_variants() {
-        assert!(is_retryable(&ClientError::Provider("rate limited".into())));
-        assert!(is_retryable(&ClientError::EmptyResponse));
-        assert!(!is_retryable(&ClientError::Validation("bad".into())));
-        assert!(!is_retryable(&ClientError::InvalidUrl("x".into())));
-        assert!(!is_retryable(&ClientError::Deserialize {
-            source: serde_json::from_str::<()>("!").unwrap_err(),
-            raw: "!".into(),
-        }));
-    }
-
-    /// Backoff grows and then caps at `max_delay`.
-    #[test]
-    fn test_backoff_delay_growth() {
-        let config = RetryConfig {
-            max_retries: 5,
-            initial_delay: Duration::from_secs(1),
-            backoff_factor: 2.0,
-            max_delay: Duration::from_secs(10),
-        };
-        assert_eq!(backoff_delay(&config, 0), Duration::from_secs(1));
-        assert_eq!(backoff_delay(&config, 1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(&config, 2), Duration::from_secs(4));
-        assert_eq!(backoff_delay(&config, 3), Duration::from_secs(8));
-        assert_eq!(backoff_delay(&config, 4), Duration::from_secs(10));
-    }
-
-    /// The default config matches the documented values.
-    #[test]
-    fn test_retry_config_defaults() {
-        let cfg = RetryConfig::default();
-        assert_eq!(cfg.max_retries, 3);
-        assert_eq!(cfg.initial_delay, Duration::from_secs(1));
-        assert_eq!(cfg.backoff_factor, 2.0_f64);
-        assert_eq!(cfg.max_delay, Duration::from_secs(30));
-    }
-}
+mod tests;

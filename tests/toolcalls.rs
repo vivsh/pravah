@@ -1,6 +1,6 @@
 //! Integration tests for agent tool-call dispatch.
 
-use pravah::clients::{ClientError, Role};
+use pravah::clients::{ClientError, ErrorKind, Role};
 use pravah::legacy::ToolOutput;
 use pravah::legacy::{
     Agent, AgentConfig, AgentError, Flow, FlowError, FlowRuntime, FlowStep, Node, PhaseKind,
@@ -108,7 +108,7 @@ macro_rules! simple_agent {
         impl Agent for $in {
             type Output = $out;
             fn configure() -> AgentConfig {
-                AgentConfig::new($preamble, "test://model")
+                AgentConfig::new($preamble, "test:///model")
             }
         }
     };
@@ -279,22 +279,23 @@ impl Flow for StoreIn {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_direct_response() {
+async fn test_direct_response() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new().then_output(json!({ "answer": "42" }));
     let spy = factory.clone();
     let rt = FlowRuntime::new(DirectIn {
         prompt: "what is the answer?".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.answer, "42");
     assert_eq!(spy.calls().len(), 1);
     assert_eq!(spy.remaining(), 0);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_valid_tool_call_then_exit() {
+async fn test_valid_tool_call_then_exit() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call(
             "c1",
@@ -307,14 +308,15 @@ async fn test_valid_tool_call_then_exit() {
         query: "echo hello".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.result, "echoed:hello");
     assert_eq!(spy.calls().len(), 2);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_inspector_tracks_tool_turns() {
+async fn test_inspector_tracks_tool_turns() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call(
             "c1",
@@ -326,7 +328,7 @@ async fn test_inspector_tracks_tool_turns() {
         query: "echo hello".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
 
     // Initial: 1 frame, agent not yet dispatched.
     assert_eq!(rt.inspector().depth(), 1);
@@ -373,10 +375,11 @@ async fn test_inspector_tracks_tool_turns() {
         }
     }
     assert_eq!(rt.inspector().depth(), 0);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_multiple_tool_calls_in_one_turn() {
+async fn test_multiple_tool_calls_in_one_turn() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![
             mock_tool_call("c1", "echo", json!({ "text": "hi" })),
@@ -385,13 +388,14 @@ async fn test_multiple_tool_calls_in_one_turn() {
         .then_output(json!({ "summary": "done" }));
     let rt = FlowRuntime::new(MultiToolIn { text: "hi".into() })
         .unwrap()
-        .with_factory(factory);
+        .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.summary, "done");
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_same_tool_twice_runs_serially() {
+async fn test_same_tool_twice_runs_serially() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![
             mock_tool_call("c1", "echo", json!({ "text": "a" })),
@@ -402,13 +406,14 @@ async fn test_same_tool_twice_runs_serially() {
         text: "test".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.result, "done");
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_duplicate_call_id_is_rejected() {
+async fn test_duplicate_call_id_is_rejected() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new().then_tool_calls(vec![
         mock_tool_call("c1", "echo", json!({ "text": "a" })),
         mock_tool_call("c1", "echo", json!({ "text": "b" })),
@@ -417,16 +422,17 @@ async fn test_duplicate_call_id_is_rejected() {
         text: "test".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     let err = run_to_err(rt).await;
     assert!(matches!(
         err,
         FlowError::Agent(AgentError::DuplicateToolCall { .. })
     ));
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_unknown_tool_name_becomes_error_result() {
+async fn test_unknown_tool_name_becomes_error_result() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call("c1", "nonexistent_tool", json!({}))])
         .then_output(json!({ "result": "recovered" }));
@@ -434,13 +440,14 @@ async fn test_unknown_tool_name_becomes_error_result() {
         text: "test".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.result, "recovered");
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_tool_result_present_in_second_dispatch() {
+async fn test_tool_result_present_in_second_dispatch() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call(
             "tc1",
@@ -451,7 +458,7 @@ async fn test_tool_result_present_in_second_dispatch() {
     let spy = factory.clone();
     let rt = FlowRuntime::new(HistoryIn { q: "ping?".into() })
         .unwrap()
-        .with_factory(factory);
+        .with_providers(pravah::testing::providers(factory)?);
     run_to_done(rt).await.unwrap();
 
     let calls = spy.calls();
@@ -472,10 +479,11 @@ async fn test_tool_result_present_in_second_dispatch() {
         .position(|m| matches!(&m.role, Role::Tool { call_id } if call_id == "tc1"))
         .unwrap();
     assert!(atc_pos < tool_pos);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_malformed_tool_input_remains_recoverable() {
+async fn test_malformed_tool_input_remains_recoverable() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call("tc1", "echo", json!({ "text": 3 }))])
         .then_output(json!({ "result": "recovered" }));
@@ -484,7 +492,7 @@ async fn test_malformed_tool_input_remains_recoverable() {
         query: "test".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
 
     let out = run_to_done(rt).await.unwrap();
 
@@ -498,10 +506,11 @@ async fn test_malformed_tool_input_remains_recoverable() {
         .expect("recoverable tool error should be sent back to model");
     assert!(tool_error.content.contains(r#""error_kind":"TypeError""#));
     assert!(tool_error.content.contains(r#""recoverable":true"#));
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_both_tool_results_present_after_multi_call_turn() {
+async fn test_both_tool_results_present_after_multi_call_turn() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![
             mock_tool_call("id1", "echo", json!({ "text": "a" })),
@@ -513,7 +522,7 @@ async fn test_both_tool_results_present_after_multi_call_turn() {
         text: "test".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     run_to_done(rt).await.unwrap();
     let second = &spy.calls()[1].1;
     for call_id in ["id1", "id2"] {
@@ -523,10 +532,11 @@ async fn test_both_tool_results_present_after_multi_call_turn() {
                 .any(|m| matches!(&m.role, Role::Tool { call_id: cid } if cid == call_id))
         );
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_three_sequential_tool_call_rounds() {
+async fn test_three_sequential_tool_call_rounds() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call("r1", "echo", json!({ "text": "one" }))])
         .then_tool_calls(vec![mock_tool_call("r2", "echo", json!({ "text": "two" }))])
@@ -539,15 +549,16 @@ async fn test_three_sequential_tool_call_rounds() {
     let spy = factory.clone();
     let rt = FlowRuntime::new(ChainIn { start: "go".into() })
         .unwrap()
-        .with_factory(factory);
+        .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.final_value, "done");
     assert_eq!(spy.calls().len(), 4);
     assert_eq!(spy.remaining(), 0);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_tool_results_accumulate_across_rounds() {
+async fn test_tool_results_accumulate_across_rounds() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call("r1", "echo", json!({ "text": "a" }))])
         .then_tool_calls(vec![mock_tool_call("r2", "echo", json!({ "text": "b" }))])
@@ -557,7 +568,7 @@ async fn test_tool_results_accumulate_across_rounds() {
         start: "chain".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     run_to_done(rt).await.unwrap();
     let calls = spy.calls();
     let t2 = &calls[1].1;
@@ -572,14 +583,16 @@ async fn test_tool_results_accumulate_across_rounds() {
                 .any(|m| matches!(&m.role, Role::Tool { call_id } if call_id == id))
         );
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_llm_error_on_first_dispatch_propagates() {
-    let factory = ScriptedFactory::new().then_err(ClientError::Provider("network timeout".into()));
+async fn test_llm_error_on_first_dispatch_propagates() -> Result<(), pravah::GraphError> {
+    let factory =
+        ScriptedFactory::new().then_err(ClientError::new(ErrorKind::Provider, "network timeout"));
     let rt = FlowRuntime::new(LlmErrIn { x: "hello".into() })
         .unwrap()
-        .with_factory(factory);
+        .with_providers(pravah::testing::providers(factory)?);
     let err = run_to_err(rt).await;
     match err {
         FlowError::Agent(AgentError::LlmFailed { reason, .. }) => {
@@ -587,16 +600,20 @@ async fn test_llm_error_on_first_dispatch_propagates() {
         }
         other => panic!("expected LlmFailed, got: {other}"),
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_llm_error_on_second_dispatch_propagates() {
+async fn test_llm_error_on_second_dispatch_propagates() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call("c1", "echo", json!({ "text": "hi" }))])
-        .then_err(ClientError::Provider("server error on retry".into()));
+        .then_err(ClientError::new(
+            ErrorKind::Provider,
+            "server error on retry",
+        ));
     let rt = FlowRuntime::new(LlmErrIn { x: "hello".into() })
         .unwrap()
-        .with_factory(factory);
+        .with_providers(pravah::testing::providers(factory)?);
     let err = run_to_err(rt).await;
     match err {
         FlowError::Agent(AgentError::LlmFailed { reason, .. }) => {
@@ -604,22 +621,24 @@ async fn test_llm_error_on_second_dispatch_propagates() {
         }
         other => panic!("expected LlmFailed, got: {other}"),
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_direct_output_in_tool_mode_completes_agent() {
+async fn test_direct_output_in_tool_mode_completes_agent() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new().then_output(json!({ "answer": "shortcut" }));
     let spy = factory.clone();
     let rt = FlowRuntime::new(StructModeIn { q: "quick?".into() })
         .unwrap()
-        .with_factory(factory);
+        .with_providers(pravah::testing::providers(factory)?);
     let out = run_to_done(rt).await.unwrap();
     assert_eq!(out.answer, "shortcut");
     assert_eq!(spy.calls().len(), 1);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_capturing_store_receives_all_messages() {
+async fn test_capturing_store_receives_all_messages() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call(
             "s1",
@@ -633,7 +652,7 @@ async fn test_capturing_store_receives_all_messages() {
         text: "world".into(),
     })
     .unwrap()
-    .with_factory(factory)
+    .with_providers(pravah::testing::providers(factory)?)
     .with_store(store);
     run_to_done(rt).await.unwrap();
     let entries = store_spy.all_entries();
@@ -648,10 +667,11 @@ async fn test_capturing_store_receives_all_messages() {
             .iter()
             .any(|e| matches!(&e.message.role, Role::Tool { call_id } if call_id == "s1"))
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_store_records_appended_messages() {
+async fn test_store_records_appended_messages() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call("f1", "echo", json!({ "text": "x" }))])
         .then_output(json!({ "echoed": "x" }));
@@ -659,14 +679,15 @@ async fn test_store_records_appended_messages() {
     let store_spy = store.clone();
     let rt = FlowRuntime::new(StoreIn { text: "x".into() })
         .unwrap()
-        .with_factory(factory)
+        .with_providers(pravah::testing::providers(factory)?)
         .with_store(store);
     run_to_done(rt).await.unwrap();
     assert!(store_spy.record_count() >= 4);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_no_scripted_responses_remain_after_valid_run() {
+async fn test_no_scripted_responses_remain_after_valid_run() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new()
         .then_tool_calls(vec![mock_tool_call("q1", "echo", json!({ "text": "a" }))])
         .then_output(json!({ "result": "done" }));
@@ -675,22 +696,24 @@ async fn test_no_scripted_responses_remain_after_valid_run() {
         query: "consume all".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     run_to_done(rt).await.unwrap();
     assert_eq!(spy.remaining(), 0);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_no_scripted_responses_remain_after_direct_run() {
+async fn test_no_scripted_responses_remain_after_direct_run() -> Result<(), pravah::GraphError> {
     let factory = ScriptedFactory::new().then_output(json!({ "answer": "yes" }));
     let spy = factory.clone();
     let rt = FlowRuntime::new(DirectIn {
         prompt: "any?".into(),
     })
     .unwrap()
-    .with_factory(factory);
+    .with_providers(pravah::testing::providers(factory)?);
     run_to_done(rt).await.unwrap();
     assert_eq!(spy.remaining(), 0);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

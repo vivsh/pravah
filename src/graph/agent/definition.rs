@@ -31,13 +31,13 @@ type ControlCall = dyn Fn(AgentLoopData, Context) -> BoxFuture<'static, Result<A
 #[derive(Clone)]
 pub(crate) struct AgentConfigurator {
     call: Arc<ConfigureCall>,
-    validate_data: fn(Option<&ConfigurationData>) -> Result<(), GraphError>,
+    data: Option<Arc<configuration::ConfigurationValidator>>,
 }
 
 impl AgentConfigurator {
     pub(crate) fn missing() -> Self {
         Self {
-            validate_data: configuration::validate_absent,
+            data: None,
             call: Arc::new(|_, _, _| {
                 async {
                     Err(GraphError::AgentConfigValidation(
@@ -60,7 +60,10 @@ impl AgentConfigurator {
     }
 
     pub(crate) fn validate_data(&self, data: Option<&ConfigurationData>) -> Result<(), GraphError> {
-        (self.validate_data)(data)
+        match &self.data {
+            Some(contract) => contract.validate(data),
+            None => configuration::validate_absent(data),
+        }
     }
 }
 
@@ -197,7 +200,7 @@ impl<T> Agent<T> {
         } else {
             let agent = O::schema_name().into_owned();
             self.definition.configure = Some(AgentConfigurator {
-                validate_data: configuration::validate_absent,
+                data: None,
                 call: Arc::new(move |value, _, ctx| {
                     let agent = agent.clone();
                     async move {

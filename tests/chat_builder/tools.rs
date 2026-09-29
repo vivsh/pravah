@@ -18,11 +18,8 @@ async fn search(input: Search, _ctx: Context) -> Result<String, ToolError> {
     Ok(format!("found {}", input.query))
 }
 
-async fn control(
-    loop_: AgentLoop<ChatRequest>,
-    _ctx: Context,
-) -> Result<AgentDecision, GraphError> {
-    assert_eq!(loop_.input().message().content, "question");
+async fn control(loop_: AgentLoop<String>, _ctx: Context) -> Result<AgentDecision, GraphError> {
+    assert_eq!(loop_.input(), "question");
     Ok(AgentDecision::continue_())
 }
 
@@ -40,8 +37,7 @@ async fn selected_tools_and_budgets_use_agent_execution() -> Result<(), TestErro
         .control(control)
         .turn_budget(1)
         .tool_budget::<Search>(1)
-        .build(context(&factory))
-        .await?;
+        .build(context(&factory)?)?;
     assert_eq!(
         chat.send(ChatRequest::from("question").tools(["search"]))
             .await?
@@ -82,8 +78,7 @@ async fn empty_selection_rejects_calls_without_execution() -> Result<(), TestErr
     let mut chat = builder()
         .tools(toolset)
         .tool_budget::<Search>(1)
-        .build(context(&factory))
-        .await?;
+        .build(context(&factory)?)?;
     chat.send(ChatRequest::from("question").tools(Vec::<String>::new()))
         .await?;
     assert!(
@@ -105,7 +100,6 @@ async fn repeated_controller_is_rejected() {
             .control(control)
             .control(control)
             .build(Context::default())
-            .await
             .is_err()
     );
 }

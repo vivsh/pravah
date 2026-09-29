@@ -1,32 +1,56 @@
 use std::io::{self, Write};
 
+use super::HistoryEntry;
 use crate::clients::{Message, Role};
+
+pub(super) const SUMMARY_AGENT_ID: &str = "__summary__";
+pub(super) const SUMMARY_PREFIX: &str = "<pravah_working_memory>\n";
+pub(super) const SUMMARY_SUFFIX: &str = "\n</pravah_working_memory>";
+
+fn is_summary(entry: &HistoryEntry) -> bool {
+    entry.agent_id == SUMMARY_AGENT_ID
+}
+
+/// Borrows the original non-empty summary text only from a recognized system summary.
+pub(super) fn summary_text(entry: &HistoryEntry) -> Option<&str> {
+    if !is_summary(entry) || !matches!(entry.message.role, Role::System) {
+        return None;
+    }
+    entry
+        .message
+        .content
+        .strip_prefix(SUMMARY_PREFIX)?
+        .strip_suffix(SUMMARY_SUFFIX)
+        .filter(|text| !text.trim().is_empty())
+}
 
 /// Enumerates conversation messages without changing indices in the original live history.
 pub(super) fn enum_messages<'a>(
-    messages: impl Iterator<Item = &'a Message> + Clone,
+    entries: impl Iterator<Item = &'a HistoryEntry> + Clone,
     skip_recent: usize,
 ) -> impl Iterator<Item = (usize, &'a Message)> {
     let retained = if skip_recent == 0 {
         usize::MAX
     } else {
-        messages
+        entries
             .clone()
-            .filter(|message| is_conversation(message))
+            .filter(|entry| is_conversation(entry))
             .count()
             .saturating_sub(skip_recent)
     };
-    messages
+    entries
         .enumerate()
-        .filter(|(_, message)| is_conversation(message))
+        .filter(|(_, entry)| is_conversation(entry))
         .take(retained)
+        .map(|(index, entry)| (index, &entry.message))
 }
 
-fn is_conversation(message: &Message) -> bool {
-    !matches!(
-        message.role,
-        Role::AssistantToolCalls { .. } | Role::Tool { .. }
-    )
+fn is_conversation(entry: &HistoryEntry) -> bool {
+    !is_summary(entry)
+        && !matches!(
+            entry.message.role,
+            Role::AssistantToolCalls { .. } | Role::Tool { .. }
+        )
 }
 
 /// Counts completed user exchanges, not intermediate tool rounds or standalone assistant messages.

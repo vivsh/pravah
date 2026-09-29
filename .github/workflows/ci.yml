@@ -28,13 +28,15 @@ jobs:
         run: cargo doc --workspace --no-deps --all-features
       - name: Deterministic examples
         run: |
-          cargo run --quiet -p pravah --example graph_typed_composition
+          cargo run --quiet -p pravah --example graph_fetch
           cargo run --quiet -p pravah --example graph_snapshot_resume
           cargo run --quiet -p pravah --example graph_json_invocation
           cargo run --quiet -p pravah --example graph_typed
           cargo run --quiet -p pravah --example graph_untyped
           cargo run --quiet -p pravah --example graph_chat_working_memory --features testing
-          cargo run --quiet -p pravah --example graph_chat_state --features testing
+          cargo run --quiet -p pravah --example graph_agent_budgets --features testing
+          cargo run --quiet -p pravah --example graph_agent_control --features testing
+          cargo run --quiet -p pravah --example graph_diagram
           cargo run --quiet -p pravah --example graph_chat_builder --features testing
       - name: Package Pravah
         run: cargo package -p pravah

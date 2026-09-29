@@ -16,7 +16,7 @@ impl Serialize for FallibleState {
 /// Failed encoding and shape validation preserve the entire snapshot, including epochs.
 #[tokio::test]
 async fn rejected_set_is_atomic() -> Result<(), TestError> {
-    let mut chat = Chat::with_state(assistant, FallibleState(1), Context::default()).await?;
+    let mut chat = Chat::with_state(assistant, FallibleState(1), Context::default())?;
     let before = serde_json::to_value(chat.snapshot()?)?;
     assert!(matches!(
         chat.set(FallibleState(99)),
@@ -35,7 +35,7 @@ async fn rejected_set_is_atomic() -> Result<(), TestError> {
 /// Epoch exhaustion is detected before replacing state or altering the frame.
 #[tokio::test]
 async fn exhausted_epoch_is_atomic() -> Result<(), TestError> {
-    let chat = Chat::with_state(assistant, initial_state(), Context::default()).await?;
+    let chat = Chat::with_state(assistant, initial_state(), Context::default())?;
     let mut snapshot = serde_json::to_value(chat.snapshot()?)?;
     *snapshot
         .pointer_mut("/state/frames/0/write_epoch")

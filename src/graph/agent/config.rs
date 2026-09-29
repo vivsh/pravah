@@ -24,7 +24,7 @@ pub(crate) fn agent_tool_identity<T: JsonSchema>() -> Result<String, String> {
 }
 
 /// Read-only metadata presented to a runtime tool filter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInfo {
     name: String,
     description: String,

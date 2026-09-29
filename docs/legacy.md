@@ -79,12 +79,6 @@ into a validated graph and computes how values move between nodes.
 
 `fork` and `join` are binary aliases for `split` and `merge`.
 
-Runnable examples:
-
-- [../examples/linear_flow.rs](../examples/linear_flow.rs)
-- [../examples/split_merge.rs](../examples/split_merge.rs)
-- [../examples/nested_flow.rs](../examples/nested_flow.rs)
-
 ## Pure, Effectful, And Control Nodes
 
 Pure algebra nodes:
@@ -206,8 +200,6 @@ fn build(root: Node<Self>) -> Node<Self::Output> {
 Nested flows preserve the same guarantees as top-level flows: deterministic
 execution, resumability, typed boundaries, and snapshot safety.
 
-See [../examples/nested_flow.rs](../examples/nested_flow.rs).
-
 ## Sub-flow Tools
 
 `tool_flow::<F>()` registers a flow as a callable tool on the current agent.
@@ -228,8 +220,6 @@ The tool name seen by the model is derived from `F`'s schema name. `F::Output`
 must implement `pravah::legacy::ToolOutput`. For a custom non-flow handler, use
 `agent_with(|toolbox| toolbox.tool_handler(...))` instead, or use
 `tool_with::<I, O>(|tool| ...)` to build an inline tool subgraph.
-
-See [../examples/tool_flow.rs](../examples/tool_flow.rs).
 
 ## Each Node
 
@@ -282,8 +272,6 @@ thread-local state, or executor handles.
 
 If you also want prior conversation history after restore, reattach it with
 `with_history()`.
-
-See [../examples/snapshot.rs](../examples/snapshot.rs).
 
 ## Run Limits
 
@@ -369,20 +357,13 @@ println!("{}", diagram.dot());
 Pravah also emits `tracing` events for runtime steps, tool calls, retries, rate
 limiting, suspension, and run limits.
 
-See [../examples/gen_diagrams.rs](../examples/gen_diagrams.rs) for diagram
-generation and [clients.md](clients.md#client-layers) for retry, tracing, and
-rate-limit layers.
+See [clients.md](clients.md#client-layers) for client-layer guidance.
 
-## Example Map
+## Further usage
 
-- [../examples/linear_flow.rs](../examples/linear_flow.rs): one agent, one work node
-- [../examples/split_merge.rs](../examples/split_merge.rs): multi-branch composition
-- [../examples/nested_flow.rs](../examples/nested_flow.rs): embedded subflows
-- [../src/legacy/human_input.rs](../src/legacy/human_input.rs): built-in suspendable human-input sub-flow
-- [../examples/snapshot.rs](../examples/snapshot.rs): snapshot and restore
-- [../examples/story.rs](../examples/story.rs): looping flow with repeated turns
-- [../examples/each_node.rs](../examples/each_node.rs): fan-out over a list with the `each` node
-- [../examples/debate.rs](../examples/debate.rs): larger multi-agent orchestration
-- [../examples/gen_diagrams.rs](../examples/gen_diagrams.rs): tree, Mermaid, and DOT output
+The runnable [example index](../examples/README.md) focuses on modern APIs.
+Existing legacy integrations remain covered by compatibility tests. The
+[human-input module](../src/legacy/human_input.rs) also documents the built-in
+suspendable human-input subflow.
 
 If you are starting from the top, go back to [../README.md](../README.md).

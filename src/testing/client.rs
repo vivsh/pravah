@@ -1,13 +1,26 @@
+use crate::clients::ErrorKind;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::clients::{
-    Client, ClientError, ClientFactory, ClientOptions, ClientOutput, ClientResponse, Message,
-    ModelUrl, Provider, ToolCall,
+    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmBackend, Message,
+    ModelUrl, Provider, ProviderFactory, ToolCall,
 };
+
+/// Registers a fake backend under `test:///model`, with no built-in provider fallback.
+/// Returns a graph creation error if registry validation fails.
+pub fn providers(
+    factory: impl ProviderFactory + 'static,
+) -> Result<crate::clients::ProviderRegistry, crate::GraphError> {
+    crate::clients::ProviderRegistry::new()
+        .register("test", factory)
+        .map_err(|source| crate::GraphError::AgentClient {
+            operation: crate::AgentClientOperation::Create,
+            source,
+        })
+}
 
 struct ScriptedInner {
     responses: VecDeque<Result<ClientResponse, ClientError>>,
@@ -32,10 +45,8 @@ struct ScriptedClient {
 }
 
 impl ScriptedClient {
-    fn new(inner: Arc<Mutex<ScriptedInner>>, model_url: String, options: ClientOptions) -> Self {
-        let url = ModelUrl::parse(&model_url).unwrap_or_else(|_| {
-            ModelUrl::parse("openai:///test-model").expect("fallback URL is valid")
-        });
+    fn new(inner: Arc<Mutex<ScriptedInner>>, url: ModelUrl, options: ClientOptions) -> Self {
+        let model_url = format!("{}:///{}", url.provider().as_str(), url.model());
         Self {
             inner,
             model_url,
@@ -45,8 +56,7 @@ impl ScriptedClient {
     }
 }
 
-#[async_trait]
-impl Client for ScriptedClient {
+impl LlmBackend for ScriptedClient {
     fn model_url(&self) -> &ModelUrl {
         &self.url
     }
@@ -60,15 +70,17 @@ impl Client for ScriptedClient {
         guard
             .calls
             .push((self.model_url.clone(), messages.to_vec()));
-        guard.responses.pop_front().unwrap_or_else(|| {
-            Err(ClientError::Provider(
-                "ScriptedClient: response queue exhausted".into(),
-            ))
-        })
+        match guard.responses.pop_front() {
+            Some(response) => response,
+            None => Err(ClientError::new(
+                ErrorKind::Provider,
+                "ScriptedClient: response queue exhausted",
+            )),
+        }
     }
 }
 
-/// [`ClientFactory`] that replays a programmed sequence of responses.
+/// [`ProviderFactory`] that replays a programmed sequence of responses.
 /// All created clients share the same response queue and call log.
 #[derive(Clone)]
 pub struct ScriptedFactory {
@@ -147,15 +159,15 @@ impl Default for ScriptedFactory {
     }
 }
 
-impl ClientFactory for ScriptedFactory {
-    fn create(
+impl ProviderFactory for ScriptedFactory {
+    async fn llm(
         &self,
-        model_url: &str,
+        model_url: &ModelUrl,
         options: ClientOptions,
-    ) -> Result<Box<dyn Client>, ClientError> {
-        Ok(Box::new(ScriptedClient::new(
+    ) -> Result<Client, ClientError> {
+        Ok(Client::from_backend(ScriptedClient::new(
             Arc::clone(&self.inner),
-            model_url.to_owned(),
+            model_url.clone(),
             options,
         )))
     }
@@ -170,10 +182,7 @@ pub fn output_response(value: Value) -> ClientResponse {
 pub fn tool_call_response(calls: Vec<ToolCall>) -> ClientResponse {
     ClientResponse::new(
         Provider::OpenAi,
-        ClientOutput::ToolCalls {
-            thought: None,
-            calls,
-        },
+        ClientOutput::ToolCalls { text: None, calls },
     )
 }
 
@@ -182,7 +191,7 @@ pub fn tool_call_response_with_thought(thought: String, calls: Vec<ToolCall>) ->
     ClientResponse::new(
         Provider::OpenAi,
         ClientOutput::ToolCalls {
-            thought: Some(thought),
+            text: Some(thought),
             calls,
         },
     )
@@ -190,10 +199,5 @@ pub fn tool_call_response_with_thought(thought: String, calls: Vec<ToolCall>) ->
 
 /// Builds a [`ToolCall`] for scripted test responses.
 pub fn mock_tool_call(id: impl Into<String>, name: impl Into<String>, args: Value) -> ToolCall {
-    ToolCall {
-        id: id.into(),
-        name: name.into(),
-        args,
-        thought_signatures: None,
-    }
+    ToolCall::new(id.into(), name.into(), args)
 }

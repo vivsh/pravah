@@ -1,62 +1,48 @@
-//! Stateless JSON invocation of a trusted graph through completion.
+//! Drive a trusted workflow through stateless JSON operations.
 //!
-//! This example is deterministic and requires no external services.
+//! No services are required. The next request always carries the returned snapshot.
 
-use pravah::graph::{Flow, GraphError, JSON_WIRE_VERSION, JsonInvoker, JsonRequest, JsonResponse};
-use pravah::{Context, FlowConf};
-use serde_json::json;
+mod support;
 
-#[tokio::main]
-async fn main() -> Result<(), GraphError> {
-    let flow = Flow::<i64>::root()
-        .map_named("prepare", |value| value + 1)
-        .suspend::<i64>()
-        .finish::<i64>()?;
-    let (graph, registry) = flow.into_parts();
-    let invoker = JsonInvoker::new(graph, registry)?;
-    let ctx = Context::new(FlowConf::default());
+use pravah::graph::{Flow, JSON_WIRE_VERSION as VERSION, JsonInvoker, JsonRequest, JsonResponse};
+use support::ExampleError;
 
-    let JsonResponse::Continue { snapshot, .. } = invoker
-        .invoke(
-            JsonRequest::Start {
-                version: JSON_WIRE_VERSION,
-                input: json!(40),
-            },
-            ctx.clone(),
-        )
-        .await?
-    else {
-        return Err(GraphError::Invalid(
-            "JSON start did not advance exactly one step".into(),
-        ));
+/// Passes each returned snapshot to the next operation, including approval delivery.
+fn main() -> Result<(), ExampleError> {
+    let workflow = Flow::<String>::root()
+        .suspend::<bool>()
+        .finish::<String>()?;
+    let (graph, handlers) = workflow.into_parts();
+    let invoker = JsonInvoker::new(graph, handlers)?;
+    let mut request = JsonRequest::Start {
+        version: VERSION,
+        execution_id: uuid::Uuid::now_v7(),
+        input: serde_json::json!("Publish the report?"),
     };
-    let JsonResponse::Suspend { snapshot, .. } = invoker
-        .invoke(
-            JsonRequest::Next {
-                version: JSON_WIRE_VERSION,
+
+    loop {
+        request = match invoker.invoke(request)? {
+            JsonResponse::Continue { snapshot, .. } => JsonRequest::Next {
+                version: VERSION,
                 snapshot,
             },
-            ctx.clone(),
-        )
-        .await?
-    else {
-        return Err(GraphError::Invalid(
-            "JSON next did not reach suspension".into(),
-        ));
-    };
-    let response = invoker
-        .invoke(
-            JsonRequest::Resume {
-                version: JSON_WIRE_VERSION,
-                snapshot,
-                input: json!(42),
-            },
-            ctx,
-        )
-        .await?;
-    let JsonResponse::Done { output, .. } = response else {
-        return Err(GraphError::Invalid("JSON resume did not complete".into()));
-    };
-    println!("{output}");
-    Ok(())
+            JsonResponse::Suspend {
+                snapshot, payload, ..
+            } => {
+                println!("Approval request: {payload}");
+                JsonRequest::Resume {
+                    version: VERSION,
+                    snapshot,
+                    input: serde_json::json!(true),
+                }
+            }
+            JsonResponse::Done { output, .. } => {
+                println!("Approved: {output}");
+                return Ok(());
+            }
+            JsonResponse::Fetch { .. } => {
+                return Err(ExampleError::from("approval requested an external effect"));
+            }
+        };
+    }
 }

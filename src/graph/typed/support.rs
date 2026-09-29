@@ -21,7 +21,6 @@ pub(super) fn namespace_graph_handlers(graph: &mut UntypedGraph, prefix: &str) {
     for node in &mut graph.nodes {
         match &mut node.kind {
             NodeKind::PureHandler { key }
-            | NodeKind::WorkHandler { key }
             | NodeKind::Load { key, .. }
             | NodeKind::Store { key, .. } => namespace_handler_key(key, prefix),
             NodeKind::Continuation {
@@ -43,7 +42,10 @@ pub(super) fn namespace_graph_handlers(graph: &mut UntypedGraph, prefix: &str) {
                 namespace_graph_handlers(left, prefix);
                 namespace_graph_handlers(right, prefix);
             }
-            NodeKind::Builtin { .. } | NodeKind::Suspend { .. } | NodeKind::Goto { .. } => {}
+            NodeKind::Fetch
+            | NodeKind::Builtin { .. }
+            | NodeKind::Suspend { .. }
+            | NodeKind::Goto { .. } => {}
         }
     }
 }

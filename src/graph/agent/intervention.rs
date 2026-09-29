@@ -63,9 +63,10 @@ pub(super) fn apply_directive(
     checkpoint: &mut EdgeAgentCheckpoint,
     directive: AgentDirective,
 ) -> Result<(), GraphError> {
+    let configured_tools = checkpoint.configured_tools()?;
     if let Some(filter) = &directive.tool_filter {
         filter
-            .validate_names(checkpoint.resolved.tools.iter().map(String::as_str))
+            .validate_names(configured_tools.iter().map(String::as_str))
             .map_err(GraphError::AgentControlValidation)?;
     }
     if let Some(guidance) = directive.guidance {
@@ -75,7 +76,7 @@ pub(super) fn apply_directive(
         checkpoint.selected_tools = payload
             .tools
             .iter()
-            .filter(|tool| checkpoint.resolved.tools.contains(&tool.name) && filter.allows(tool))
+            .filter(|tool| configured_tools.contains(&tool.name) && filter.allows(tool))
             .map(|tool| tool.name.clone())
             .collect();
     }
@@ -91,12 +92,13 @@ fn validate_explicit_tools(
     checkpoint: &EdgeAgentCheckpoint,
     names: Vec<String>,
 ) -> Result<Vec<String>, GraphError> {
+    let configured_tools = checkpoint.configured_tools()?;
     let name_count = names.len();
     let requested = names.into_iter().collect::<BTreeSet<_>>();
     if requested.len() != name_count
         || requested
             .iter()
-            .any(|name| !checkpoint.resolved.tools.contains(name))
+            .any(|name| !configured_tools.contains(name))
     {
         return Err(GraphError::AgentResumeValidation(
             "redirect tools must be unique configured tool names".into(),
@@ -136,7 +138,7 @@ pub(super) fn checkpoint_point(phase: &EdgeAgentPhase) -> Option<AgentInterventi
 /// Builds a continuation-owned suspension retaining the current checkpoint.
 pub(super) fn suspend_agent(
     payload: &AgentPayloadView<'_>,
-    checkpoint: &EdgeAgentCheckpoint,
+    checkpoint: EdgeAgentCheckpoint,
     point: AgentInterventionPoint,
     value: Value,
 ) -> Result<ContinuationTransition, GraphError> {
@@ -152,12 +154,7 @@ pub(super) fn suspend_agent(
     })?;
     let resume_type = TypeSpec::new(AgentResume::schema_name(), schema_for::<AgentResume>());
     Ok(ContinuationTransition {
-        checkpoint: Some(
-            to_value(checkpoint).map_err(|err| GraphError::ValueConversion {
-                target: "agent checkpoint".into(),
-                reason: err.to_string(),
-            })?,
-        ),
+        checkpoint: Some(checkpoint.into_value()?),
         state: None,
         outputs: Vec::new(),
         writes: Vec::new(),
@@ -166,5 +163,6 @@ pub(super) fn suspend_agent(
             resume_type,
             payload,
         }),
+        ..Default::default()
     })
 }

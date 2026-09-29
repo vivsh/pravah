@@ -70,20 +70,19 @@ async fn configure_assistant(request: Request, _ctx: Context) -> Result<AgentCon
 #[tokio::test]
 async fn modern_typed_api_is_available_at_crate_root() -> Result<(), GraphError> {
     let compiled = compile(workflow)?;
-    let mut execution = compiled.start(Request { value: 1 }, Context::default())?;
+    let mut execution = compiled.start(Request { value: 1 }, uuid::Uuid::nil())?;
     let output = loop {
-        match execution.next().await? {
+        match execution.next()? {
             Step::Continue => {}
             Step::Done(value) => break compiled.decode_output(value)?,
-            Step::Suspend(_) => {
+            Step::Suspend(_) | Step::Fetch(_) => {
                 return Err(GraphError::Invalid("root export test suspended".into()));
             }
         }
     };
     assert_eq!(output, Response { value: 2 });
 
-    let _chat = Chat::new(assistant, Context::default())
-        .await?
+    let _chat = Chat::new(assistant, Context::default())?
         .with_store(RootHistoryStore)
         .with_compactor(RootCompactor);
     Ok(())

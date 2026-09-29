@@ -28,7 +28,7 @@ async fn state_conversion_occurs_only_at_explicit_boundaries() -> Result<(), Tes
         .then_output(json!("one"))
         .then_output(json!("two"));
     let state = Measured(vec!["large".repeat(1000); 128]);
-    let mut chat = Chat::with_state(assistant, state, context(script)).await?;
+    let mut chat = Chat::with_state(assistant, state, context(script)?)?;
     assert_eq!(ENCODED.load(Ordering::SeqCst), 1);
     assert_eq!(DECODED.load(Ordering::SeqCst), 0);
     chat.send("one").await?;
@@ -52,13 +52,12 @@ async fn state_conversion_occurs_only_at_explicit_boundaries() -> Result<(), Tes
 /// Snapshot capture allocates the same metadata regardless of the retained composite payload size.
 #[tokio::test]
 async fn snapshot_capture_shares_large_payloads() -> Result<(), TestError> {
-    let small = Chat::with_state(assistant, vec!["small".to_owned()], Context::default()).await?;
+    let small = Chat::with_state(assistant, vec!["small".to_owned()], Context::default())?;
     let large = Chat::with_state(
         assistant,
         vec!["large".repeat(1000); 128],
         Context::default(),
-    )
-    .await?;
+    )?;
     let mut small_snapshot = None;
     let small_allocations = allocation_counter::measure(|| {
         small_snapshot = Some(small.snapshot());

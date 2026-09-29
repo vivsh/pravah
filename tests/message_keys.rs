@@ -38,7 +38,7 @@ fn agent(root: Agent<Input>) -> Agent<String> {
 
 async fn configure(input: Input, _ctx: Context) -> Result<AgentConfig, GraphError> {
     Ok(AgentConfig::new(
-        "openai:///test",
+        "test:///test",
         "Answer briefly.",
         Message::user(input.text).with_key(input.key),
     )
@@ -56,9 +56,12 @@ fn input() -> Input {
     }
 }
 
-fn context() -> Context {
-    Context::default()
-        .with_client_factory(ScriptedFactory::new().then_output(serde_json::json!("answer")))
+fn context() -> Result<Context, pravah::GraphError> {
+    Ok(
+        Context::default().with_providers(pravah::testing::providers(
+            ScriptedFactory::new().then_output(serde_json::json!("answer")),
+        )?),
+    )
 }
 
 #[derive(Clone, Default)]
@@ -109,14 +112,13 @@ fn copies(snapshot: &Snapshot) -> Result<[Snapshot; 2], TestError> {
 #[tokio::test]
 async fn chat_preserves_message_keys() -> Result<(), TestError> {
     let observer = ObserveKey::default();
-    let mut chat = Chat::new(agent, context())
-        .await?
+    let mut chat = Chat::new(agent, context()?)?
         .with_store(observer.clone())
         .with_compactor(observer.clone());
     assert_eq!(chat.send(input()).await?.output, "answer");
     assert_eq!(observer.0.load(Ordering::SeqCst), 3);
     for snapshot in copies(&chat.snapshot()?)? {
-        let restored = Chat::<Input, String>::from_snapshot(agent, snapshot, context())?;
+        let restored = Chat::<Input, String>::from_snapshot(agent, snapshot, context()?)?;
         let snapshot = restored.snapshot()?;
         assert_eq!(snapshot.history().entries().len(), 2);
         for entry in snapshot.history().entries() {
@@ -130,16 +132,20 @@ async fn chat_preserves_message_keys() -> Result<(), TestError> {
 #[tokio::test]
 async fn graph_preserves_message_keys() -> Result<(), TestError> {
     let flow = compile(workflow)?;
-    let runtime = flow.start(input(), context())?;
+    let runtime = flow.start(input(), uuid::Uuid::nil())?;
     for snapshot in copies(&runtime.snapshot()?)? {
         let observer = ObserveKey::default();
-        let mut runtime = flow
-            .restore(snapshot, context())?
-            .with_store(observer.clone())
-            .with_compactor(observer.clone());
+        let executor =
+            pravah::graph::FetchExecutor::new(context()?, Arc::new(flow.registry().clone()))
+                .with_store(observer.clone())
+                .with_compactor(observer.clone());
+        let mut runtime = flow.restore(snapshot)?;
         loop {
-            match runtime.next().await? {
+            match runtime.next()? {
                 Step::Continue => {}
+                Step::Fetch(fetch) => {
+                    runtime.resume_fetch(fetch.id(), Ok(executor.execute(&fetch).await?))?;
+                }
                 Step::Suspend(_) => return Err(GraphError::ChatSuspended.into()),
                 Step::Done(output) => {
                     assert_eq!(flow.decode_output(output)?, "answer");
@@ -148,10 +154,7 @@ async fn graph_preserves_message_keys() -> Result<(), TestError> {
             }
             // Restore every committed instruction without rerunning configuration.
             let [snapshot, _] = copies(&runtime.snapshot()?)?;
-            runtime = flow
-                .restore(snapshot, context())?
-                .with_store(observer.clone())
-                .with_compactor(observer.clone());
+            runtime = flow.restore(snapshot)?;
         }
         assert_eq!(observer.0.load(Ordering::SeqCst), 3);
         for entry in runtime.snapshot()?.history().entries() {

@@ -177,7 +177,7 @@ fn validate_node_references(graph: &UntypedGraph, problems: &mut Vec<String>) {
                     problems,
                 );
             }
-            NodeKind::PureHandler { .. } | NodeKind::WorkHandler { .. } => {
+            NodeKind::PureHandler { .. } | NodeKind::Fetch => {
                 if node.outputs.is_empty() {
                     problems.push(format!(
                         "handler node '{}' must declare at least one output edge",
@@ -475,7 +475,6 @@ fn must_run_before(graph: &UntypedGraph, before: NodeId, after: NodeId) -> bool 
 pub fn validate_registry_keys(
     graph: &UntypedGraph,
     has_value: &dyn Fn(&str) -> bool,
-    has_work: &dyn Fn(&str) -> bool,
     has_continuation: &dyn Fn(&str) -> bool,
 ) -> Result<(), GraphError> {
     let mut missing = Vec::new();
@@ -492,15 +491,7 @@ pub fn validate_registry_keys(
                     ));
                 }
             }
-            NodeKind::WorkHandler { key } => {
-                if !has_work(key.as_str()) {
-                    missing.push(format!(
-                        "node '{}' missing work handler '{}'",
-                        node.name,
-                        key.as_str()
-                    ));
-                }
-            }
+            NodeKind::Fetch => {}
             NodeKind::Continuation { key, .. } => {
                 if !has_continuation(key.as_str()) {
                     missing.push(format!(
@@ -510,9 +501,7 @@ pub fn validate_registry_keys(
                     ));
                 }
                 for (label, child) in child_graphs(&node.kind) {
-                    if let Err(err) =
-                        validate_registry_keys(child, has_value, has_work, has_continuation)
-                    {
+                    if let Err(err) = validate_registry_keys(child, has_value, has_continuation) {
                         missing.push(format!("{label} node '{}': {err}", node.name));
                     }
                 }
@@ -526,18 +515,14 @@ pub fn validate_registry_keys(
                     ));
                 }
                 for (label, child) in child_graphs(&node.kind) {
-                    if let Err(err) =
-                        validate_registry_keys(child, has_value, has_work, has_continuation)
-                    {
+                    if let Err(err) = validate_registry_keys(child, has_value, has_continuation) {
                         missing.push(format!("{label} node '{}': {err}", node.name));
                     }
                 }
             }
             NodeKind::Subflow { .. } | NodeKind::Each { .. } => {
                 for (label, child) in child_graphs(&node.kind) {
-                    if let Err(err) =
-                        validate_registry_keys(child, has_value, has_work, has_continuation)
-                    {
+                    if let Err(err) = validate_registry_keys(child, has_value, has_continuation) {
                         missing.push(format!("{label} node '{}': {err}", node.name));
                     }
                 }
@@ -565,7 +550,7 @@ fn child_graphs(kind: &NodeKind) -> Vec<(&'static str, &UntypedGraph)> {
             .collect(),
         NodeKind::Builtin { .. }
         | NodeKind::PureHandler { .. }
-        | NodeKind::WorkHandler { .. }
+        | NodeKind::Fetch
         | NodeKind::Suspend { .. }
         | NodeKind::Load { .. }
         | NodeKind::Store { .. } => Vec::new(),

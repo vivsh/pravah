@@ -14,6 +14,8 @@ mod failures;
 mod inspection;
 #[path = "history_preparation/lifecycle.rs"]
 mod lifecycle;
+#[path = "history_preparation/summary.rs"]
+mod summary;
 #[path = "history_preparation/tools.rs"]
 mod tools;
 
@@ -37,7 +39,7 @@ impl Compactor for Summarize {
         request: CompactionRequest<'_>,
         _ctx: Context,
     ) -> Result<CompactionResult, Self::Error> {
-        assert_eq!(request.model(), "openai:///test");
+        assert_eq!(request.model(), "test:///test");
         assert!(
             request
                 .options()
@@ -67,7 +69,7 @@ fn tutor(root: Agent<Question>) -> Agent<Answer> {
 /// Configures a persistent deterministic chat session.
 async fn configure_tutor(question: Question, _ctx: Context) -> Result<AgentConfig, GraphError> {
     Ok(AgentConfig::new(
-        "openai:///test",
+        "test:///test",
         "Answer briefly.",
         Message::user(question.text),
     )
@@ -82,9 +84,8 @@ async fn replacement_reaches_client_and_bounds_history() -> Result<(), GraphErro
         .then_output(serde_json::json!({"text":"second"}));
     let mut chat = Chat::new(
         tutor,
-        Context::default().with_client_factory(factory.clone()),
-    )
-    .await?
+        Context::default().with_providers(pravah::testing::providers(factory.clone())?),
+    )?
     .with_compactor(Summarize);
     chat.send(Question {
         text: "first question".into(),
@@ -104,3 +105,6 @@ async fn replacement_reaches_client_and_bounds_history() -> Result<(), GraphErro
     assert_eq!(chat.snapshot()?.history().entries().len(), 3);
     Ok(())
 }
+#[path = "support/host.rs"]
+mod host;
+use pravah::graph::FetchExecutor;

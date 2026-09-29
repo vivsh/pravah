@@ -7,9 +7,24 @@ use crate::graph::model::TypeSpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SparseState {
+    pub(crate) execution_id: Uuid,
+    pub(crate) next_fetch_sequence: u64,
     pub(crate) frames: Arc<[SparseFrame]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) suspension: Option<SparseSuspension>,
+    pub(crate) waiting: Option<SparseWaiting>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum SparseWaiting {
+    Suspend {
+        suspension: SparseSuspension,
+    },
+    Fetch {
+        frame_depth: usize,
+        node: NodeId,
+        fetch: Fetch,
+    },
 }
 
 #[cfg(test)]
@@ -70,7 +85,7 @@ pub(crate) struct SparseNodeValue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SparseNodeInbox {
     pub(crate) node: NodeId,
-    pub(crate) values: Arc<[ContinuationChildResult]>,
+    pub(crate) values: Arc<[ContinuationInput]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +100,7 @@ pub(crate) struct SparseSuspension {
     pub(crate) graph_path: GraphPath,
     pub(crate) node: NodeId,
     pub(crate) target: SuspensionTarget,
-    pub(crate) resume_type: TypeSpec,
+    pub(crate) resume_type: Arc<TypeSpec>,
     pub(crate) payload: Value,
 }
 
@@ -100,12 +115,27 @@ pub(super) fn sparse_state(
         .map(|(index, frame)| sparse_frame(callables, frame, index))
         .collect::<Result<Vec<_>, _>>()?
         .into();
-    let suspension = state
-        .suspension
-        .as_ref()
-        .map(|value| sparse_suspension(callables, value))
-        .transpose()?;
-    Ok(SparseState { frames, suspension })
+    let waiting = match &state.waiting {
+        Some(Waiting::Suspend(value)) => Some(SparseWaiting::Suspend {
+            suspension: sparse_suspension(callables, value)?,
+        }),
+        Some(Waiting::Fetch {
+            frame_depth,
+            node,
+            fetch,
+        }) => Some(SparseWaiting::Fetch {
+            frame_depth: *frame_depth,
+            node: *node,
+            fetch: fetch.clone(),
+        }),
+        None => None,
+    };
+    Ok(SparseState {
+        execution_id: state.execution_id,
+        next_fetch_sequence: state.next_fetch_sequence,
+        frames,
+        waiting,
+    })
 }
 
 pub(super) fn expand_state(
@@ -118,11 +148,27 @@ pub(super) fn expand_state(
         .enumerate()
         .map(|(index, frame)| expand_frame(callables, frame, index))
         .collect::<Result<Vec<_>, _>>()?;
-    let suspension = sparse
-        .suspension
-        .map(|value| expand_suspension(callables, value))
-        .transpose()?;
-    Ok(State { frames, suspension })
+    let waiting = match sparse.waiting {
+        Some(SparseWaiting::Suspend { suspension }) => {
+            Some(Waiting::Suspend(expand_suspension(callables, suspension)?))
+        }
+        Some(SparseWaiting::Fetch {
+            frame_depth,
+            node,
+            fetch,
+        }) => Some(Waiting::Fetch {
+            frame_depth,
+            node,
+            fetch,
+        }),
+        None => None,
+    };
+    Ok(State {
+        execution_id: sparse.execution_id,
+        next_fetch_sequence: sparse.next_fetch_sequence,
+        frames,
+        waiting,
+    })
 }
 
 fn sparse_frame(

@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
 use crate::clients::{
-    Client, ClientError, ClientFactory, ClientFactoryLayer, ClientOptions, ClientResponse, Message,
-    ModelUrl, Provider,
+    Client, ClientError, ClientOptions, ClientResponse, LlmBackend, Message, ModelUrl, Provider,
+    ProviderFactory,
 };
 
 /// Per-provider rate-limit settings.
@@ -94,12 +93,11 @@ impl TokenBucket {
 }
 
 struct RateLimitingClient {
-    inner: Box<dyn Client>,
+    inner: Client,
     bucket: Arc<TokenBucket>,
 }
 
-#[async_trait]
-impl Client for RateLimitingClient {
+impl LlmBackend for RateLimitingClient {
     fn model_url(&self) -> &ModelUrl {
         self.inner.model_url()
     }
@@ -116,7 +114,7 @@ impl Client for RateLimitingClient {
 
 /// Client-factory wrapper that applies per-provider async rate limits.
 /// Providers without a configured limit pass through unchanged.
-pub struct RateLimitingFactory<F: ClientFactory> {
+pub struct RateLimitingFactory<F: ProviderFactory> {
     inner: F,
     buckets: HashMap<String, Arc<TokenBucket>>,
 }
@@ -140,7 +138,7 @@ impl RateLimitLayer {
     }
 }
 
-impl<F: ClientFactory> RateLimitingFactory<F> {
+impl<F: ProviderFactory> RateLimitingFactory<F> {
     /// Wraps `inner` with no limits configured.
     pub fn new(inner: F) -> Self {
         Self {
@@ -159,16 +157,16 @@ impl<F: ClientFactory> RateLimitingFactory<F> {
     }
 }
 
-impl<F: ClientFactory> ClientFactory for RateLimitingFactory<F> {
-    fn create(
+impl<F: ProviderFactory> ProviderFactory for RateLimitingFactory<F> {
+    async fn llm(
         &self,
-        model_url: &str,
+        model_url: &ModelUrl,
         options: ClientOptions,
-    ) -> Result<Box<dyn Client>, ClientError> {
-        let inner = self.inner.create(model_url, options)?;
-        let url = ModelUrl::parse(model_url)?;
-        match self.buckets.get(url.provider.as_str()) {
-            Some(bucket) => Ok(Box::new(RateLimitingClient {
+    ) -> Result<Client, ClientError> {
+        let inner = self.inner.llm(model_url, options).await?;
+        let url = model_url;
+        match self.buckets.get(url.provider().as_str()) {
+            Some(bucket) => Ok(Client::from_backend(RateLimitingClient {
                 inner,
                 bucket: Arc::clone(bucket),
             })),
@@ -177,10 +175,9 @@ impl<F: ClientFactory> ClientFactory for RateLimitingFactory<F> {
     }
 }
 
-impl<F: ClientFactory> ClientFactoryLayer<F> for RateLimitLayer {
-    type Factory = RateLimitingFactory<F>;
-
-    fn layer(self, inner: F) -> Self::Factory {
+impl RateLimitLayer {
+    /// Wraps a provider factory with this execution policy.
+    pub fn layer<F: ProviderFactory>(self, inner: F) -> RateLimitingFactory<F> {
         self.limits.into_iter().fold(
             RateLimitingFactory::new(inner),
             |factory, (provider, limit)| factory.with_limit(provider, limit),
@@ -189,39 +186,5 @@ impl<F: ClientFactory> ClientFactoryLayer<F> for RateLimitLayer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A full bucket allows an immediate burst.
-    #[tokio::test]
-    async fn test_burst_fires_immediately() {
-        let bucket = TokenBucket::new("test".to_owned(), RateLimit::new(60, 3));
-        let start = std::time::Instant::now();
-        bucket.acquire().await;
-        bucket.acquire().await;
-        bucket.acquire().await;
-        assert!(start.elapsed().as_millis() < 100, "burst should not sleep");
-    }
-
-    /// After the burst is spent, the next acquire must wait for refill.
-    #[tokio::test]
-    async fn test_throttle_after_burst() {
-        let bucket = Arc::new(TokenBucket::new("test".to_owned(), RateLimit::new(60, 1)));
-        bucket.acquire().await;
-        let start = std::time::Instant::now();
-        bucket.acquire().await;
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed.as_millis() >= 900,
-            "expected ~1 s wait, got {elapsed:?}"
-        );
-    }
-
-    /// `RateLimit::new` stores the provided values.
-    #[test]
-    fn test_rate_limit_new() {
-        let limit = RateLimit::new(120, 10);
-        assert_eq!(limit.rpm, 120);
-        assert_eq!(limit.burst, 10);
-    }
-}
+#[path = "tests/limiter.rs"]
+mod tests;

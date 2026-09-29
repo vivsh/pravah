@@ -32,9 +32,8 @@ async fn no_policy_keeps_ordinary_chat_behavior() -> Result<(), GraphError> {
     let store = CapturingHistoryStore::new();
     let mut chat = Chat::new(
         tutor,
-        Context::default().with_client_factory(factory.clone()),
-    )
-    .await?
+        Context::default().with_providers(pravah::testing::providers(factory.clone())?),
+    )?
     .with_store(store.clone());
     for text in ["a", "b"] {
         chat.send(Question { text: text.into() }).await?;
@@ -59,9 +58,8 @@ async fn final_output_does_not_prepare_again() -> Result<(), GraphError> {
     let policy = CountPreparation::default();
     let mut chat = Chat::new(
         tutor,
-        Context::default().with_client_factory(factory.clone()),
-    )
-    .await?
+        Context::default().with_providers(pravah::testing::providers(factory.clone())?),
+    )?
     .with_compactor(policy.clone());
     chat.send(Question { text: "a".into() }).await?;
     assert_eq!(factory.calls().len(), 1);
@@ -77,10 +75,12 @@ async fn repeated_summaries_bound_snapshots_without_rewriting_store() -> Result<
         factory = factory.then_output(serde_json::json!({"text":"answer"}));
     }
     let store = CapturingHistoryStore::new();
-    let mut chat = Chat::new(tutor, Context::default().with_client_factory(factory))
-        .await?
-        .with_compactor(Summarize)
-        .with_store(store.clone());
+    let mut chat = Chat::new(
+        tutor,
+        Context::default().with_providers(pravah::testing::providers(factory)?),
+    )?
+    .with_compactor(Summarize)
+    .with_store(store.clone());
     let mut sizes = Vec::new();
     for _ in 0..20 {
         chat.send(Question {
@@ -118,11 +118,10 @@ async fn snapshots_restore_with_fresh_compactor() -> Result<(), GraphError> {
     let original = CountPreparation::default();
     let mut chat = Chat::new(
         tutor,
-        Context::default().with_client_factory(
+        Context::default().with_providers(pravah::testing::providers(
             ScriptedFactory::new().then_output(serde_json::json!({"text":"a"})),
-        ),
-    )
-    .await?
+        )?),
+    )?
     .with_compactor(original.clone());
     chat.send(Question { text: "a".into() }).await?;
     let snapshot = chat.snapshot()?;
@@ -138,9 +137,9 @@ async fn snapshots_restore_with_fresh_compactor() -> Result<(), GraphError> {
         let mut restored = Chat::<_, _>::from_snapshot(
             tutor,
             snapshot,
-            Context::default().with_client_factory(
+            Context::default().with_providers(pravah::testing::providers(
                 ScriptedFactory::new().then_output(serde_json::json!({"text":"b"})),
-            ),
+            )?),
         )?
         .with_compactor(fresh.clone());
         restored.send(Question { text: "b".into() }).await?;
@@ -156,9 +155,11 @@ async fn summary_snapshots_round_trip_and_continue() -> Result<(), GraphError> {
     let factory = ScriptedFactory::new()
         .then_output(serde_json::json!({"text":"a"}))
         .then_output(serde_json::json!({"text":"b"}));
-    let mut chat = Chat::new(tutor, Context::default().with_client_factory(factory))
-        .await?
-        .with_compactor(Summarize);
+    let mut chat = Chat::new(
+        tutor,
+        Context::default().with_providers(pravah::testing::providers(factory)?),
+    )?
+    .with_compactor(Summarize);
     for text in ["a", "b"] {
         chat.send(Question { text: text.into() }).await?;
     }
@@ -179,7 +180,7 @@ async fn summary_snapshots_round_trip_and_continue() -> Result<(), GraphError> {
         let mut restored = Chat::<_, _>::from_snapshot(
             tutor,
             copy,
-            Context::default().with_client_factory(client.clone()),
+            Context::default().with_providers(pravah::testing::providers(client.clone())?),
         )?
         .with_compactor(Summarize);
         restored.send(Question { text: "c".into() }).await?;

@@ -264,7 +264,7 @@ fn node_label(graph: &UntypedGraph, node: &super::model::Node) -> String {
             BuiltinNode::UnpackTuple => format!("unpack {}", output_types.join(", ")),
         },
         NodeKind::PureHandler { .. } => format_type_flow(&input_types, &output_types),
-        NodeKind::WorkHandler { .. } => format_type_flow(&input_types, &output_types),
+        NodeKind::Fetch => format_type_flow(&input_types, &output_types),
         NodeKind::Continuation { payload, .. } if looks_like_agent_payload(payload) => output_types
             .first()
             .cloned()
@@ -342,7 +342,7 @@ fn diagram_kind(kind: &NodeKind) -> DiagramNodeKind {
             | BuiltinNode::UnpackTuple => DiagramNodeKind::Builtin,
         },
         NodeKind::PureHandler { .. } => DiagramNodeKind::Map,
-        NodeKind::WorkHandler { .. } => DiagramNodeKind::Work,
+        NodeKind::Fetch => DiagramNodeKind::Work,
         NodeKind::Continuation { payload, .. } if looks_like_agent_payload(payload) => {
             DiagramNodeKind::Agent
         }

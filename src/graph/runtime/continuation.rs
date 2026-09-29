@@ -1,7 +1,7 @@
 use super::*;
 
 impl Runtime {
-    pub(super) async fn poll_continuation(
+    pub(super) fn poll_continuation(
         &mut self,
         frame_index: usize,
         node: CompiledNode,
@@ -24,14 +24,12 @@ impl Runtime {
             .registry
             .continuation(key)
             .ok_or_else(|| GraphError::MissingHandler(key.as_str().into()))?;
-        let ctx = self.continuation_context();
-        let transition = handler
-            .advance(payload.as_ref(), checkpoint, event, ctx)
-            .await?;
+        let ctx = self.continuation_context(&node);
+        let transition = handler.advance(payload.as_ref(), checkpoint, event, ctx)?;
         let node_id = node.id;
         let suspension = self.apply_continuation_transition(frame_index, &node, transition)?;
         self.consume_continuation_event(frame_index, node_id)?;
-        Ok(suspension.map_or(Step::Continue, Step::Suspend))
+        Ok(suspension)
     }
 
     pub(super) fn apply_continuation_transition(
@@ -39,7 +37,7 @@ impl Runtime {
         frame_index: usize,
         node: &CompiledNode,
         transition: ContinuationTransition,
-    ) -> Result<Option<Value>, GraphError> {
+    ) -> Result<Step, GraphError> {
         let ContinuationTransition {
             checkpoint,
             state,
@@ -47,7 +45,25 @@ impl Runtime {
             writes,
             child_calls,
             suspension,
+            fetch,
+            history,
         } = transition;
+        if fetch.is_some()
+            && (checkpoint.is_none()
+                || suspension.is_some()
+                || !outputs.is_empty()
+                || !child_calls.is_empty()
+                || !writes.is_empty())
+        {
+            return Err(GraphError::InvalidContinuationTransition {
+                node: node.name.to_string(),
+                reason: "Fetch requires an exclusive checkpointed external boundary".into(),
+            });
+        }
+        let fetch = fetch
+            .map(|request| self.prepare_fetch(request))
+            .transpose()?;
+        let history = self.prepare_history_changes(history)?;
         let has_outputs = !outputs.is_empty();
         let has_checkpoint = checkpoint.is_some();
         let has_child_calls = !child_calls.is_empty();
@@ -89,8 +105,11 @@ impl Runtime {
             validate_continuation_suspension(node, suspension)?;
         }
         self.validate_continuation_child_calls(frame_index, node, &child_calls)?;
-        let prepared_child =
-            self.prepare_next_continuation_child_call(frame_index, node, &child_calls)?;
+        let prepared_child = if fetch.is_none() && !has_suspension {
+            self.prepare_next_continuation_child_call(frame_index, node, &child_calls)?
+        } else {
+            None
+        };
         let completing = has_outputs;
         let mut edge_writes = writes
             .into_iter()
@@ -150,19 +169,23 @@ impl Runtime {
                 .get(frame_index)
                 .ok_or_else(|| GraphError::Invalid("continuation frame disappeared".into()))?
                 .graph_index;
-            self.state.suspension = Some(Suspension {
+            self.state.waiting = Some(Waiting::Suspend(Suspension {
                 frame_depth: frame_index + 1,
                 graph_index,
                 node: node.id,
                 target: SuspensionTarget::Continuation,
-                resume_type: suspension.resume_type,
+                resume_type: Arc::new(suspension.resume_type),
                 payload: suspension.payload,
-            });
+            }));
             Some(payload)
         } else {
             None
         };
-        Ok(payload)
+        self.commit_history_changes(history);
+        if let Some(fetch) = fetch {
+            return Ok(self.commit_fetch(frame_index, node.id, fetch));
+        }
+        Ok(payload.map_or(Step::Continue, Step::Suspend))
     }
 
     pub(super) fn peek_continuation_event(
@@ -182,9 +205,18 @@ impl Runtime {
             let result = inbox
                 .first()
                 .ok_or_else(|| GraphError::Invalid("continuation inbox disappeared".into()))?;
-            Ok(ContinuationEvent::ChildResult {
-                call_id: result.call_id.clone(),
-                output: result.output.clone(),
+            Ok(match result {
+                ContinuationInput::Child { call_id, output } => ContinuationEvent::ChildResult {
+                    call_id: call_id.clone(),
+                    output: output.clone(),
+                },
+                ContinuationInput::Resume { input } => ContinuationEvent::Resume {
+                    input: input.clone(),
+                },
+                ContinuationInput::Fetch { fetch, outcome } => ContinuationEvent::Fetch {
+                    fetch: fetch.clone(),
+                    outcome: outcome.clone(),
+                },
             })
         }
     }
@@ -352,7 +384,7 @@ impl Runtime {
         frame_index: usize,
         node: &CompiledNode,
         value: Value,
-    ) -> Result<Step, GraphError> {
+    ) -> Result<(), GraphError> {
         let CompiledNodeKind::Suspend { .. } = &node.kind else {
             return Err(GraphError::Invalid(format!(
                 "suspended node '{}' is not a suspend node",
@@ -370,49 +402,39 @@ impl Runtime {
         )?;
         self.commit_edge_write(frame_index, output_edge, value)?;
         self.complete_node(frame_index, node)?;
-        self.state.suspension = None;
-        self.try_exit_frames()
+        self.state.waiting = None;
+        Ok(())
     }
 
-    /// Delivers external input to the active continuation checkpoint.
-    pub(super) async fn resume_continuation(
+    /// Accepts input into the existing inbox without executing the owning continuation.
+    pub(super) fn resume_continuation(
         &mut self,
-        frame_index: usize,
+        index: usize,
         node: CompiledNode,
         input: Value,
-    ) -> Result<Step, GraphError> {
-        let CompiledNodeKind::Continuation { key, payload, .. } = &node.kind else {
-            return Err(GraphError::Invalid(format!(
-                "suspended node '{}' is not a continuation",
-                node.name
-            )));
-        };
-        let checkpoint = self
+    ) -> Result<(), GraphError> {
+        let frame = self
             .state
             .frames
-            .get(frame_index)
-            .and_then(|frame| frame.checkpoints.get(node.id.0))
-            .and_then(Clone::clone)
-            .ok_or_else(|| GraphError::Invalid("continuation checkpoint disappeared".into()))?;
-        let handler = self
-            .registry
-            .continuation(key)
-            .ok_or_else(|| GraphError::MissingHandler(key.as_str().into()))?;
-        let transition = handler
-            .advance(
-                payload.as_ref(),
-                checkpoint,
-                ContinuationEvent::Resume { input },
-                self.continuation_context(),
-            )
-            .await?;
-        let suspension = self.apply_continuation_transition(frame_index, &node, transition)?;
-        if let Some(payload) = suspension {
-            Ok(Step::Suspend(payload))
-        } else {
-            self.state.suspension = None;
-            self.try_exit_frames()
+            .get_mut(index)
+            .ok_or(GraphError::MissingNode(node.id))?;
+        if frame.checkpoints.get(node.id.0).is_none_or(Option::is_none) {
+            return Err(GraphError::SnapshotValidation(
+                "suspended continuation has no checkpoint".into(),
+            ));
         }
+        let inbox = frame
+            .continuation_inboxes
+            .get_mut(node.id.0)
+            .ok_or(GraphError::MissingNode(node.id))?;
+        if !inbox.is_empty() {
+            return Err(GraphError::SnapshotValidation(
+                "suspended continuation has an accepted input".into(),
+            ));
+        }
+        inbox.push(ContinuationInput::Resume { input });
+        self.state.waiting = None;
+        Ok(())
     }
 }
 

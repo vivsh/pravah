@@ -1,23 +1,26 @@
+use crate::clients::ErrorKind;
 use ::serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use either::Either;
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde_json::Value as JsonValue;
 
 use crate::clients::{
-    Client, ClientError, ClientFactory, ClientOptions, ClientOutput, ClientResponse, Message,
-    ModelUrl, Provider, Role, ToolCall,
+    Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmBackend, Message,
+    ModelUrl, Provider, ProviderFactory, Role, ToolCall,
 };
 use crate::tools::ToolError;
 use crate::{Context, FlowConf, deps::Deps};
 
 use super::state::ReturnTarget;
 use super::*;
+
+#[path = "tests/host.rs"]
+pub(crate) mod host;
 
 macro_rules! rv {
     ($($tokens:tt)*) => {{
@@ -34,7 +37,7 @@ fn test_runtime<T: Serialize>(
         target: "test input".into(),
         reason: err.to_string(),
     })?;
-    PreparedGraph::new(graph, registry)?.start(input, ctx())
+    PreparedGraph::new(graph, registry)?.start(input, uuid::Uuid::nil())
 }
 
 fn any_type(name: &str) -> TypeSpec {
@@ -61,6 +64,7 @@ fn run_value_handler(f: fn(Vec<Value>) -> Result<Vec<Value>, GraphError>) -> imp
     move |inputs| f(inputs)
 }
 
+/// Verifies graph round trips exact json.
 #[test]
 fn graph_round_trips_exact_json() {
     let mut builder = UntypedGraphBuilder::new("roundtrip");
@@ -83,6 +87,7 @@ fn graph_round_trips_exact_json() {
     assert_eq!(graph, restored);
 }
 
+/// Verifies runtime executes one node per next.
 #[tokio::test]
 async fn runtime_executes_one_node_per_next() {
     let mut builder = UntypedGraphBuilder::new("chain");
@@ -122,10 +127,11 @@ async fn runtime_executes_one_node_per_next() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(2), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(6)));
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Done(rv!(6)));
 }
 
+/// Verifies mark goto reenters edge with new generation.
 #[tokio::test]
 async fn mark_goto_reenters_edge_with_new_generation() {
     let mut builder = UntypedGraphBuilder::new("mark_goto_suspend_loop");
@@ -157,14 +163,14 @@ async fn mark_goto_reenters_edge_with_new_generation() {
         test_runtime(graph, rv!(1), HandlerRegistry::new()).expect("runtime should build");
 
     assert_eq!(
-        runtime.next().await.unwrap(),
+        runtime.next().unwrap(),
         Step::Suspend(rv!({"need": "number"}))
     );
-    assert_eq!(runtime.resume_value(rv!(2)).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    runtime.resume_value(rv!(2)).unwrap();
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
     assert_eq!(runtime.state().frames[0].values[input.0], Some(rv!(2)));
     assert_eq!(
-        runtime.next().await.unwrap(),
+        runtime.next().unwrap(),
         Step::Suspend(rv!({"need": "number"}))
     );
 }
@@ -177,18 +183,21 @@ async fn typed_mark_goto_is_string_free_and_builder_checked() {
     let _loop_edge = root.clone().suspend::<i64>().goto(start);
     let exit = root.map(|value| value);
     let flow = exit.finish::<i64>().expect("typed mark/goto graph builds");
-    let mut runtime = flow.start(1, ctx()).expect("runtime should build");
+    let mut runtime = flow
+        .start(1, uuid::Uuid::nil())
+        .expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Suspend(rv!(1)));
+    assert_eq!(runtime.next().unwrap(), Step::Suspend(rv!(1)));
     let before = serde_json::to_vec(&runtime.snapshot().unwrap()).unwrap();
-    assert!(runtime.resume("not a number").await.is_err());
+    assert!(runtime.resume("not a number").is_err());
     let after = serde_json::to_vec(&runtime.snapshot().unwrap()).unwrap();
     assert_eq!(before, after);
-    assert_eq!(runtime.resume(3_i64).await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Suspend(rv!(3)));
+    runtime.resume(3_i64).unwrap();
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Suspend(rv!(3)));
 }
 
+/// Verifies typed goto rejects cross builder mark at finish.
 #[test]
 fn typed_goto_rejects_cross_builder_mark_at_finish() {
     let first = Flow::<i64>::root();
@@ -202,6 +211,7 @@ fn typed_goto_rejects_cross_builder_mark_at_finish() {
     );
 }
 
+/// Verifies untyped goto rejects type mismatch.
 #[test]
 fn untyped_goto_rejects_type_mismatch() {
     let mut builder = UntypedGraphBuilder::new("bad_goto");
@@ -223,6 +233,7 @@ fn untyped_goto_rejects_type_mismatch() {
     );
 }
 
+/// Verifies graph diagram renders mark and goto.
 #[test]
 fn graph_diagram_renders_mark_and_goto() {
     let mut builder = UntypedGraphBuilder::new("diagram_loop");
@@ -270,6 +281,7 @@ fn graph_diagram_renders_mark_and_goto() {
     );
 }
 
+/// Verifies subflow pushes frame and returns to parent edge.
 #[tokio::test]
 async fn subflow_pushes_frame_and_returns_to_parent_edge() {
     let mut child_builder = UntypedGraphBuilder::new("child");
@@ -323,17 +335,18 @@ async fn subflow_pushes_frame_and_returns_to_parent_edge() {
         .expect("handler should insert");
     let mut runtime = test_runtime(parent, rv!(4), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
     assert_eq!(runtime.state().frames.len(), 2);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
     assert_eq!(
         runtime.state().frames.len(),
         1,
         "child exit should cascade to parent"
     );
-    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(10)));
+    assert_eq!(runtime.next().unwrap(), Step::Done(rv!(10)));
 }
 
+/// Verifies multi consumer subflow input is not moved from parent edge.
 #[tokio::test]
 async fn multi_consumer_subflow_input_is_not_moved_from_parent_edge() {
     let mut child_builder = UntypedGraphBuilder::new("child_identity");
@@ -390,12 +403,13 @@ async fn multi_consumer_subflow_input_is_not_moved_from_parent_edge() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!([5, 10])));
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Done(rv!([5, 10])));
 }
 
+/// Verifies local load and store are pure vm state nodes.
 #[tokio::test]
 async fn local_load_and_store_are_pure_vm_state_nodes() {
     let mut builder = UntypedGraphBuilder::new("vars");
@@ -447,12 +461,13 @@ async fn local_load_and_store_are_pure_vm_state_nodes() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(15)));
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Done(rv!(15)));
     let root = runtime.state().frames.first();
     assert!(root.is_none(), "done pops the root frame");
 }
 
+/// Verifies failed store output validation does not mutate variable.
 #[tokio::test]
 async fn failed_store_output_validation_does_not_mutate_variable() {
     let mut builder = UntypedGraphBuilder::new("store_rollback");
@@ -486,7 +501,6 @@ async fn failed_store_output_validation_does_not_mutate_variable() {
 
     let err = runtime
         .next()
-        .await
         .expect_err("passthrough output schema should fail");
     match err {
         GraphError::Schema { expected, .. } => assert_eq!(expected, "Text"),
@@ -497,6 +511,7 @@ async fn failed_store_output_validation_does_not_mutate_variable() {
     assert!(frame.values[output.0].is_none());
 }
 
+/// Verifies suspend node resume preserves frame stack.
 #[tokio::test]
 async fn suspend_node_resume_preserves_frame_stack() {
     let mut builder = UntypedGraphBuilder::new("suspend");
@@ -517,20 +532,16 @@ async fn suspend_node_resume_preserves_frame_stack() {
     let mut runtime = test_runtime(graph, rv!(7), registry).expect("runtime should build");
 
     assert_eq!(
-        runtime.next().await.unwrap(),
+        runtime.next().unwrap(),
         Step::Suspend(rv!({"need": "resume"}))
     );
     assert_eq!(runtime.state().frames.len(), 1);
-    assert!(
-        runtime.next().await.is_err(),
-        "next while suspended must fail"
-    );
-    assert_eq!(
-        runtime.resume_value(rv!(5)).await.unwrap(),
-        Step::Done(rv!(5))
-    );
+    assert!(runtime.next().is_err(), "next while suspended must fail");
+    runtime.resume_value(rv!(5)).unwrap();
+    assert_eq!(runtime.next().unwrap(), Step::Done(rv!(5)));
 }
 
+/// Verifies snapshot rejects suspension graph frame mismatch.
 #[tokio::test]
 async fn snapshot_rejects_suspension_graph_frame_mismatch() {
     let mut builder = UntypedGraphBuilder::new("bad_suspension");
@@ -549,23 +560,23 @@ async fn snapshot_rejects_suspension_graph_frame_mismatch() {
     let graph = builder.build().expect("graph should build");
     let registry = HandlerRegistry::new();
     let prepared = PreparedGraph::new(graph, registry).expect("graph should prepare");
-    let mut runtime = prepared.start(rv!(7), ctx()).expect("runtime should build");
-    assert!(matches!(runtime.next().await.unwrap(), Step::Suspend(_)));
+    let mut runtime = prepared
+        .start(rv!(7), uuid::Uuid::nil())
+        .expect("runtime should build");
+    assert!(matches!(runtime.next().unwrap(), Step::Suspend(_)));
 
     let mut snapshot = runtime.snapshot().expect("snapshot should build");
-    snapshot
-        .state
-        .suspension
-        .as_mut()
-        .expect("snapshot should be suspended")
-        .frame_depth = 999;
-    let err = match prepared.restore(snapshot, ctx()) {
+    let mut encoded = serde_json::to_value(&snapshot).unwrap();
+    encoded["state"]["waiting"]["suspension"]["frame_depth"] = serde_json::json!(999);
+    snapshot = serde_json::from_value(encoded).unwrap();
+    let err = match prepared.restore(snapshot) {
         Ok(_) => panic!("bad suspension graph should be rejected"),
         Err(err) => err,
     };
     assert!(err.to_string().contains("frame depth"));
 }
 
+/// Verifies snapshot rejects continuation inbox without checkpoint.
 #[tokio::test]
 async fn snapshot_rejects_continuation_inbox_without_checkpoint() {
     let mut child_builder = UntypedGraphBuilder::new("continuation_child");
@@ -602,9 +613,11 @@ async fn snapshot_rejects_continuation_inbox_without_checkpoint() {
         .insert_continuation("continuation", StartChildThenError)
         .expect("handler should insert");
     let prepared = PreparedGraph::new(graph, registry).expect("graph should prepare");
-    let mut runtime = prepared.start(rv!(5), ctx()).expect("runtime should build");
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    let mut runtime = prepared
+        .start(rv!(5), uuid::Uuid::nil())
+        .expect("runtime should build");
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
 
     let mut snapshot = runtime.snapshot().expect("snapshot should build");
     let frame = snapshot
@@ -613,13 +626,14 @@ async fn snapshot_rejects_continuation_inbox_without_checkpoint() {
         .expect("parent frame should remain");
     assert_eq!(frame.continuation_inboxes[0].values.len(), 1);
     frame.checkpoints = Arc::default();
-    let err = match prepared.restore(snapshot, ctx()) {
+    let err = match prepared.restore(snapshot) {
         Ok(_) => panic!("inbox without checkpoint should be rejected"),
         Err(err) => err,
     };
     assert!(err.to_string().contains("without checkpoint"));
 }
 
+/// Verifies snapshot restore round trips edge vm state.
 #[tokio::test]
 async fn snapshot_restore_round_trips_edge_vm_state() {
     let mut builder = UntypedGraphBuilder::new("snapshot");
@@ -658,17 +672,18 @@ async fn snapshot_restore_round_trips_edge_vm_state() {
         )
         .expect("handler should insert");
     let prepared = PreparedGraph::new(graph, registry).expect("graph should prepare");
-    let mut runtime = prepared.start(rv!(3), ctx()).expect("runtime should build");
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    let mut runtime = prepared
+        .start(rv!(3), uuid::Uuid::nil())
+        .expect("runtime should build");
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
 
     let snapshot = runtime.snapshot().expect("snapshot should build");
-    let mut restored = prepared
-        .restore(snapshot, ctx())
-        .expect("snapshot should restore");
+    let mut restored = prepared.restore(snapshot).expect("snapshot should restore");
 
-    assert_eq!(restored.next().await.unwrap(), Step::Done(rv!(8)));
+    assert_eq!(restored.next().unwrap(), Step::Done(rv!(8)));
 }
 
+/// Verifies handler output schema mismatch is fatal.
 #[tokio::test]
 async fn handler_output_schema_mismatch_is_fatal() {
     let mut builder = UntypedGraphBuilder::new("schema_mismatch");
@@ -690,13 +705,11 @@ async fn handler_output_schema_mismatch_is_fatal() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(1), registry).expect("runtime should build");
 
-    let err = runtime
-        .next()
-        .await
-        .expect_err("schema mismatch should fail");
+    let err = runtime.next().expect_err("schema mismatch should fail");
     assert!(matches!(err, GraphError::Schema { .. }));
 }
 
+/// Verifies runtime shape checks are minimal schema hints.
 #[test]
 fn runtime_shape_checks_are_minimal_schema_hints() {
     let direct_number = TypeSpec::new("Number", serde_json::json!({ "type": "number" }));
@@ -749,9 +762,9 @@ impl ContinuationHandler for StaticStartContinuation {
         _state: Option<Value>,
         _inputs: Vec<Value>,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
+    ) -> Result<ContinuationTransition, GraphError> {
         let transition = self.transition.clone();
-        Box::pin(async move { Ok(transition) })
+        Ok(transition)
     }
 
     fn advance<'a>(
@@ -760,16 +773,16 @@ impl ContinuationHandler for StaticStartContinuation {
         checkpoint: Value,
         _event: ContinuationEvent,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            Ok(ContinuationTransition {
-                checkpoint: None,
-                state: None,
-                outputs: vec![checkpoint],
-                writes: Vec::new(),
-                child_calls: Vec::new(),
-                suspension: None,
-            })
+    ) -> Result<ContinuationTransition, GraphError> {
+        Ok(ContinuationTransition {
+            fetch: None,
+            history: Vec::new(),
+            checkpoint: None,
+            state: None,
+            outputs: vec![checkpoint],
+            writes: Vec::new(),
+            child_calls: Vec::new(),
+            suspension: None,
         })
     }
 }
@@ -783,19 +796,19 @@ impl ContinuationHandler for SuspendOnceContinuation {
         _state: Option<Value>,
         inputs: Vec<Value>,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            Ok(ContinuationTransition {
-                checkpoint: inputs.into_iter().next(),
-                state: None,
-                outputs: Vec::new(),
-                writes: Vec::new(),
-                child_calls: Vec::new(),
-                suspension: Some(ContinuationSuspension {
-                    resume_type: number_type("Number"),
-                    payload: rv!({"prompt": "replacement number"}),
-                }),
-            })
+    ) -> Result<ContinuationTransition, GraphError> {
+        Ok(ContinuationTransition {
+            fetch: None,
+            history: Vec::new(),
+            checkpoint: inputs.into_iter().next(),
+            state: None,
+            outputs: Vec::new(),
+            writes: Vec::new(),
+            child_calls: Vec::new(),
+            suspension: Some(ContinuationSuspension {
+                resume_type: number_type("Number"),
+                payload: rv!({"prompt": "replacement number"}),
+            }),
         })
     }
 
@@ -805,19 +818,19 @@ impl ContinuationHandler for SuspendOnceContinuation {
         _checkpoint: Value,
         event: ContinuationEvent,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            let ContinuationEvent::Resume { input } = event else {
-                return Err(GraphError::Invalid("expected continuation resume".into()));
-            };
-            Ok(ContinuationTransition {
-                checkpoint: None,
-                state: None,
-                outputs: vec![input],
-                writes: Vec::new(),
-                child_calls: Vec::new(),
-                suspension: None,
-            })
+    ) -> Result<ContinuationTransition, GraphError> {
+        let ContinuationEvent::Resume { input } = event else {
+            return Err(GraphError::Invalid("expected continuation resume".into()));
+        };
+        Ok(ContinuationTransition {
+            fetch: None,
+            history: Vec::new(),
+            checkpoint: None,
+            state: None,
+            outputs: vec![input],
+            writes: Vec::new(),
+            child_calls: Vec::new(),
+            suspension: None,
         })
     }
 }
@@ -849,23 +862,20 @@ async fn continuation_owned_suspension_round_trips_through_snapshot() {
         .insert_continuation("continuation", SuspendOnceContinuation)
         .expect("handler should insert");
     let prepared = PreparedGraph::new(graph, registry).expect("graph should prepare");
-    let mut runtime = prepared.start(rv!(1), ctx()).expect("runtime should build");
+    let mut runtime = prepared
+        .start(rv!(1), uuid::Uuid::nil())
+        .expect("runtime should build");
 
     assert_eq!(
-        runtime.next().await.expect("continuation should run"),
+        runtime.next().expect("continuation should run"),
         Step::Suspend(rv!({"prompt": "replacement number"}))
     );
     let snapshot = runtime.snapshot().expect("snapshot should encode");
-    let mut runtime = prepared
-        .restore(snapshot, ctx())
-        .expect("snapshot should restore");
-    assert_eq!(
-        runtime
-            .resume_value(rv!(9))
-            .await
-            .expect("continuation should resume"),
-        Step::Done(rv!(9))
-    );
+    let mut runtime = prepared.restore(snapshot).expect("snapshot should restore");
+    runtime
+        .resume_value(rv!(9))
+        .expect("continuation should resume");
+    assert_eq!(runtime.next().unwrap(), Step::Done(rv!(9)));
 }
 
 async fn run_static_continuation_transition(
@@ -891,7 +901,7 @@ async fn run_static_continuation_transition(
         .insert_continuation("continuation", StaticStartContinuation { transition })
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(1), registry).expect("runtime should build");
-    runtime.next().await
+    runtime.next()
 }
 
 struct AssertNoServiceSmuggling;
@@ -903,18 +913,17 @@ impl ContinuationHandler for AssertNoServiceSmuggling {
         _state: Option<Value>,
         _inputs: Vec<Value>,
         ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            let _provider = ctx.context().client_factory();
-            let service_was_smuggled = ctx.context().deps().get::<RuntimeServices>().is_some();
-            Ok(ContinuationTransition {
-                checkpoint: None,
-                state: None,
-                outputs: vec![rv!(!service_was_smuggled)],
-                writes: Vec::new(),
-                child_calls: Vec::new(),
-                suspension: None,
-            })
+    ) -> Result<ContinuationTransition, GraphError> {
+        assert_eq!(ctx.execution_id(), uuid::Uuid::nil());
+        Ok(ContinuationTransition {
+            fetch: None,
+            history: Vec::new(),
+            checkpoint: None,
+            state: None,
+            outputs: vec![rv!(ctx.history().entries().is_empty())],
+            writes: Vec::new(),
+            child_calls: Vec::new(),
+            suspension: None,
         })
     }
 
@@ -924,11 +933,12 @@ impl ContinuationHandler for AssertNoServiceSmuggling {
         _continuation: Value,
         _event: ContinuationEvent,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move { Err(GraphError::Invalid("unexpected resume".into())) })
+    ) -> Result<ContinuationTransition, GraphError> {
+        Err(GraphError::Invalid("unexpected resume".into()))
     }
 }
 
+/// Verifies continuation context does not smuggle runtime services into context.
 #[tokio::test]
 async fn continuation_context_does_not_smuggle_runtime_services_into_context() {
     let mut builder = UntypedGraphBuilder::new("continuation_context_services");
@@ -952,13 +962,16 @@ async fn continuation_context_does_not_smuggle_runtime_services_into_context() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!({}), registry).expect("runtime should build");
 
-    let step = runtime.next().await.expect("continuation should run");
+    let step = runtime.next().expect("continuation should run");
     assert_eq!(step, Step::Done(rv!(true)));
 }
 
+/// Verifies continuation rejects outputs with checkpoint.
 #[tokio::test]
 async fn continuation_rejects_outputs_with_checkpoint() {
     let err = run_static_continuation_transition(ContinuationTransition {
+        fetch: None,
+        history: Vec::new(),
         checkpoint: Some(rv!({"state": true})),
         state: None,
         outputs: vec![rv!(1)],
@@ -978,6 +991,8 @@ async fn continuation_rejects_outputs_with_checkpoint() {
 #[tokio::test]
 async fn continuation_rejects_suspension_with_outputs() {
     let err = run_static_continuation_transition(ContinuationTransition {
+        fetch: None,
+        history: Vec::new(),
         checkpoint: Some(rv!({"state": true})),
         state: None,
         outputs: vec![rv!(1)],
@@ -996,6 +1011,7 @@ async fn continuation_rejects_suspension_with_outputs() {
     ));
 }
 
+/// Verifies failed continuation write plan does not partially write edges.
 #[tokio::test]
 async fn failed_continuation_write_plan_does_not_partially_write_edges() {
     let mut builder = UntypedGraphBuilder::new("continuation_write_rollback");
@@ -1019,6 +1035,8 @@ async fn failed_continuation_write_plan_does_not_partially_write_edges() {
             "continuation",
             StaticStartContinuation {
                 transition: ContinuationTransition {
+                    fetch: None,
+                    history: Vec::new(),
                     checkpoint: None,
                     state: None,
                     outputs: vec![rv!(2)],
@@ -1036,7 +1054,6 @@ async fn failed_continuation_write_plan_does_not_partially_write_edges() {
 
     let err = runtime
         .next()
-        .await
         .expect_err("duplicate continuation write should fail");
     assert!(err.to_string().contains("written more than once"));
     let frame = runtime.state().frames.first().expect("frame should remain");
@@ -1053,16 +1070,16 @@ impl ContinuationHandler for PollThenComplete {
         _state: Option<Value>,
         inputs: Vec<Value>,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            Ok(ContinuationTransition {
-                checkpoint: inputs.into_iter().next(),
-                state: None,
-                outputs: Vec::new(),
-                writes: Vec::new(),
-                child_calls: Vec::new(),
-                suspension: None,
-            })
+    ) -> Result<ContinuationTransition, GraphError> {
+        Ok(ContinuationTransition {
+            fetch: None,
+            history: Vec::new(),
+            checkpoint: inputs.into_iter().next(),
+            state: None,
+            outputs: Vec::new(),
+            writes: Vec::new(),
+            child_calls: Vec::new(),
+            suspension: None,
         })
     }
 
@@ -1072,19 +1089,19 @@ impl ContinuationHandler for PollThenComplete {
         checkpoint: Value,
         event: ContinuationEvent,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            let ContinuationEvent::Poll = event else {
-                return Err(GraphError::Invalid("expected poll event".into()));
-            };
-            Ok(ContinuationTransition {
-                checkpoint: None,
-                state: None,
-                outputs: vec![rv!(checkpoint.as_i64().unwrap_or_default() + 1)],
-                writes: Vec::new(),
-                child_calls: Vec::new(),
-                suspension: None,
-            })
+    ) -> Result<ContinuationTransition, GraphError> {
+        let ContinuationEvent::Poll = event else {
+            return Err(GraphError::Invalid("expected poll event".into()));
+        };
+        Ok(ContinuationTransition {
+            fetch: None,
+            history: Vec::new(),
+            checkpoint: None,
+            state: None,
+            outputs: vec![rv!(checkpoint.as_i64().unwrap_or_default() + 1)],
+            writes: Vec::new(),
+            child_calls: Vec::new(),
+            suspension: None,
         })
     }
 }
@@ -1098,20 +1115,20 @@ impl ContinuationHandler for StartChildThenError {
         _state: Option<Value>,
         inputs: Vec<Value>,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            Ok(ContinuationTransition {
-                checkpoint: Some(rv!({"started": true})),
-                state: None,
-                outputs: Vec::new(),
-                writes: Vec::new(),
-                child_calls: vec![ContinuationChildCall {
-                    child_index: 0,
-                    call_id: "child-1".into(),
-                    input: inputs.into_iter().next().unwrap_or(Value::NULL),
-                }],
-                suspension: None,
-            })
+    ) -> Result<ContinuationTransition, GraphError> {
+        Ok(ContinuationTransition {
+            fetch: None,
+            history: Vec::new(),
+            checkpoint: Some(rv!({"started": true})),
+            state: None,
+            outputs: Vec::new(),
+            writes: Vec::new(),
+            child_calls: vec![ContinuationChildCall {
+                child_index: 0,
+                call_id: "child-1".into(),
+                input: inputs.into_iter().next().unwrap_or(Value::NULL),
+            }],
+            suspension: None,
         })
     }
 
@@ -1121,15 +1138,13 @@ impl ContinuationHandler for StartChildThenError {
         _continuation: Value,
         event: ContinuationEvent,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            match event {
-                ContinuationEvent::ChildResult { .. } => {
-                    Err(GraphError::Invalid("child result handling failed".into()))
-                }
-                other => Err(GraphError::Invalid(format!("unexpected event {other:?}"))),
+    ) -> Result<ContinuationTransition, GraphError> {
+        match event {
+            ContinuationEvent::ChildResult { .. } => {
+                Err(GraphError::Invalid("child result handling failed".into()))
             }
-        })
+            other => Err(GraphError::Invalid(format!("unexpected event {other:?}"))),
+        }
     }
 }
 
@@ -1142,20 +1157,20 @@ impl ContinuationHandler for StartInvalidChildInput {
         _state: Option<Value>,
         _inputs: Vec<Value>,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            Ok(ContinuationTransition {
-                checkpoint: Some(rv!({"started": true})),
-                state: Some(rv!({"mutated": true})),
-                outputs: Vec::new(),
-                writes: Vec::new(),
-                child_calls: vec![ContinuationChildCall {
-                    child_index: 0,
-                    call_id: "child-1".into(),
-                    input: rv!("not a number"),
-                }],
-                suspension: None,
-            })
+    ) -> Result<ContinuationTransition, GraphError> {
+        Ok(ContinuationTransition {
+            fetch: None,
+            history: Vec::new(),
+            checkpoint: Some(rv!({"started": true})),
+            state: Some(rv!({"mutated": true})),
+            outputs: Vec::new(),
+            writes: Vec::new(),
+            child_calls: vec![ContinuationChildCall {
+                child_index: 0,
+                call_id: "child-1".into(),
+                input: rv!("not a number"),
+            }],
+            suspension: None,
         })
     }
 
@@ -1165,11 +1180,12 @@ impl ContinuationHandler for StartInvalidChildInput {
         _continuation: Value,
         _event: ContinuationEvent,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move { Err(GraphError::Invalid("unexpected resume".into())) })
+    ) -> Result<ContinuationTransition, GraphError> {
+        Err(GraphError::Invalid("unexpected resume".into()))
     }
 }
 
+/// Verifies continuation child result error preserves checkpoint and inbox.
 #[tokio::test]
 async fn continuation_child_result_error_preserves_checkpoint_and_inbox() {
     let mut child_builder = UntypedGraphBuilder::new("continuation_child");
@@ -1207,9 +1223,9 @@ async fn continuation_child_result_error_preserves_checkpoint_and_inbox() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
     assert_eq!(runtime.state().frames.len(), 2);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
     assert_eq!(runtime.state().frames.len(), 1);
     let frame = runtime
         .state()
@@ -1219,10 +1235,7 @@ async fn continuation_child_result_error_preserves_checkpoint_and_inbox() {
     assert!(frame.checkpoints[0].is_some());
     assert_eq!(frame.continuation_inboxes[0].len(), 1);
 
-    let err = runtime
-        .next()
-        .await
-        .expect_err("child-result poll should fail");
+    let err = runtime.next().expect_err("child-result poll should fail");
     assert!(err.to_string().contains("child result handling failed"));
     let frame = runtime
         .state()
@@ -1233,6 +1246,7 @@ async fn continuation_child_result_error_preserves_checkpoint_and_inbox() {
     assert_eq!(frame.continuation_inboxes[0].len(), 1);
 }
 
+/// Verifies failed continuation child preflight does not mutate parent state.
 #[tokio::test]
 async fn failed_continuation_child_preflight_does_not_mutate_parent_state() {
     let mut child_builder = UntypedGraphBuilder::new("continuation_child");
@@ -1272,7 +1286,6 @@ async fn failed_continuation_child_preflight_does_not_mutate_parent_state() {
 
     let err = runtime
         .next()
-        .await
         .expect_err("invalid child input should fail before parent mutation");
     assert!(matches!(err, GraphError::Schema { .. }));
     let frame = runtime
@@ -1288,6 +1301,7 @@ async fn failed_continuation_child_preflight_does_not_mutate_parent_state() {
     assert_eq!(frame.node_epochs[0], 0);
 }
 
+/// Verifies continuation checkpoint only polls later.
 #[tokio::test]
 async fn continuation_checkpoint_only_polls_later() {
     let mut builder = UntypedGraphBuilder::new("poll_continuation");
@@ -1311,10 +1325,11 @@ async fn continuation_checkpoint_only_polls_later() {
         .expect("handler should insert");
     let mut runtime = test_runtime(graph, rv!(4), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(5)));
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Done(rv!(5)));
 }
 
+/// Verifies registry rejects duplicate keys within same handler class.
 #[test]
 fn registry_rejects_duplicate_keys_within_same_handler_class() {
     let mut registry = HandlerRegistry::new();
@@ -1328,23 +1343,6 @@ fn registry_rejects_duplicate_keys_within_same_handler_class() {
     );
 
     registry
-        .insert_work("dup", |_inputs, _ctx| {
-            let fut: BoxFuture<'static, Result<Vec<Value>, GraphError>> =
-                Box::pin(async { Ok(Vec::new()) });
-            fut
-        })
-        .expect("first work handler should insert");
-    assert!(
-        registry
-            .insert_work("dup", |_inputs, _ctx| {
-                let fut: BoxFuture<'static, Result<Vec<Value>, GraphError>> =
-                    Box::pin(async { Ok(Vec::new()) });
-                fut
-            })
-            .is_err()
-    );
-
-    registry
         .insert_continuation("dup", PollThenComplete)
         .expect("first continuation handler should insert");
     assert!(
@@ -1354,6 +1352,7 @@ fn registry_rejects_duplicate_keys_within_same_handler_class() {
     );
 }
 
+/// Verifies validation rejects invalid builtin arities.
 #[test]
 fn validation_rejects_invalid_builtin_arities() {
     assert_invalid_builtin(BuiltinNode::Identity, 1, 2);
@@ -1389,6 +1388,7 @@ fn assert_invalid_builtin(op: BuiltinNode, input_count: usize, output_count: usi
     );
 }
 
+/// Verifies inherit is visible in child frame.
 #[tokio::test]
 async fn inherit_is_visible_in_child_frame() {
     let child_in = EdgeId(0);
@@ -1478,11 +1478,12 @@ async fn inherit_is_visible_in_child_frame() {
         .expect("handler should insert");
     let mut runtime = test_runtime(parent, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(15)));
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Done(rv!(15)));
 }
 
+/// Verifies child inherit uses default when parent variable is missing.
 #[tokio::test]
 async fn child_inherit_uses_default_when_parent_variable_is_missing() {
     let child_in = EdgeId(0);
@@ -1555,10 +1556,11 @@ async fn child_inherit_uses_default_when_parent_variable_is_missing() {
         .expect("handler should insert");
     let mut runtime = test_runtime(parent, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(12)));
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Done(rv!(12)));
 }
 
+/// Verifies child inherit copies parent variable when available.
 #[tokio::test]
 async fn child_inherit_copies_parent_variable_when_available() {
     let child_in = EdgeId(0);
@@ -1637,10 +1639,11 @@ async fn child_inherit_copies_parent_variable_when_available() {
         .expect("handler should insert");
     let mut runtime = test_runtime(parent, rv!(5), registry).expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Done(rv!(15)));
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Done(rv!(15)));
 }
 
+/// Verifies child inherit writes do not update parent frame.
 #[tokio::test]
 async fn child_inherit_writes_do_not_update_parent_frame() {
     let child_in = EdgeId(0);
@@ -1736,7 +1739,7 @@ async fn child_inherit_writes_do_not_update_parent_frame() {
     let mut runtime = test_runtime(parent, rv!(5), registry).expect("runtime should build");
 
     let done = loop {
-        match runtime.next().await.unwrap() {
+        match runtime.next().unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             other => panic!("expected continue or done, got {other:?}"),
@@ -1750,108 +1753,8 @@ struct TypedAmount {
     value: i64,
 }
 
-struct ContextDelta(i64);
-
-/// Builds a test context carrying one invocation-specific arithmetic dependency.
-fn context_with_delta(delta: i64) -> Context {
-    let mut deps = Deps::default();
-    deps.insert(Arc::new(ContextDelta(delta)));
-    ctx().with_deps(deps)
-}
-
-/// Applies the dependency attached to the runtime context.
-async fn add_context_delta(
-    mut amount: TypedAmount,
-    ctx: Context,
-) -> Result<TypedAmount, GraphError> {
-    let delta = ctx
-        .require::<ContextDelta>()
-        .map_err(|err| GraphError::Invalid(err.to_string()))?;
-    amount.value += delta.0;
-    Ok(amount)
-}
-
-/// Builds two work steps that must observe one bound context.
-fn context_bound_amount(root: Flow<TypedAmount>) -> Flow<TypedAmount> {
-    root.work(add_context_delta).work(add_context_delta)
-}
-
-/// Builds a flow that can be snapshotted before its context-dependent work.
-fn context_restore_amount(root: Flow<TypedAmount>) -> Flow<TypedAmount> {
-    root.map(|mut amount| {
-        amount.value += 1;
-        amount
-    })
-    .work(add_context_delta)
-}
-
-/// Verifies one bound context is observed by every work step in an execution.
-#[tokio::test]
-async fn typed_execution_binds_context_across_steps() {
-    let flow = compile(context_bound_amount).unwrap();
-    let mut first = flow
-        .start(TypedAmount { value: 1 }, context_with_delta(2))
-        .unwrap();
-    let mut second = flow
-        .start(TypedAmount { value: 1 }, context_with_delta(3))
-        .unwrap();
-
-    assert_eq!(first.next().await.unwrap(), Step::Continue);
-    let Step::Done(first) = first.next().await.unwrap() else {
-        panic!("first execution should complete");
-    };
-    assert_eq!(flow.decode_output(first).unwrap().value, 5);
-    assert_eq!(second.next().await.unwrap(), Step::Continue);
-    let Step::Done(second) = second.next().await.unwrap() else {
-        panic!("second execution should complete");
-    };
-    assert_eq!(flow.decode_output(second).unwrap().value, 7);
-}
-
-/// Verifies restoration attaches fresh runtime dependencies without serializing them.
-#[tokio::test]
-async fn typed_restore_rebinds_context_and_snapshots_exclude_it() {
-    let flow = compile(context_restore_amount).unwrap();
-    let mut runtime = flow
-        .start(TypedAmount { value: 1 }, context_with_delta(2))
-        .unwrap();
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    let snapshot = runtime.snapshot().unwrap();
-    let encoded = serde_json::to_vec(&snapshot).unwrap();
-    let mut restored = flow.restore(snapshot, context_with_delta(10)).unwrap();
-    let Step::Done(output) = restored.next().await.unwrap() else {
-        panic!("restored execution should complete");
-    };
-
-    assert_eq!(flow.decode_output(output).unwrap().value, 12);
-    assert!(!String::from_utf8_lossy(&encoded).contains("ContextDelta"));
-}
-
-/// Verifies runtime context does not affect JSON or CBOR snapshot bytes.
-#[test]
-fn snapshot_encoding_is_independent_of_bound_context() {
-    let flow = compile(context_bound_amount).unwrap();
-    let first = flow
-        .start(TypedAmount { value: 1 }, context_with_delta(2))
-        .unwrap()
-        .snapshot()
-        .unwrap();
-    let second = flow
-        .start(TypedAmount { value: 1 }, context_with_delta(9))
-        .unwrap()
-        .snapshot()
-        .unwrap();
-    let mut first_cbor = Vec::new();
-    let mut second_cbor = Vec::new();
-    ciborium::into_writer(&first, &mut first_cbor).unwrap();
-    ciborium::into_writer(&second, &mut second_cbor).unwrap();
-
-    assert_eq!(
-        serde_json::to_vec(&first).unwrap(),
-        serde_json::to_vec(&second).unwrap()
-    );
-    assert_eq!(first_cbor, second_cbor);
-}
+#[path = "tests/context.rs"]
+mod context;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct LeftAmount {
@@ -1873,6 +1776,7 @@ struct TypedBonus {
     value: i64,
 }
 
+/// Verifies typed variable handles drive load and store.
 #[tokio::test]
 async fn typed_variable_handles_drive_load_and_store() {
     let root = Flow::<TypedAmount>::root();
@@ -1888,10 +1792,10 @@ async fn typed_variable_handles_drive_load_and_store() {
         .finish::<TypedAmount>()
         .expect("flow should compile");
     let mut runtime = flow
-        .start(TypedAmount { value: 4 }, ctx())
+        .start(TypedAmount { value: 4 }, uuid::Uuid::nil())
         .expect("runtime should build");
     let done = loop {
-        match runtime.next().await.unwrap() {
+        match runtime.next().unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -1901,6 +1805,7 @@ async fn typed_variable_handles_drive_load_and_store() {
     assert_eq!(output.value, 7);
 }
 
+/// Verifies typed load can change output type.
 #[tokio::test]
 async fn typed_load_can_change_output_type() {
     let root = Flow::<TypedAmount>::root();
@@ -1912,10 +1817,10 @@ async fn typed_load_can_change_output_type() {
         .finish::<TypedAmount>()
         .expect("flow should compile");
     let mut runtime = flow
-        .start(TypedAmount { value: 4 }, ctx())
+        .start(TypedAmount { value: 4 }, uuid::Uuid::nil())
         .expect("runtime should build");
     let done = loop {
-        match runtime.next().await.unwrap() {
+        match runtime.next().unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -1925,6 +1830,7 @@ async fn typed_load_can_change_output_type() {
     assert_eq!(output.value, 9);
 }
 
+/// Verifies typed variable handle from other builder fails at finish.
 #[test]
 fn typed_variable_handle_from_other_builder_fails_at_finish() {
     let builder = TypedGraphBuilder::<TypedAmount>::new();
@@ -1941,6 +1847,7 @@ fn typed_variable_handle_from_other_builder_fails_at_finish() {
     assert!(err.to_string().contains("variable must belong"));
 }
 
+/// Verifies typed fluent api supports current style map split merge.
 #[tokio::test]
 async fn typed_fluent_api_supports_current_style_map_split_merge() {
     let root = Flow::<TypedAmount>::root();
@@ -1967,12 +1874,12 @@ async fn typed_fluent_api_supports_current_style_map_split_merge() {
         .expect("flow should finish");
 
     let mut runtime = flow
-        .start(TypedAmount { value: 3 }, ctx())
+        .start(TypedAmount { value: 3 }, uuid::Uuid::nil())
         .expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    let done = runtime.next().await.unwrap();
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    let done = runtime.next().unwrap();
     let Step::Done(value) = done else {
         panic!("expected done, got {done:?}");
     };
@@ -1982,6 +1889,7 @@ async fn typed_fluent_api_supports_current_style_map_split_merge() {
     assert_eq!(output.value, 12);
 }
 
+/// Verifies typed fluent api supports nary split merge.
 #[tokio::test]
 async fn typed_fluent_api_supports_nary_split_merge() {
     let root = Flow::<TypedAmount>::root();
@@ -2006,11 +1914,11 @@ async fn typed_fluent_api_supports_nary_split_merge() {
         .expect("flow should finish");
 
     let mut runtime = flow
-        .start(TypedAmount { value: 2 }, ctx())
+        .start(TypedAmount { value: 2 }, uuid::Uuid::nil())
         .expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    let done = runtime.next().await.unwrap();
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
+    let done = runtime.next().unwrap();
     let Step::Done(value) = done else {
         panic!("expected done, got {done:?}");
     };
@@ -2047,15 +1955,16 @@ fn typed_choice(root: Flow<TypedChoice>) -> Flow<TypedAmount> {
     )
 }
 
+/// Verifies typed fluent api supports either branch.
 #[tokio::test]
 async fn typed_fluent_api_supports_either_branch() {
     let flow = compile(typed_choice).expect("flow should compile");
 
     let mut runtime = flow
-        .start(TypedChoice { value: -7 }, ctx())
+        .start(TypedChoice { value: -7 }, uuid::Uuid::nil())
         .expect("runtime should build");
     let done = loop {
-        match runtime.next().await.unwrap() {
+        match runtime.next().unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -2065,10 +1974,10 @@ async fn typed_fluent_api_supports_either_branch() {
     assert_eq!(output.value, 7);
 
     let mut runtime = flow
-        .start(TypedChoice { value: 8 }, ctx())
+        .start(TypedChoice { value: 8 }, uuid::Uuid::nil())
         .expect("runtime should build");
     let done = loop {
-        match runtime.next().await.unwrap() {
+        match runtime.next().unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -2098,6 +2007,7 @@ fn typed_batch(root: Flow<TypedBatch>) -> Flow<Vec<TypedAmount>> {
     root.map(|input| input.values).each(typed_item)
 }
 
+/// Verifies typed fluent api supports each.
 #[tokio::test]
 async fn typed_fluent_api_supports_each() {
     let flow = compile(typed_batch).expect("flow should compile");
@@ -2106,11 +2016,11 @@ async fn typed_fluent_api_supports_each() {
             TypedBatch {
                 values: vec![TypedItem { value: 1 }, TypedItem { value: 2 }],
             },
-            ctx(),
+            uuid::Uuid::nil(),
         )
         .expect("runtime should build");
     let done = loop {
-        match runtime.next().await.unwrap() {
+        match runtime.next().unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -2131,23 +2041,23 @@ impl ContinuationHandler for AddPayloadContinuation {
         _state: Option<Value>,
         inputs: Vec<Value>,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            let input = decode_test_value::<TypedAmount>(inputs, "payload_effect")?;
-            let add = payload
-                .get("add")
-                .and_then(Value::as_i64)
-                .ok_or_else(|| GraphError::Invalid("missing payload add".into()))?;
-            Ok(ContinuationTransition {
-                checkpoint: None,
-                state: None,
-                outputs: vec![rv!(TypedAmount {
-                    value: input.value + add
-                })],
-                writes: Vec::new(),
-                child_calls: Vec::new(),
-                suspension: None,
-            })
+    ) -> Result<ContinuationTransition, GraphError> {
+        let input = decode_test_value::<TypedAmount>(inputs, "payload_effect")?;
+        let add = payload
+            .get("add")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| GraphError::Invalid("missing payload add".into()))?;
+        Ok(ContinuationTransition {
+            fetch: None,
+            history: Vec::new(),
+            checkpoint: None,
+            state: None,
+            outputs: vec![rv!(TypedAmount {
+                value: input.value + add
+            })],
+            writes: Vec::new(),
+            child_calls: Vec::new(),
+            suspension: None,
         })
     }
 
@@ -2157,12 +2067,10 @@ impl ContinuationHandler for AddPayloadContinuation {
         _continuation: Value,
         _event: ContinuationEvent,
         _ctx: ContinuationContext,
-    ) -> BoxFuture<'a, Result<ContinuationTransition, GraphError>> {
-        Box::pin(async move {
-            Err(GraphError::Invalid(
-                "payload continuation does not advance".into(),
-            ))
-        })
+    ) -> Result<ContinuationTransition, GraphError> {
+        Err(GraphError::Invalid(
+            "payload continuation does not advance".into(),
+        ))
     }
 }
 
@@ -2177,17 +2085,16 @@ fn decode_test_value<T: for<'de> Deserialize<'de>>(
         .map_err(|err| GraphError::Invalid(format!("{node} decode failed: {err}")))
 }
 
+/// Verifies typed builder builds maps and continuation without fluent api.
 #[tokio::test]
-async fn typed_builder_builds_map_work_and_continuation_without_fluent_api() {
+async fn typed_builder_builds_maps_and_continuation_without_fluent_api() {
     let builder = TypedGraphBuilder::<TypedAmount>::new();
     let root = builder.root();
     let mapped = builder.map(root, |input: TypedAmount| TypedAmount {
         value: input.value + 1,
     });
-    let worked = builder.work(mapped, |input: TypedAmount, _ctx| async move {
-        Ok(TypedAmount {
-            value: input.value * 2,
-        })
+    let worked = builder.map(mapped, |input: TypedAmount| TypedAmount {
+        value: input.value * 2,
     });
     let continued = builder.continuation::<TypedAmount, TypedAmount, AddPayloadContinuation, _>(
         worked,
@@ -2197,11 +2104,11 @@ async fn typed_builder_builds_map_work_and_continuation_without_fluent_api() {
         .finish(continued)
         .expect("typed builder should finish");
     let mut runtime = flow
-        .start(TypedAmount { value: 3 }, ctx())
+        .start(TypedAmount { value: 3 }, uuid::Uuid::nil())
         .expect("runtime should build");
 
     let done = loop {
-        match runtime.next().await.unwrap() {
+        match runtime.next().unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -2250,6 +2157,7 @@ where
     }
 }
 
+/// Verifies external facade can wrap typed builder without edge node.
 #[tokio::test]
 async fn external_facade_can_wrap_typed_builder_without_edge_node() {
     let builder = TypedGraphBuilder::<TypedAmount>::new();
@@ -2265,11 +2173,11 @@ async fn external_facade_can_wrap_typed_builder_without_edge_node() {
         .finish()
         .expect("external facade should finish");
     let mut runtime = flow
-        .start(TypedAmount { value: 1 }, ctx())
+        .start(TypedAmount { value: 1 }, uuid::Uuid::nil())
         .expect("runtime should build");
 
     let done = loop {
-        match runtime.next().await.unwrap() {
+        match runtime.next().unwrap() {
             Step::Continue => {}
             Step::Done(value) => break value,
             step => panic!("expected done, got {step:?}"),
@@ -2322,10 +2230,7 @@ impl EdgeScriptedFactory {
             .responses
             .push_back(Ok(ClientResponse::new(
                 Provider::OpenAi,
-                ClientOutput::ToolCalls {
-                    thought: None,
-                    calls,
-                },
+                ClientOutput::ToolCalls { text: None, calls },
             )));
         self
     }
@@ -2361,8 +2266,7 @@ struct EdgeScriptedClient {
     options: ClientOptions,
 }
 
-#[async_trait]
-impl Client for EdgeScriptedClient {
+impl LlmBackend for EdgeScriptedClient {
     fn model_url(&self) -> &ModelUrl {
         &self.url
     }
@@ -2374,45 +2278,46 @@ impl Client for EdgeScriptedClient {
     async fn execute(&self, messages: &[Message]) -> Result<ClientResponse, ClientError> {
         let mut inner = self.inner.lock().unwrap_or_else(|err| err.into_inner());
         inner.calls.push(messages.to_vec());
-        inner.responses.pop_front().unwrap_or_else(|| {
-            Err(ClientError::Provider(
-                "edge scripted response queue exhausted".into(),
-            ))
-        })
+        match inner.responses.pop_front() {
+            Some(response) => response,
+            None => Err(ClientError::new(
+                ErrorKind::Provider,
+                "edge scripted response queue exhausted",
+            )),
+        }
     }
 }
 
-impl ClientFactory for EdgeScriptedFactory {
-    fn create(
+impl ProviderFactory for EdgeScriptedFactory {
+    async fn llm(
         &self,
-        model_url: &str,
+        model_url: &ModelUrl,
         options: ClientOptions,
-    ) -> Result<Box<dyn Client>, ClientError> {
+    ) -> Result<Client, ClientError> {
         self.inner
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .creates
-            .push(model_url.to_owned());
+            .push(format!(
+                "{}:///{}",
+                model_url.provider().as_str(),
+                model_url.model()
+            ));
         self.inner
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .options
             .push(options.clone());
-        Ok(Box::new(EdgeScriptedClient {
+        Ok(Client::from_backend(EdgeScriptedClient {
             inner: Arc::clone(&self.inner),
-            url: ModelUrl::parse(model_url).or_else(|_| ModelUrl::parse("openai:///test-model"))?,
+            url: model_url.clone(),
             options,
         }))
     }
 }
 
 fn edge_tool_call(id: &str, name: &str, args: JsonValue) -> ToolCall {
-    ToolCall {
-        id: id.into(),
-        name: name.into(),
-        args,
-        thought_signatures: None,
-    }
+    ToolCall::new(id.into(), name.into(), args)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -2430,7 +2335,7 @@ async fn configure_edge_agent(
     _ctx: Context,
 ) -> Result<AgentConfig, GraphError> {
     Ok(AgentConfig::new(
-        "openai:///test-model",
+        "test:///test-model",
         "answer",
         Message::user(input.text),
     ))
@@ -2464,7 +2369,7 @@ async fn configure_counted_agent(
         .0
         .fetch_add(1, Ordering::SeqCst);
     Ok(AgentConfig::new(
-        "openai:///test-model",
+        "test:///test-model",
         "answer carefully",
         Message::user(input.text),
     )
@@ -2480,7 +2385,7 @@ async fn configure_output_agent(
     _ctx: Context,
 ) -> Result<AgentConfig, GraphError> {
     Ok(AgentConfig::new(
-        "openai:///test-model",
+        "test:///test-model",
         "answer",
         Message::user(input.text),
     ))
@@ -2525,7 +2430,7 @@ async fn configure_provider_agent(
     _ctx: Context,
 ) -> Result<AgentConfig, GraphError> {
     Ok(AgentConfig::new(
-        "gemini:///gemini-2.5-flash",
+        "test:///gemini-2.5-flash",
         "answer",
         Message::user(input.text),
     )
@@ -2543,20 +2448,25 @@ fn provider_agent(root: Agent<EdgeProviderConfigAgentInput>) -> Agent<EdgeAgentO
     root.configure(configure_provider_agent)
 }
 
+/// Verifies typed edge agent without tools uses structured output.
 #[tokio::test]
-async fn typed_edge_agent_without_tools_uses_structured_output() {
+async fn typed_edge_agent_without_tools_uses_structured_output() -> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(edge_agent)
         .finish::<EdgeAgentInput>()
         .expect("agent flow should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
-    let ctx = ctx().with_client_factory(factory.clone());
+    let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    let done = match runtime.next().await.unwrap() {
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
+    let done = match host::step(&mut runtime, &executor).await.unwrap() {
         Step::Done(value) => flow.decode_output(value).unwrap(),
         other => panic!("expected done, got {other:?}"),
     };
@@ -2580,6 +2490,7 @@ async fn typed_edge_agent_without_tools_uses_structured_output() {
         all_messages.len() >= 2,
         "completed agent history should survive in runtime snapshot"
     );
+    Ok(())
 }
 
 /// Verifies function-defined agents infer their output and compile symmetrically with flows.
@@ -2644,7 +2555,8 @@ fn agent_control_definition_errors_accumulate_until_compile() {
 
 /// Verifies result-aware control narrows and later widens tools in prepared order.
 #[tokio::test]
-async fn adaptive_agent_control_observes_boundaries_and_changes_tool_visibility() {
+async fn adaptive_agent_control_observes_boundaries_and_changes_tool_visibility()
+-> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(adaptive_agent)
         .finish::<EdgeAgentInput>()
@@ -2664,15 +2576,22 @@ async fn adaptive_agent_control_observes_boundaries_and_changes_tool_visibility(
     let trace = Arc::new(ControlTrace::default());
     let mut deps = Deps::default();
     deps.insert(Arc::clone(&trace));
-    let ctx = ctx().with_deps(deps).with_client_factory(factory.clone());
+    let ctx = ctx()
+        .with_deps(deps)
+        .with_providers(crate::testing::providers(factory.clone())?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
 
     let output = loop {
-        match runtime.next().await.expect("agent step should run") {
+        match host::step(&mut runtime, &executor)
+            .await
+            .expect("agent step should run")
+        {
             Step::Continue => {}
             Step::Done(value) => break flow.decode_output(value).expect("output should decode"),
+            Step::Fetch(_) => panic!("unexpected undelivered fetch"),
             Step::Suspend(_) => panic!("controller should not suspend"),
         }
     };
@@ -2716,11 +2635,13 @@ async fn adaptive_agent_control_observes_boundaries_and_changes_tool_visibility(
     assert_eq!(observations[4].model_turns, 2);
     assert_eq!(observations[3].active_tools, vec!["suffix_in"]);
     assert_eq!(observations[4].result_errors, vec![false]);
+    Ok(())
 }
 
 /// Verifies inactive calls are not executed and forced conclusion disables every tool.
 #[tokio::test]
-async fn agent_control_recovers_from_hidden_tool_calls_and_forces_conclusion() {
+async fn agent_control_recovers_from_hidden_tool_calls_and_forces_conclusion()
+-> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(hidden_tool_agent)
         .finish::<EdgeAgentInput>()
@@ -2742,15 +2663,22 @@ async fn agent_control_recovers_from_hidden_tool_calls_and_forces_conclusion() {
     let observed = Arc::new(HiddenToolResults::default());
     let mut deps = Deps::default();
     deps.insert(Arc::clone(&observed));
-    let ctx = ctx().with_deps(deps).with_client_factory(factory.clone());
+    let ctx = ctx()
+        .with_deps(deps)
+        .with_providers(crate::testing::providers(factory.clone())?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
 
     let output = loop {
-        match runtime.next().await.expect("agent step should run") {
+        match host::step(&mut runtime, &executor)
+            .await
+            .expect("agent step should run")
+        {
             Step::Continue => {}
             Step::Done(value) => break flow.decode_output(value).expect("output should decode"),
+            Step::Fetch(_) => panic!("unexpected undelivered fetch"),
             Step::Suspend(_) => panic!("controller should not suspend"),
         }
     };
@@ -2778,6 +2706,7 @@ async fn agent_control_recovers_from_hidden_tool_calls_and_forces_conclusion() {
     assert!(calls[1].iter().any(|message| {
         matches!(message.role, Role::Tool { .. }) && message.content.contains("VALID")
     }));
+    Ok(())
 }
 
 /// Verifies a policy abort is retryable and commits no checkpoint or history changes.
@@ -2787,65 +2716,85 @@ async fn agent_policy_abort_leaves_runtime_retryable() {
         .agent(aborting_agent)
         .finish::<EdgeAgentInput>()
         .expect("aborting agent should compile");
+    let executor = FetchExecutor::new(ctx(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx())
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
     assert_eq!(
-        runtime.next().await.expect("configure should run"),
+        host::step(&mut runtime, &executor)
+            .await
+            .expect("configure should run"),
         Step::Continue
     );
-    let before = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
-        .expect("snapshot should encode as JSON");
-
-    let err = runtime
-        .next()
+    assert!(matches!(runtime.next().unwrap(), Step::Fetch(_)));
+    let history = serde_json::to_value(runtime.snapshot().unwrap().history()).unwrap();
+    let err = host::step(&mut runtime, &executor)
         .await
         .expect_err("policy should abort the boundary");
     assert!(matches!(err, GraphError::AgentPolicyAbort { .. }));
-    let after = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
-        .expect("snapshot should encode as JSON");
-    assert_eq!(before, after);
+    let accepted = serde_json::to_value(runtime.snapshot().unwrap()).unwrap();
+    assert_eq!(
+        history,
+        serde_json::to_value(runtime.snapshot().unwrap().history()).unwrap()
+    );
+    assert!(matches!(
+        runtime.next(),
+        Err(GraphError::AgentPolicyAbort { .. })
+    ));
+    assert_eq!(
+        accepted,
+        serde_json::to_value(runtime.snapshot().unwrap()).unwrap()
+    );
 }
 
 /// Verifies forced conclusion rejects invalid structured output before history mutation.
 #[tokio::test]
-async fn forced_agent_conclusion_validates_output_before_commit() {
+async fn forced_agent_conclusion_validates_output_before_commit() -> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(concluding_agent)
         .finish::<EdgeAgentInput>()
         .expect("concluding agent should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "wrong": true }));
-    let ctx = ctx().with_client_factory(factory);
+    let ctx = ctx().with_providers(crate::testing::providers(factory)?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
     assert_eq!(
-        runtime.next().await.expect("configure should run"),
+        host::step(&mut runtime, &executor)
+            .await
+            .expect("configure should run"),
         Step::Continue
     );
     assert_eq!(
-        runtime
-            .next()
+        host::step(&mut runtime, &executor)
             .await
             .expect("conclusion decision should commit"),
         Step::Continue
     );
-    let before = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
-        .expect("snapshot should encode as JSON");
-
-    let err = runtime
-        .next()
+    let history = serde_json::to_value(runtime.snapshot()?.history()).unwrap();
+    let err = host::finish(&mut runtime, &executor)
         .await
         .expect_err("invalid conclusion output should fail");
     assert!(matches!(err, GraphError::AgentConclusion { .. }));
-    let after = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
-        .expect("snapshot should encode as JSON");
-    assert_eq!(before, after);
+    let accepted = serde_json::to_value(runtime.snapshot()?).unwrap();
+    assert_eq!(
+        history,
+        serde_json::to_value(runtime.snapshot()?.history()).unwrap()
+    );
+    assert!(runtime.pending_fetch().is_none());
+    assert!(matches!(
+        runtime.next(),
+        Err(GraphError::AgentConclusion { .. })
+    ));
+    assert_eq!(accepted, serde_json::to_value(runtime.snapshot()?).unwrap());
+    Ok(())
 }
 
 /// Verifies an agent suspension survives JSON and CBOR restore and resumes at its owner.
 #[tokio::test]
-async fn agent_controller_suspension_restores_and_accepts_typed_resume() {
+async fn agent_controller_suspension_restores_and_accepts_typed_resume()
+-> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(suspending_agent)
         .finish::<EdgeAgentInput>()
@@ -2857,16 +2806,21 @@ async fn agent_controller_suspension_restores_and_accepts_typed_resume() {
             serde_json::json!({ "text": "hello" }),
         )])
         .then_output(serde_json::json!({ "text": "done" }));
-    let ctx = ctx().with_client_factory(factory);
+    let ctx = ctx().with_providers(crate::testing::providers(factory)?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx.clone())
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
 
     let payload = loop {
-        match runtime.next().await.expect("agent step should run") {
+        match host::step(&mut runtime, &executor)
+            .await
+            .expect("agent step should run")
+        {
             Step::Continue => {}
             Step::Suspend(payload) => break payload,
             Step::Done(_) => panic!("agent should suspend before its tool"),
+            Step::Fetch(_) => panic!("host must deliver fetch"),
         }
     };
     let suspension: AgentSuspension = from_value(payload).expect("agent suspension should decode");
@@ -2881,8 +2835,9 @@ async fn agent_controller_suspension_restores_and_accepts_typed_resume() {
     ciborium::into_writer(&restored_json, &mut cbor).expect("snapshot should encode as CBOR");
     let restored_cbor: Snapshot =
         ciborium::from_reader(cbor.as_slice()).expect("snapshot should decode from CBOR");
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .restore(restored_cbor, ctx)
+        .restore(restored_cbor)
         .expect("snapshot should restore");
 
     let before_invalid = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
@@ -2891,41 +2846,48 @@ async fn agent_controller_suspension_restores_and_accepts_typed_resume() {
         guidance: None,
         tools: Some(vec!["echo_in".into(), "echo_in".into()]),
     };
-    let err = runtime
-        .resume(invalid)
-        .await
-        .expect_err("duplicate resume tools should fail");
+    let mut invalid_runtime = flow.restore(runtime.snapshot()?)?;
+    invalid_runtime.resume(invalid)?;
+    let accepted = serde_json::to_value(invalid_runtime.snapshot()?).unwrap();
+    let err = invalid_runtime
+        .next()
+        .expect_err("duplicate resume tools should fail on execution");
     assert!(matches!(err, GraphError::AgentResumeValidation(_)));
+    assert_eq!(
+        accepted,
+        serde_json::to_value(invalid_runtime.snapshot()?).unwrap()
+    );
     let after_invalid = serde_json::to_vec(&runtime.snapshot().expect("snapshot should encode"))
         .expect("snapshot should encode as JSON");
     assert_eq!(before_invalid, after_invalid);
 
-    assert_eq!(
-        runtime
-            .resume(AgentResume::Continue)
-            .await
-            .expect("resume should succeed"),
-        Step::Continue
-    );
+    runtime
+        .resume(AgentResume::Continue)
+        .expect("resume should succeed");
     let output = loop {
-        match runtime.next().await.expect("agent step should run") {
+        match host::step(&mut runtime, &executor)
+            .await
+            .expect("agent step should run")
+        {
             Step::Continue => {}
             Step::Done(value) => break flow.decode_output(value).expect("output should decode"),
+            Step::Fetch(_) => panic!("unexpected undelivered fetch"),
             Step::Suspend(_) => panic!("committed boundary should not be reevaluated"),
         }
     };
     assert_eq!(output.text, "done");
+    Ok(())
 }
 
 /// Verifies JSON invocation routes an `AgentResume` value to a controlled agent.
 #[tokio::test]
-async fn json_invoker_resumes_agent_controller_suspension() {
+async fn json_invoker_resumes_agent_controller_suspension() -> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(suspending_agent)
         .finish::<EdgeAgentInput>()
         .expect("suspending agent should compile");
     let (graph, registry) = flow.into_parts();
-    let invoker = JsonInvoker::new(graph, registry).expect("invoker should prepare");
+    let invoker = JsonInvoker::new(graph, registry.clone()).expect("invoker should prepare");
     let factory = EdgeScriptedFactory::new()
         .then_tool_calls(vec![edge_tool_call(
             "echo-call",
@@ -2933,54 +2895,58 @@ async fn json_invoker_resumes_agent_controller_suspension() {
             serde_json::json!({ "text": "hello" }),
         )])
         .then_output(serde_json::json!({ "text": "done" }));
-    let ctx = ctx().with_client_factory(factory);
+    let ctx = ctx().with_providers(crate::testing::providers(factory)?);
     let mut response = invoker
-        .invoke(
-            JsonRequest::Start {
-                version: JSON_WIRE_VERSION,
-                input: serde_json::json!({"text": "hi"}),
-            },
-            ctx.clone(),
-        )
-        .await
+        .invoke(JsonRequest::Start {
+            execution_id: uuid::Uuid::nil(),
+            version: JSON_WIRE_VERSION,
+            input: serde_json::json!({"text": "hi"}),
+        })
         .expect("agent should start");
 
-    let snapshot = advance_json_until_agent_suspend(&invoker, response, ctx.clone()).await;
+    let executor = FetchExecutor::new(ctx, Arc::new(registry));
+    let snapshot = advance_json_until_agent_suspend(&invoker, response, &executor).await;
 
     response = invoker
-        .invoke(
-            JsonRequest::Resume {
-                version: JSON_WIRE_VERSION,
-                snapshot,
-                input: serde_json::to_value(AgentResume::Continue)
-                    .expect("resume should encode as JSON"),
-            },
-            ctx.clone(),
-        )
-        .await
+        .invoke(JsonRequest::Resume {
+            version: JSON_WIRE_VERSION,
+            snapshot,
+            input: serde_json::to_value(AgentResume::Continue)
+                .expect("resume should encode as JSON"),
+        })
         .expect("agent should resume");
-    let output = advance_json_until_done(&invoker, response, ctx).await;
+    let output = advance_json_until_done(&invoker, response, &executor).await;
     assert_eq!(output, serde_json::json!({"text": "done"}));
+    Ok(())
 }
 
 /// Advances stateless JSON requests until the controlled agent suspends.
 async fn advance_json_until_agent_suspend(
     invoker: &JsonInvoker,
     mut response: JsonResponse,
-    ctx: Context,
+    executor: &FetchExecutor,
 ) -> Snapshot {
     loop {
         match response {
+            JsonResponse::Fetch {
+                fetch, snapshot, ..
+            } => {
+                let outcome = Ok(executor.execute(&fetch).await.unwrap());
+                response = invoker
+                    .invoke(JsonRequest::ResumeFetch {
+                        version: JSON_WIRE_VERSION,
+                        snapshot,
+                        id: fetch.id(),
+                        outcome,
+                    })
+                    .unwrap();
+            }
             JsonResponse::Continue { snapshot, .. } => {
                 response = invoker
-                    .invoke(
-                        JsonRequest::Next {
-                            version: JSON_WIRE_VERSION,
-                            snapshot,
-                        },
-                        ctx.clone(),
-                    )
-                    .await
+                    .invoke(JsonRequest::Next {
+                        version: JSON_WIRE_VERSION,
+                        snapshot,
+                    })
                     .expect("agent should advance");
             }
             JsonResponse::Suspend {
@@ -3004,20 +2970,29 @@ async fn advance_json_until_agent_suspend(
 async fn advance_json_until_done(
     invoker: &JsonInvoker,
     mut response: JsonResponse,
-    ctx: Context,
+    executor: &FetchExecutor,
 ) -> JsonValue {
     loop {
         match response {
+            JsonResponse::Fetch {
+                fetch, snapshot, ..
+            } => {
+                let outcome = Ok(executor.execute(&fetch).await.unwrap());
+                response = invoker
+                    .invoke(JsonRequest::ResumeFetch {
+                        version: JSON_WIRE_VERSION,
+                        snapshot,
+                        id: fetch.id(),
+                        outcome,
+                    })
+                    .unwrap();
+            }
             JsonResponse::Continue { snapshot, .. } => {
                 response = invoker
-                    .invoke(
-                        JsonRequest::Next {
-                            version: JSON_WIRE_VERSION,
-                            snapshot,
-                        },
-                        ctx.clone(),
-                    )
-                    .await
+                    .invoke(JsonRequest::Next {
+                        version: JSON_WIRE_VERSION,
+                        snapshot,
+                    })
                     .expect("agent should advance after resume");
             }
             JsonResponse::Done { output, .. } => return output,
@@ -3028,18 +3003,24 @@ async fn advance_json_until_done(
 
 /// Verifies activation is checkpointed once and memory remains outside conversation history.
 #[tokio::test]
-async fn agent_configuration_runs_once_across_snapshot_restore() {
+async fn agent_configuration_runs_once_across_snapshot_restore() -> Result<(), crate::GraphError> {
     let flow = compile(counted_agent_flow).expect("counted agent should compile");
     let calls = Arc::new(ConfigureCalls(AtomicUsize::new(0)));
     let mut deps = Deps::default();
     deps.insert(Arc::clone(&calls));
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
-    let ctx = ctx().with_deps(deps).with_client_factory(factory.clone());
+    let ctx = ctx()
+        .with_deps(deps)
+        .with_providers(crate::testing::providers(factory.clone())?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx.clone())
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
     assert_eq!(calls.0.load(Ordering::SeqCst), 1);
     let snapshot = runtime
         .snapshot()
@@ -3059,25 +3040,29 @@ async fn agent_configuration_runs_once_across_snapshot_restore() {
     let snapshot =
         ciborium::from_reader(cbor.as_slice()).expect("snapshot should decode from CBOR");
     let mut restored = flow
-        .restore(snapshot, ctx)
+        .restore(snapshot)
         .expect("configured runtime should restore");
-    assert!(matches!(restored.next().await.unwrap(), Step::Done(_)));
+    assert!(matches!(
+        host::finish(&mut restored, &executor).await.unwrap(),
+        Step::Done(_)
+    ));
     assert_eq!(calls.0.load(Ordering::SeqCst), 1);
     let preamble = factory.options()[0]
         .preamble
         .clone()
         .expect("agent preamble should be set");
     assert!(preamble.contains("<memory>\nstable private memory\n</memory>"));
+    Ok(())
 }
 
+/// Verifies graph chat uses one runtime across turns.
 #[tokio::test]
-async fn graph_chat_uses_one_runtime_across_turns() {
+async fn graph_chat_uses_one_runtime_across_turns() -> Result<(), crate::GraphError> {
     let factory = EdgeScriptedFactory::new()
         .then_output(serde_json::json!({ "text": "first" }))
         .then_output(serde_json::json!({ "text": "second" }));
-    let ctx = ctx().with_client_factory(factory.clone());
+    let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
     let mut chat = Chat::<EdgeAgentInput, EdgeAgentOutput>::new(edge_chat_agent, ctx)
-        .await
         .expect("chat initializes");
 
     let first = chat
@@ -3112,11 +3097,12 @@ async fn graph_chat_uses_one_runtime_across_turns() {
             .len()
             >= 4
     );
+    Ok(())
 }
 
 /// Verifies services attached after chat restoration are applied to its runtime.
 #[tokio::test]
-async fn restored_graph_chat_uses_reattached_history_store() {
+async fn restored_graph_chat_uses_reattached_history_store() -> Result<(), crate::GraphError> {
     let factory = EdgeScriptedFactory::new()
         .then_output(serde_json::json!({ "text": "first" }))
         .then_output(serde_json::json!({ "text": "second" }));
@@ -3125,9 +3111,8 @@ async fn restored_graph_chat_uses_reattached_history_store() {
         calls: Arc::clone(&calls),
         fail_at: usize::MAX,
     };
-    let ctx = ctx().with_client_factory(factory);
+    let ctx = ctx().with_providers(crate::testing::providers(factory)?);
     let mut chat = Chat::new(edge_chat_agent, ctx.clone())
-        .await
         .expect("chat initializes")
         .with_store(store.clone());
 
@@ -3147,22 +3132,35 @@ async fn restored_graph_chat_uses_reattached_history_store() {
         .await
         .expect("restored chat turn should run");
     assert!(calls.load(Ordering::SeqCst) > recorded_before_restore);
+    Ok(())
 }
 
+/// Verifies typed edge agent provider config reaches client options.
 #[tokio::test]
-async fn typed_edge_agent_provider_config_reaches_client_options() {
+async fn typed_edge_agent_provider_config_reaches_client_options() -> Result<(), crate::GraphError>
+{
     let flow = Flow::<EdgeProviderConfigAgentInput>::root()
         .agent(provider_agent)
         .finish::<EdgeProviderConfigAgentInput>()
         .expect("agent flow should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
-    let ctx = ctx().with_client_factory(factory.clone());
+    let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeProviderConfigAgentInput { text: "hi".into() }, ctx)
+        .start(
+            EdgeProviderConfigAgentInput { text: "hi".into() },
+            uuid::Uuid::nil(),
+        )
         .expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert!(matches!(runtime.next().await.unwrap(), Step::Done(_)));
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
+    assert!(matches!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Done(_)
+    ));
 
     let options = factory.options();
     let provider_config = options
@@ -3173,6 +3171,7 @@ async fn typed_edge_agent_provider_config_reaches_client_options() {
         provider_config["safety_settings"][0]["category"],
         "HARM_CATEGORY_DANGEROUS_CONTENT"
     );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -3416,7 +3415,7 @@ async fn configure_filtered_agent(
 ) -> Result<AgentConfig, GraphError> {
     let selected = input.text;
     Ok(AgentConfig::new(
-        "openai:///test-model",
+        "test:///test-model",
         "answer",
         Message::user("filtered request"),
     )
@@ -3440,7 +3439,8 @@ fn failing_agent(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
 
 /// Verifies a standalone tool function executes through the shared graph VM.
 #[tokio::test]
-async fn typed_edge_agent_tool_function_round_trips_through_same_vm() {
+async fn typed_edge_agent_tool_function_round_trips_through_same_vm()
+-> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(edge_agent_with_echo)
         .finish::<EdgeAgentInput>()
@@ -3452,13 +3452,14 @@ async fn typed_edge_agent_tool_function_round_trips_through_same_vm() {
             serde_json::json!({ "text": "hi" }),
         )])
         .then_output(serde_json::json!({ "text": "done" }));
-    let ctx = ctx().with_client_factory(factory.clone());
+    let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
 
     let done = loop {
-        match runtime.next().await.unwrap() {
+        match host::step(&mut runtime, &executor).await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break flow.decode_output(value).unwrap(),
             other => panic!("expected continue or done, got {other:?}"),
@@ -3479,28 +3480,36 @@ async fn typed_edge_agent_tool_function_round_trips_through_same_vm() {
             .any(|message| matches!(message.role, Role::Tool { .. })
                 && message.content.contains("HI"))
     );
+    Ok(())
 }
 
 /// Verifies a capturing runtime filter can expose only statically prepared tools.
 #[tokio::test]
-async fn typed_edge_agent_filters_tools_in_prepared_order() {
+async fn typed_edge_agent_filters_tools_in_prepared_order() -> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(filtered_agent)
         .finish::<EdgeAgentInput>()
         .expect("filtered agent should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
-    let ctx = ctx().with_client_factory(factory.clone());
+    let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(
             EdgeAgentInput {
                 text: "suffix_in".into(),
             },
-            ctx,
+            uuid::Uuid::nil(),
         )
         .expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert!(matches!(runtime.next().await.unwrap(), Step::Done(_)));
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
+    assert!(matches!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Done(_)
+    ));
     let options = factory.options();
     let names = options[0]
         .tools
@@ -3508,6 +3517,7 @@ async fn typed_edge_agent_filters_tools_in_prepared_order() {
         .map(|tool| tool.name.as_str())
         .collect::<Vec<_>>();
     assert_eq!(names, vec!["suffix_in"]);
+    Ok(())
 }
 
 /// Verifies configuration failure leaves the runtime snapshot retryable and history empty.
@@ -3517,12 +3527,16 @@ async fn typed_edge_agent_configuration_failure_does_not_mutate_runtime() {
         .agent(failing_agent)
         .finish::<EdgeAgentInput>()
         .expect("failing agent definition should compile");
+    let executor = FetchExecutor::new(ctx(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx())
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
+    assert!(matches!(runtime.next().unwrap(), Step::Fetch(_)));
     let before = serde_json::to_value(runtime.snapshot().unwrap()).unwrap();
 
-    let err = runtime.next().await.expect_err("configuration should fail");
+    let err = host::step(&mut runtime, &executor)
+        .await
+        .expect_err("configuration should fail");
     let after = serde_json::to_value(runtime.snapshot().unwrap()).unwrap();
 
     assert!(matches!(err, GraphError::AgentConfiguration { .. }));
@@ -3530,23 +3544,28 @@ async fn typed_edge_agent_configuration_failure_does_not_mutate_runtime() {
     assert!(runtime.snapshot().unwrap().history().entries().is_empty());
 }
 
+/// Verifies typed edge agent provider is resolved at dispatch.
 #[tokio::test]
-async fn typed_edge_agent_provider_is_resolved_at_dispatch() {
+async fn typed_edge_agent_provider_is_resolved_at_dispatch() -> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(edge_agent)
         .finish::<EdgeAgentInput>()
         .expect("agent flow should compile");
     let factory = EdgeScriptedFactory::new().then_output(serde_json::json!({ "text": "done" }));
-    let ctx = ctx().with_client_factory(factory.clone());
+    let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
     assert!(factory.creates().is_empty());
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
     assert!(factory.creates().is_empty());
 
-    let done = match runtime.next().await.unwrap() {
+    let done = match host::step(&mut runtime, &executor).await.unwrap() {
         Step::Done(value) => flow.decode_output(value).unwrap(),
         other => panic!("expected done, got {other:?}"),
     };
@@ -3557,11 +3576,14 @@ async fn typed_edge_agent_provider_is_resolved_at_dispatch() {
             text: "done".into()
         }
     );
-    assert_eq!(factory.creates(), vec!["openai:///test-model".to_string()]);
+    assert_eq!(factory.creates(), vec!["test:///test-model".to_string()]);
+    Ok(())
 }
 
+/// Verifies typed edge agent multiple tool calls are queued on single vm stack.
 #[tokio::test]
-async fn typed_edge_agent_multiple_tool_calls_are_queued_on_single_vm_stack() {
+async fn typed_edge_agent_multiple_tool_calls_are_queued_on_single_vm_stack()
+-> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(edge_agent_with_two_tools)
         .finish::<EdgeAgentInput>()
@@ -3572,20 +3594,39 @@ async fn typed_edge_agent_multiple_tool_calls_are_queued_on_single_vm_stack() {
             edge_tool_call("c2", "suffix_in", serde_json::json!({ "text": "bye" })),
         ])
         .then_output(serde_json::json!({ "text": "done" }));
-    let ctx = ctx().with_client_factory(factory.clone());
+    let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
 
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
     assert_eq!(runtime.state().frames.len(), 2);
 
     let done = loop {
-        match runtime.next().await.unwrap() {
+        match runtime.next().unwrap() {
             Step::Continue => {}
+            Step::Fetch(fetch) => {
+                let encoded = serde_json::to_vec(&runtime.snapshot()?).unwrap();
+                runtime = flow.restore(serde_json::from_slice(&encoded).unwrap())?;
+                assert_eq!(runtime.pending_fetch().map(Fetch::id), Some(fetch.id()));
+                runtime.resume_fetch(fetch.id(), Ok(executor.execute(&fetch).await?))?;
+            }
             Step::Done(value) => break flow.decode_output(value).unwrap(),
             other => panic!("expected continue or done, got {other:?}"),
         }
@@ -3611,10 +3652,13 @@ async fn typed_edge_agent_multiple_tool_calls_are_queued_on_single_vm_stack() {
     assert!(tool_messages[0].1.contains("HI"));
     assert_eq!(tool_messages[1].0, "c2");
     assert!(tool_messages[1].1.contains("bye!"));
+    Ok(())
 }
 
+/// Verifies typed edge agent same tool calls run in deterministic queue order.
 #[tokio::test]
-async fn typed_edge_agent_same_tool_calls_run_in_deterministic_queue_order() {
+async fn typed_edge_agent_same_tool_calls_run_in_deterministic_queue_order()
+-> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(edge_agent_with_echo)
         .finish::<EdgeAgentInput>()
@@ -3625,13 +3669,14 @@ async fn typed_edge_agent_same_tool_calls_run_in_deterministic_queue_order() {
             edge_tool_call("c2", "echo_in", serde_json::json!({ "text": "two" })),
         ])
         .then_output(serde_json::json!({ "text": "done" }));
-    let ctx = ctx().with_client_factory(factory.clone());
+    let ctx = ctx().with_providers(crate::testing::providers(factory.clone())?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx)
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
 
     let done = loop {
-        match runtime.next().await.unwrap() {
+        match host::step(&mut runtime, &executor).await.unwrap() {
             Step::Continue => {}
             Step::Done(value) => break flow.decode_output(value).unwrap(),
             other => panic!("expected continue or done, got {other:?}"),
@@ -3658,8 +3703,10 @@ async fn typed_edge_agent_same_tool_calls_run_in_deterministic_queue_order() {
     assert!(tool_messages[0].1.contains("ONE"));
     assert_eq!(tool_messages[1].0, "c2");
     assert!(tool_messages[1].1.contains("TWO"));
+    Ok(())
 }
 
+/// Verifies typed edge agent duplicate tool names fail at finish.
 #[test]
 fn typed_edge_agent_duplicate_tool_names_fail_at_finish() {
     let err = match Flow::<EdgeAgentInput>::root()
@@ -3694,17 +3741,22 @@ fn repeated_flow(root: Flow<RepeatedFlowInput>) -> Flow<i64> {
 #[tokio::test]
 async fn typed_flow_reuses_same_subflow_with_namespaced_handlers() {
     let flow = compile(repeated_flow).expect("repeated subflow should compile");
+    let executor = FetchExecutor::new(ctx(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(RepeatedFlowInput(1), ctx())
+        .start(RepeatedFlowInput(1), uuid::Uuid::nil())
         .expect("runtime should build");
 
     loop {
-        match runtime.next().await.expect("step should succeed") {
+        match host::step(&mut runtime, &executor)
+            .await
+            .expect("step should succeed")
+        {
             Step::Continue => {}
             Step::Done(value) => {
                 assert_eq!(flow.decode_output(value).unwrap(), 3);
                 break;
             }
+            Step::Fetch(_) => panic!("unexpected undelivered fetch"),
             Step::Suspend(_) => panic!("repeated subflow should not suspend"),
         }
     }
@@ -3715,10 +3767,7 @@ async fn typed_flow_reuses_same_subflow_with_namespaced_handlers() {
 fn typed_named_nodes_preserve_supplied_names() {
     let flow = Flow::<i64>::root()
         .map_named("meaningful_map", |value| value + 1)
-        .work_named(
-            "meaningful_work",
-            |value, _ctx| async move { Ok(value * 2) },
-        )
+        .map_named("meaningful_double", |value| value * 2)
         .finish::<i64>()
         .expect("named flow should compile");
     let names = flow
@@ -3728,7 +3777,7 @@ fn typed_named_nodes_preserve_supplied_names() {
         .map(|node| node.name.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(names, vec!["meaningful_map", "meaningful_work"]);
+    assert_eq!(names, vec!["meaningful_map", "meaningful_double"]);
 }
 
 /// Verifies validation compares every pair of writers to one frame variable.
@@ -3830,8 +3879,10 @@ async fn snapshot_rejects_corrupted_frame_return_chain() {
     );
     let graph = parent_builder.build().expect("parent should build");
     let prepared = PreparedGraph::new(graph, HandlerRegistry::new()).expect("graph should prepare");
-    let mut runtime = prepared.start(rv!(1), ctx()).expect("runtime should build");
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    let mut runtime = prepared
+        .start(rv!(1), uuid::Uuid::nil())
+        .expect("runtime should build");
+    assert_eq!(runtime.next().unwrap(), Step::Continue);
     let snapshot = runtime.snapshot().expect("snapshot should build");
 
     let mut wrong_root = snapshot.clone();
@@ -3843,7 +3894,7 @@ async fn snapshot_rejects_corrupted_frame_return_chain() {
         parent_edge: parent_out,
     });
     assert!(matches!(
-        prepared.restore(wrong_root, ctx()),
+        prepared.restore(wrong_root),
         Err(GraphError::SnapshotValidation(_))
     ));
 
@@ -3870,7 +3921,7 @@ async fn snapshot_rejects_corrupted_frame_return_chain() {
             .expect("child frame")
             .return_target = Some(target);
         assert!(matches!(
-            prepared.restore(wrong_child, ctx()),
+            prepared.restore(wrong_child),
             Err(GraphError::SnapshotValidation(_))
         ));
     }
@@ -3971,10 +4022,14 @@ async fn snapshot_rejects_obsolete_agent_checkpoint_version() {
         .agent(edge_agent)
         .finish::<EdgeAgentInput>()
         .expect("agent flow should compile");
+    let executor = FetchExecutor::new(ctx(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx())
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
     let mut snapshot = runtime.snapshot().expect("snapshot should build");
     let frame = snapshot.state.frame_mut(0).expect("root frame");
     let checkpoint = &mut Arc::make_mut(&mut frame.checkpoints)[0].value;
@@ -3983,7 +4038,7 @@ async fn snapshot_rejects_obsolete_agent_checkpoint_version() {
     *checkpoint = to_value(encoded).expect("checkpoint should enter runtime domain");
 
     assert!(matches!(
-        flow.restore(snapshot, ctx()),
+        flow.restore(snapshot),
         Err(GraphError::UnsupportedVersion { .. })
     ));
 }
@@ -4129,7 +4184,7 @@ impl crate::history::HistoryStore for FailAtHistoryRecord {
 
 /// Verifies a failed multi-message store batch leaves runtime history unchanged.
 #[tokio::test]
-async fn agent_history_batch_failure_does_not_commit_a_prefix() {
+async fn agent_history_batch_failure_does_not_commit_a_prefix() -> Result<(), crate::GraphError> {
     let flow = Flow::<EdgeAgentInput>::root()
         .agent(edge_agent)
         .finish::<EdgeAgentInput>()
@@ -4144,17 +4199,26 @@ async fn agent_history_batch_failure_does_not_commit_a_prefix() {
         calls: Arc::clone(&calls),
         fail_at: 2,
     };
-    let ctx = ctx().with_client_factory(factory);
+    let ctx = ctx().with_providers(crate::testing::providers(factory)?);
+    let executor = FetchExecutor::new(ctx.clone(), Arc::new(flow.registry().clone()));
     let mut runtime = flow
-        .start(EdgeAgentInput { text: "hi".into() }, ctx)
-        .expect("runtime should build")
-        .with_store(store);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
-    assert_eq!(runtime.next().await.unwrap(), Step::Continue);
+        .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
+        .expect("runtime should build");
+    let executor = executor.with_store(store);
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
+    assert_eq!(
+        host::step(&mut runtime, &executor).await.unwrap(),
+        Step::Continue
+    );
 
-    let err = runtime
-        .next()
+    let err = host::step(&mut runtime, &executor)
         .await
         .expect_err("second message in tool-call batch should fail");
     assert!(matches!(err, GraphError::HistoryPersistence(_)));
@@ -4167,4 +4231,5 @@ async fn agent_history_batch_failure_does_not_commit_a_prefix() {
         "assistant tool-call prefix must not enter runtime history"
     );
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    Ok(())
 }

@@ -1,5 +1,62 @@
 use super::*;
+use pravah::clients::ErrorKind;
 use pravah::clients::Provider;
+
+/// Stops at generation and inspects the local typed failure before durable delivery.
+async fn execution_error(
+    runtime: &mut Runtime,
+    executor: &FetchExecutor,
+) -> Result<GraphError, TestError> {
+    for _ in 0..100 {
+        if let Some(fetch) = runtime.pending_fetch()
+            && fetch.request().url() == "rath://generate"
+        {
+            return executor
+                .execute(fetch)
+                .await
+                .err()
+                .ok_or(TestError::Missing("execution failure"));
+        }
+        host::step(runtime, executor).await?;
+    }
+    Err(TestError::Missing("generation boundary"))
+}
+
+/// Records a portable failure once; later VM errors must retain this exact accepted input.
+fn accept_failure(runtime: &mut Runtime, error: &GraphError) -> Result<Value, TestError> {
+    let id = runtime
+        .pending_fetch()
+        .ok_or(TestError::Missing("pending request"))?
+        .id();
+    let failure = pravah::graph::FetchError::from_execution_error(error)
+        .map_err(|error| GraphError::FetchValidation(error.to_string()))?;
+    runtime.resume_fetch(id, Err(failure))?;
+    Ok(serde_json::to_value(runtime.snapshot()?)?)
+}
+
+/// Output-limit classification uses Rath metadata, falling back to the actual client provider.
+#[tokio::test]
+async fn output_limit_provider_uses_metadata_or_client() -> Result<(), TestError> {
+    for provider in [None, Some(Provider::Anthropic)] {
+        let mut error = ClientError::new(ErrorKind::OutputLimitReached, "partial output");
+        if let Some(provider) = &provider {
+            error = error.with_context(provider.clone(), "llm.execute");
+        }
+        let expected = provider.unwrap_or_else(|| Provider::External("test".into()));
+        let script = ScriptedFactory::new().then_err(error);
+        let flow = compile(workflow)?;
+        let executor = flow.prepared().executor(context(script, Some(2048))?);
+        let mut runtime = flow.start(Request::capped(), uuid::Uuid::nil())?;
+        let error = execution_error(&mut runtime, &executor).await?;
+        let before = accept_failure(&mut runtime, &error)?;
+        assert!(matches!(
+            runtime.next(),
+            Err(GraphError::AgentOutputLimit { provider, .. }) if provider == expected
+        ));
+        assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
+    }
+    Ok(())
+}
 
 /// Zero and duplicate caps fail before history or checkpoints change or clients execute.
 #[tokio::test]
@@ -16,11 +73,12 @@ async fn invalid_caps_are_atomic_activation_errors() -> Result<(), TestError> {
         },
     ] {
         let script = ScriptedFactory::new();
-        let mut runtime = flow.start(request, context(script.clone(), None))?;
+        let executor = flow.prepared().executor(context(script.clone(), None)?);
+        let mut runtime = flow.start(request, uuid::Uuid::nil())?;
         let mut rejected = false;
         for _ in 0..20 {
             let before = serde_json::to_value(runtime.snapshot()?)?;
-            match runtime.next().await {
+            match host::step(&mut runtime, &executor).await {
                 Err(GraphError::AgentConfigValidation(_)) => {
                     assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
                     rejected = true;
@@ -38,21 +96,24 @@ async fn invalid_caps_are_atomic_activation_errors() -> Result<(), TestError> {
     Ok(())
 }
 
-/// Provider exhaustion is distinct, redacted, and leaves the dispatch checkpoint retryable.
+/// Accepted provider exhaustion is distinct and never redispatches a completed generation.
 #[tokio::test]
 async fn exhausted_output_never_becomes_a_partial_answer() -> Result<(), TestError> {
     let script = ScriptedFactory::new()
-        .then_err(ClientError::OutputLimitReached {
-            provider: Provider::OpenAi,
-            response: json!({"secret":"partial-answer"}),
-        })
+        .then_err(
+            ClientError::new(ErrorKind::OutputLimitReached, "partial-answer")
+                .with_context(Provider::OpenAi, "llm.execute"),
+        )
         .then_output(json!("complete"));
-    let mut runtime =
-        compile(workflow)?.start(Request::capped(), context(script.clone(), Some(2048)))?;
-    let before = serde_json::to_value(activated(&mut runtime).await?)?;
+    let flow = compile(workflow)?;
+    let executor = flow
+        .prepared()
+        .executor(context(script.clone(), Some(2048))?);
+    let mut runtime = flow.start(Request::capped(), uuid::Uuid::nil())?;
+    let local = execution_error(&mut runtime, &executor).await?;
+    let before = accept_failure(&mut runtime, &local)?;
     let error = runtime
         .next()
-        .await
         .err()
         .ok_or(TestError::Missing("output limit error"))?;
     assert!(matches!(
@@ -64,21 +125,32 @@ async fn exhausted_output_never_becomes_a_partial_answer() -> Result<(), TestErr
     ));
     assert!(!format!("{error:?} {error}").contains("partial-answer"));
     assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
-    finish(&mut runtime).await?;
-    assert_eq!(script.calls().len(), 2);
+    let mut restored = flow.restore(runtime.snapshot()?)?;
+    assert!(matches!(
+        restored.next(),
+        Err(GraphError::AgentOutputLimit { .. })
+    ));
+    assert_eq!(before, serde_json::to_value(restored.snapshot()?)?);
+    assert_eq!(script.calls().len(), 1);
     assert!(!serde_json::to_string(runtime.snapshot()?.history())?.contains("partial-answer"));
     Ok(())
 }
 
-/// A non-limit client error preserves its existing generic error contract.
+/// A non-limit client error remains a typed execution failure.
 #[tokio::test]
 async fn other_client_errors_remain_client_errors() -> Result<(), TestError> {
-    let script = ScriptedFactory::new().then_err(ClientError::Validation("invalid request".into()));
-    let mut runtime = compile(workflow)?.start(Request::capped(), context(script, Some(2048)))?;
-    activated(&mut runtime).await?;
+    let script =
+        ScriptedFactory::new().then_err(ClientError::new(ErrorKind::Validation, "invalid request"));
+    let flow = compile(workflow)?;
+    let executor = flow.prepared().executor(context(script, Some(2048))?);
+    let mut runtime = flow.start(Request::capped(), uuid::Uuid::nil())?;
+    let error = execution_error(&mut runtime, &executor).await?;
     assert!(matches!(
-        runtime.next().await,
-        Err(GraphError::AgentClient(_))
+        error,
+        GraphError::AgentClient {
+            operation: pravah::AgentClientOperation::Execute,
+            ..
+        }
     ));
     Ok(())
 }
@@ -92,27 +164,37 @@ async fn conclusion_output_exhaustion_remains_distinct() -> Result<(), TestError
             "lookup",
             json!({"query":"evidence"}),
         )])
-        .then_err(ClientError::OutputLimitReached {
-            provider: Provider::OpenAi,
-            response: json!({"secret":"partial-conclusion"}),
-        });
+        .then_err(
+            ClientError::new(ErrorKind::OutputLimitReached, "partial-conclusion")
+                .with_context(Provider::OpenAi, "llm.execute"),
+        );
     let request = Request {
         turns: Some(1),
         ..Request::capped()
     };
-    let mut runtime = compile(workflow)?.start(request, context(script.clone(), Some(2048)))?;
-    for _ in 0..50 {
-        let before = serde_json::to_value(runtime.snapshot()?)?;
-        match runtime.next().await {
-            Err(GraphError::AgentOutputLimit { .. }) => {
-                assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
-                assert_eq!(script.calls().len(), 2);
-                return Ok(());
+    let flow = compile(workflow)?;
+    let executor = flow
+        .prepared()
+        .executor(context(script.clone(), Some(2048))?);
+    let mut runtime = flow.start(request, uuid::Uuid::nil())?;
+    // The first generation succeeds; continue until the later conclusion request fails.
+    loop {
+        if let Some(fetch) = runtime.pending_fetch() {
+            match executor.execute(fetch).await {
+                Ok(response) => runtime.resume_fetch(fetch.id(), Ok(response))?,
+                Err(error) => {
+                    let before = accept_failure(&mut runtime, &error)?;
+                    assert!(matches!(
+                        runtime.next(),
+                        Err(GraphError::AgentOutputLimit { .. })
+                    ));
+                    assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
+                    assert_eq!(script.calls().len(), 2);
+                    return Ok(());
+                }
             }
-            other => {
-                other?;
-            }
+        } else {
+            runtime.next()?;
         }
     }
-    Err(TestError::Missing("conclusion did not reach output limit"))
 }

@@ -41,21 +41,21 @@ pub(super) fn assistant_tool_call_message(
                     reason: err.to_string(),
                 }
             })?;
-            Ok(ToolCall {
-                id: call.proposal.call_id().to_owned(),
-                name: call.proposal.tool_name().to_owned(),
+            let mut tool = ToolCall::new(
+                call.proposal.call_id().to_owned(),
+                call.proposal.tool_name().to_owned(),
                 args,
-                thought_signatures: call.thought_signatures.clone(),
-            })
+            );
+            tool.thought_signatures = call.thought_signatures.clone();
+            Ok(tool)
         })
         .collect::<Result<Vec<_>, GraphError>>()?;
-    Ok(Message {
-        key: None,
-        role: Role::AssistantToolCalls { calls },
-        content: thought.unwrap_or_default(),
-        attachments: Vec::new(),
-        usage,
-    })
+    let mut message = Message::new(
+        Role::AssistantToolCalls { calls },
+        thought.unwrap_or_default(),
+    );
+    message.usage = usage;
+    Ok(message)
 }
 
 /// Adds a generic recoverable result without revealing hidden tool membership.

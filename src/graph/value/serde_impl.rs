@@ -1,5 +1,5 @@
+use std::borrow::Cow;
 use std::fmt;
-use std::sync::Arc;
 
 use serde::de::{self, EnumAccess, IntoDeserializer, MapAccess, SeqAccess, VariantAccess, Visitor};
 use serde::ser::{
@@ -257,7 +257,7 @@ impl Serializer for ValueSerializer {
         T: ?Sized + Serialize,
     {
         Value::from_shared_object(vec![(
-            Arc::from(variant),
+            Cow::Borrowed(variant),
             value.serialize(ValueSerializer)?,
         )])
     }
@@ -384,13 +384,16 @@ impl SerializeTupleVariant for TupleVariantSerializer {
         Ok(())
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        Value::from_shared_object(vec![(Arc::from(self.variant), Value::array(self.values))])
+        Value::from_shared_object(vec![(
+            Cow::Borrowed(self.variant),
+            Value::array(self.values),
+        )])
     }
 }
 
 struct ObjectSerializer {
-    entries: Vec<(Arc<str>, Value)>,
-    key: Option<Arc<str>>,
+    entries: Vec<(Cow<'static, str>, Value)>,
+    key: Option<Cow<'static, str>>,
 }
 
 impl ObjectSerializer {
@@ -401,9 +404,13 @@ impl ObjectSerializer {
         }
     }
 
-    fn field<T: ?Sized + Serialize>(&mut self, key: &str, value: &T) -> Result<(), ValueError> {
+    fn field<T: ?Sized + Serialize>(
+        &mut self,
+        key: &'static str,
+        value: &T,
+    ) -> Result<(), ValueError> {
         self.entries
-            .push((Arc::from(key), value.serialize(ValueSerializer)?));
+            .push((Cow::Borrowed(key), value.serialize(ValueSerializer)?));
         Ok(())
     }
 
@@ -472,61 +479,61 @@ impl SerializeStructVariant for StructVariantSerializer {
         self.object.field(key, value)
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        Value::from_shared_object(vec![(Arc::from(self.variant), self.object.finish()?)])
+        Value::from_shared_object(vec![(Cow::Borrowed(self.variant), self.object.finish()?)])
     }
 }
 
 struct KeySerializer;
 
 impl Serializer for KeySerializer {
-    type Ok = Arc<str>;
+    type Ok = Cow<'static, str>;
     type Error = ValueError;
-    type SerializeSeq = ser::Impossible<Arc<str>, ValueError>;
-    type SerializeTuple = ser::Impossible<Arc<str>, ValueError>;
-    type SerializeTupleStruct = ser::Impossible<Arc<str>, ValueError>;
-    type SerializeTupleVariant = ser::Impossible<Arc<str>, ValueError>;
-    type SerializeMap = ser::Impossible<Arc<str>, ValueError>;
-    type SerializeStruct = ser::Impossible<Arc<str>, ValueError>;
-    type SerializeStructVariant = ser::Impossible<Arc<str>, ValueError>;
+    type SerializeSeq = ser::Impossible<Cow<'static, str>, ValueError>;
+    type SerializeTuple = ser::Impossible<Cow<'static, str>, ValueError>;
+    type SerializeTupleStruct = ser::Impossible<Cow<'static, str>, ValueError>;
+    type SerializeTupleVariant = ser::Impossible<Cow<'static, str>, ValueError>;
+    type SerializeMap = ser::Impossible<Cow<'static, str>, ValueError>;
+    type SerializeStruct = ser::Impossible<Cow<'static, str>, ValueError>;
+    type SerializeStructVariant = ser::Impossible<Cow<'static, str>, ValueError>;
 
     fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value))
+        Ok(Cow::Owned(value.to_owned()))
     }
     fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_bool(self, value: bool) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_i8(self, value: i8) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_i16(self, value: i16) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_i32(self, value: i32) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_i64(self, value: i64) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_i128(self, value: i128) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_u8(self, value: u8) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_u16(self, value: u16) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_u32(self, value: u32) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_u128(self, value: u128) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(value.to_string()))
+        Ok(Cow::Owned(value.to_string()))
     }
     fn serialize_unit_variant(
         self,
@@ -534,7 +541,7 @@ impl Serializer for KeySerializer {
         _index: u32,
         variant: &'static str,
     ) -> Result<Self::Ok, Self::Error> {
-        Ok(Arc::from(variant))
+        Ok(Cow::Borrowed(variant))
     }
     fn serialize_newtype_struct<T: ?Sized + Serialize>(
         self,
@@ -642,7 +649,7 @@ impl<'de> SeqAccess<'de> for ValueSeq<'_> {
 }
 
 struct ValueMap<'a> {
-    entries: std::slice::Iter<'a, (Arc<str>, Value)>,
+    entries: std::slice::Iter<'a, (Cow<'static, str>, Value)>,
     value: Option<&'a Value>,
 }
 

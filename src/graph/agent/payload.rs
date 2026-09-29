@@ -1,12 +1,14 @@
-use super::{AgentToolPayload, GraphError, JsonValue, PAYLOAD_VERSION, Value, from_value};
+use super::definition::ConfigurationData;
+use super::{AgentHandler, AgentToolPayload, GraphError, PAYLOAD_VERSION, Value, from_value};
 
 /// Operation-local execution metadata, never retained in a handler or checkpoint.
 /// Names and configure data borrow the immutable graph; provider metadata is decoded locally.
 pub(super) struct AgentPayloadView<'a> {
+    pub(super) raw: &'a Value,
     pub(super) agent_id: &'a str,
     pub(super) output_type_name: &'a str,
     pub(super) configuration: Option<&'a Value>,
-    pub(super) output_schema: JsonValue,
+    output_schema: &'a Value,
     pub(super) tools: Vec<AgentToolPayload>,
 }
 
@@ -21,13 +23,70 @@ impl<'a> AgentPayloadView<'a> {
             Some(value) => Some(field(value, "value")?),
         };
         Ok(Self {
+            raw: payload,
             agent_id,
             output_type_name: text_field(payload, "output_type_name")?,
             configuration,
-            output_schema: decode_field(payload, "output_schema")?,
+            output_schema: field(payload, "output_schema")?,
             tools: decode_field(payload, "tools")?,
         })
     }
+
+    /// Borrows the authored schema for sharing with the durable generation request.
+    pub(super) fn output_schema(&self) -> &Value {
+        self.output_schema
+    }
+}
+
+impl AgentHandler {
+    /// Validates a definition boundary once while retaining the same borrowed execution view.
+    /// Definition schemas are JSON values; only configure data has a registered schema contract.
+    pub(super) fn validated_payload<'a>(
+        &self,
+        payload: &'a Value,
+    ) -> Result<AgentPayloadView<'a>, GraphError> {
+        let view = AgentPayloadView::read(payload).map_err(|error| {
+            GraphError::GraphValidation(format!("invalid registered agent payload: {error}"))
+        })?;
+        field(payload, "input_schema")?;
+        let data = configuration_data(payload)?;
+        self.configure.validate_data(data.as_ref())?;
+        let control = payload
+            .get("control_handler_key")
+            .filter(|value| !value.is_null());
+        match (control, self.controller.is_some()) {
+            (Some(key), false) => {
+                return Err(GraphError::MissingHandler(
+                    key.as_str()
+                        .ok_or_else(|| {
+                            GraphError::GraphValidation("invalid controller key".into())
+                        })?
+                        .into(),
+                ));
+            }
+            (None, true) => {
+                return Err(GraphError::GraphValidation(
+                    "registered agent controller is absent from its payload".into(),
+                ));
+            }
+            _ => {}
+        }
+        Ok(view)
+    }
+}
+
+/// Reads the settings contract without recursively reconstructing the already shared value.
+fn configuration_data(payload: &Value) -> Result<Option<ConfigurationData>, GraphError> {
+    let Some(data) = payload
+        .get("configuration")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ConfigurationData {
+        value: field(data, "value")?.clone(),
+        schema: decode_field(data, "schema")?,
+    }))
 }
 
 /// Keeps version and handler-identity rejection explicit even for direct handler invocations.

@@ -1,4 +1,4 @@
-use crate::clients::{ClientError, Message, Role, TokenUsage};
+use crate::clients::{ErrorKind, Message, Role, TokenUsage};
 use crate::history::MessageHistory;
 use crate::legacy::CompactionResult;
 
@@ -43,7 +43,7 @@ fn validate_for_session_rejects_dangling_calls() {
     push_tool_calls(&mut history, "s1", vec![tool_call("1")]);
     assert!(matches!(
         history.validate_for_session("s1"),
-        Err(ClientError::Validation(_))
+        Err(error) if error.kind() == ErrorKind::Validation
     ));
     assert!(history.validate_for_session("s2").is_ok());
 }
@@ -61,20 +61,16 @@ fn last_role_returns_latest_live_role() {
 #[test]
 fn total_usage_requires_both_values() {
     let mut history = MessageHistory::new();
-    history.push(
-        "s1",
-        "agent",
-        Message {
-            key: None,
-            role: Role::Assistant,
-            content: "x".into(),
-            attachments: Vec::new(),
-            usage: Some(TokenUsage {
-                input: Some(5),
-                output: None,
-            }),
-        },
-    );
+    history.push("s1", "agent", {
+        let mut message = Message::new(Role::Assistant, "x".into());
+        message.usage = Some({
+            let mut usage = TokenUsage::default();
+            usage.input = Some(5);
+            usage.output = None;
+            usage
+        });
+        message
+    });
     assert_eq!(history.total_input(), Some(5));
     assert_eq!(history.total_output(), None);
     assert_eq!(history.total_usage(), None);

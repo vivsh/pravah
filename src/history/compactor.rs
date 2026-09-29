@@ -18,14 +18,19 @@ pub struct CompactionRequest<'a> {
 }
 
 impl CompactionRequest<'_> {
-    /// Borrows committed non-tool messages, omitting the newest `skip_recent` non-tool messages.
-    /// Indices retain their positions in `committed()`, including gaps for tool entries.
+    /// Borrows the first committed entry's summary text without its framework wrapper.
+    /// Preserves whitespace; returns None when absent or malformed, without modifying history.
+    pub fn summary(&self) -> Option<&str> {
+        self.committed
+            .first()
+            .and_then(|entry| super::inspection::summary_text(entry))
+    }
+
+    /// Borrows committed messages excluding framework summaries and tool calls/results.
+    /// Omits the newest `skip_recent` exposed messages; indices retain their positions in `committed()`.
     /// Protected input is never included; enumeration alone does not select a safe eviction prefix.
     pub fn enum_messages(&self, skip_recent: usize) -> impl Iterator<Item = (usize, &Message)> {
-        super::inspection::enum_messages(
-            self.committed.iter().map(|entry| &entry.message),
-            skip_recent,
-        )
+        super::inspection::enum_messages(self.committed.iter().copied(), skip_recent)
     }
 
     /// Returns the compact JSON array size of all committed messages, including tools and attachments.
@@ -73,7 +78,7 @@ impl CompactionRequest<'_> {
 
 /// Replaces a sorted, contiguous prefix of `committed()` with optional plain text memory.
 /// An empty decision retains history. A summary requires at least one replaced entry.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompactionResult {
     /// Zero-based indices of committed entries; must be exactly `0..n`.
     pub evict_indices: Vec<usize>,

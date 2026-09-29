@@ -76,7 +76,9 @@ pub trait Agent: JsonSchema + Serialize + DeserializeOwned + Send + Sync + 'stat
 
     /// Builds the first user message for this agent invocation.
     fn to_message(self, _ctx: &Context) -> Result<Message, FlowError> {
-        Message::from_json(Role::User, &self).map_err(FlowError::Serialize)
+        serde_json::to_string(&self)
+            .map(Message::user)
+            .map_err(FlowError::Serialize)
     }
 
     /// Returns the runtime settings for this agent.

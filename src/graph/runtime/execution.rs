@@ -2,7 +2,7 @@ use super::*;
 use crate::graph::Value;
 
 impl Runtime {
-    pub(super) async fn step_inner(&mut self) -> Result<Step, GraphError> {
+    pub(super) fn step_inner(&mut self) -> Result<Step, GraphError> {
         let frame_index = self
             .state
             .frames
@@ -33,7 +33,7 @@ impl Runtime {
                 .ok_or_else(|| GraphError::Invalid("active frame disappeared".into()))?;
             if has_continuation(frame, node.id)? {
                 if matches!(node.kind, CompiledNodeKind::Continuation { .. }) {
-                    return self.poll_continuation(frame_index, node.clone()).await;
+                    return self.poll_continuation(frame_index, node.clone());
                 }
                 if node.can_continue {
                     continue;
@@ -51,7 +51,7 @@ impl Runtime {
             if !inputs_ready_with_new_epoch(frame, node)? {
                 continue;
             }
-            return self.execute_node(frame_index, node.clone()).await;
+            return self.execute_node(frame_index, node.clone());
         }
 
         let frame = self
@@ -69,7 +69,7 @@ impl Runtime {
         )))
     }
 
-    pub(super) async fn execute_node(
+    pub(super) fn execute_node(
         &mut self,
         frame_index: usize,
         node: CompiledNode,
@@ -95,20 +95,7 @@ impl Runtime {
                 self.complete_node(frame_index, &node)?;
                 Ok(Step::Continue)
             }
-            CompiledNodeKind::WorkHandler { key } => {
-                let frame = self.frame(frame_index)?;
-                let inputs = read_inputs(frame, &node)?;
-                let handler = self
-                    .registry
-                    .work(key)
-                    .ok_or_else(|| GraphError::MissingHandler(key.as_str().into()))?;
-                let outputs = handler
-                    .call(inputs, self.runtime_context.context.clone())
-                    .await?;
-                self.write_outputs(frame_index, &node, outputs)?;
-                self.complete_node(frame_index, &node)?;
-                Ok(Step::Continue)
-            }
+            CompiledNodeKind::Fetch => self.execute_fetch(frame_index, &node),
             CompiledNodeKind::Load { var, key } => {
                 let frame = self.frame(frame_index)?;
                 let input = read_single_input(frame, &node)?;
@@ -167,14 +154,17 @@ impl Runtime {
                     .registry
                     .continuation(key)
                     .ok_or_else(|| GraphError::MissingHandler(key.as_str().into()))?;
-                let ctx = self.continuation_context();
-                let transition = handler.start(payload.as_ref(), state, inputs, ctx).await?;
+                let ctx = self.continuation_context(&node);
+                let transition = handler.start(payload.as_ref(), state, inputs, ctx)?;
                 let suspension =
                     self.apply_continuation_transition(frame_index, &node, transition)?;
                 self.complete_node(frame_index, &node)?;
-                Ok(suspension.map_or(Step::Continue, Step::Suspend))
+                Ok(suspension)
             }
-            CompiledNodeKind::Suspend { payload, .. } => {
+            CompiledNodeKind::Suspend {
+                payload,
+                resume_type,
+            } => {
                 if node.inputs.len() != 1 || node.outputs.len() != 1 {
                     return Err(GraphError::Invalid(format!(
                         "suspend node '{}' requires one input and one output",
@@ -185,28 +175,14 @@ impl Runtime {
                 let input_edge = single_input_edge(&node)?;
                 let input_ref = peek_edge(frame, input_edge)?;
                 let payload_value = suspend_payload(payload.as_ref(), input_ref);
-                let output_edge = node.outputs.first().copied().ok_or_else(|| {
-                    GraphError::Invalid(format!("suspend node '{}' has no output", node.name))
-                })?;
-                let resume_type = self
-                    .callables
-                    .get(frame.graph_index)
-                    .and_then(|graph| graph.graph.edge(output_edge))
-                    .map(|edge| edge.type_spec.clone())
-                    .ok_or_else(|| {
-                        GraphError::Invalid(format!(
-                            "suspend node '{}' output type is missing",
-                            node.name
-                        ))
-                    })?;
-                self.state.suspension = Some(Suspension {
+                self.state.waiting = Some(Waiting::Suspend(Suspension {
                     frame_depth: frame_index + 1,
                     graph_index: frame.graph_index,
                     node: node.id,
                     target: SuspensionTarget::Node,
-                    resume_type,
+                    resume_type: Arc::clone(resume_type),
                     payload: payload_value.clone(),
-                });
+                }));
                 Ok(Step::Suspend(payload_value))
             }
             CompiledNodeKind::Subflow { child_index } => {
@@ -602,7 +578,7 @@ impl Runtime {
             .get_mut(parent_index)
             .and_then(|frame| frame.continuation_inboxes.get_mut(parent_node.0))
             .ok_or(GraphError::MissingNode(parent_node))?;
-        slot.push(ContinuationChildResult { call_id, output });
+        slot.push(ContinuationInput::Child { call_id, output });
         Ok(())
     }
 
