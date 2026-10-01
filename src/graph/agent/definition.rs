@@ -6,6 +6,7 @@ use std::sync::Arc;
 use futures::future::{BoxFuture, FutureExt};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
+use uuid::Uuid;
 
 use crate::Context;
 
@@ -20,7 +21,7 @@ mod configuration;
 mod tests;
 pub(crate) use configuration::ConfigurationData;
 
-type ConfigureCall = dyn Fn(Value, Option<Value>, Context) -> BoxFuture<'static, Result<AgentConfig, GraphError>>
+type ConfigureCall = dyn Fn(Value, Option<Value>, Uuid, Context) -> BoxFuture<'static, Result<AgentConfig, GraphError>>
     + Send
     + Sync;
 
@@ -38,7 +39,7 @@ impl AgentConfigurator {
     pub(crate) fn missing() -> Self {
         Self {
             data: None,
-            call: Arc::new(|_, _, _| {
+            call: Arc::new(|_, _, _, _| {
                 async {
                     Err(GraphError::AgentConfigValidation(
                         "agent configure function is missing".into(),
@@ -54,9 +55,10 @@ impl AgentConfigurator {
         &self,
         input: Value,
         data: Option<&Value>,
+        execution_id: Uuid,
         ctx: Context,
     ) -> Result<AgentConfig, GraphError> {
-        (self.call)(input, data.cloned(), ctx).await
+        (self.call)(input, data.cloned(), execution_id, ctx).await
     }
 
     pub(crate) fn validate_data(&self, data: Option<&ConfigurationData>) -> Result<(), GraphError> {
@@ -201,7 +203,7 @@ impl<T> Agent<T> {
             let agent = O::schema_name().into_owned();
             self.definition.configure = Some(AgentConfigurator {
                 data: None,
-                call: Arc::new(move |value, _, ctx| {
+                call: Arc::new(move |value, _, _, ctx| {
                     let agent = agent.clone();
                     async move {
                         let input = from_value::<T>(value).map_err(|err| {

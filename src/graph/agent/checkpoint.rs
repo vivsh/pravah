@@ -36,16 +36,6 @@ impl EdgeAgentCheckpoint {
     pub(super) fn configured_tools(&self) -> Result<Vec<String>, GraphError> {
         super::effect_values::read_field(&self.resolved, "tools")
     }
-
-    pub(super) fn keep_alive(&self) -> Result<bool, GraphError> {
-        super::effect_values::read_field(&self.resolved, "keep_alive")
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct EdgeAgentSavedState {
-    pub(super) version: u32,
-    pub(super) session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

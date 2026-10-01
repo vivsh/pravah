@@ -217,7 +217,7 @@ async fn rebuilt_contract_preserves_pending_and_accepted_configuration() -> Resu
         serde_json::to_value(accepted).map_err(codec)?,
         serde_json::to_value(restored.snapshot()?).map_err(codec)?
     );
-    assert_eq!(hook(&mut restored)?.request().url(), "pravah://history");
+    assert_eq!(hook(&mut restored)?.request().url(), "rath://generate");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     Ok(())
 }

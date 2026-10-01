@@ -49,12 +49,38 @@ restoration.
 - optional text memory;
 - provider-specific JSON options;
 - an optional per-request output-token cap;
-- keep-alive session behavior;
+- an optional stable conversation key;
 - a runtime filter over prepared tools;
 - selected MCP text resources.
 
 Memory is system context, not conversation history. Configuration should do
 only read-only or idempotent external work because a failed step may be retried.
+
+## Share a conversation by key
+
+Use `.key(...)` when later invocations should receive the same conversation:
+
+```rust
+AgentConfig::new(model, instructions, Message::user(question.text))
+    .key(question.conversation_key)
+```
+
+Without a key, ordinary graph agents start a fresh session each time. With a
+key, the runtime retains its conversation across call sites, subflows and `each`
+children. The same key deliberately shares history even between different agent
+definitions; use distinct keys for different users or conversations. Keys must
+contain non-whitespace text and are otherwise preserved exactly.
+
+History belongs to one runtime, not a global cache. Independent executions do
+not share it unless supplied through `start_with_history`; a snapshot preserves
+all sessions. The selected session ID is `key:` followed by the supplied key;
+the entry's `agent_id` still records which graph agent produced it. A nested
+invocation cannot select a conversation with an unfinished exchange and returns
+`GraphError::AgentConversationBusy` before appending its input.
+
+Chat supplies an execution-scoped default key automatically. `.key(...)` on its
+builder or function-defined configuration overrides that default. Conversation
+keys do not change per-message keys or carry tool budgets between invocations.
 
 ## Limit Generated Output
 
@@ -292,7 +318,7 @@ example including suspension and typed resume.
 Enable the `mcp` feature to use Streamable HTTP resource servers:
 
 ```toml
-pravah = { version = "0.4.19", features = ["mcp"] }
+pravah = { version = "0.4.20", features = ["mcp"] }
 ```
 
 Register credentials and headers on the runtime `Context`, not in the graph or

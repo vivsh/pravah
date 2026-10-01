@@ -319,12 +319,7 @@ async fn response_validation_does_not_copy_metadata() -> Result<(), GraphError> 
     for size in [1, 1000] {
         let mut chat = builder().build(Context::default())?;
         chat.submit("question")?;
-        let preparation = super::preparation::pending(&mut chat).await?;
-        let response = chat.executor().execute(&preparation).await?;
-        chat.resume_fetch(preparation.id(), Ok(response))?;
-        let ChatStep::Fetch(fetch) = chat.next()? else {
-            return Err(codec("generation"));
-        };
+        let fetch = super::preparation::pending(&mut chat).await?;
         assert_eq!(fetch.request().url(), "rath://generate");
         let response = RathResponse::new(
             ClientResponse::new(Provider::OpenAi, ClientOutput::Output(json!("answer")))

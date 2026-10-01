@@ -47,18 +47,20 @@ pub(super) fn preparation_request(
         .history()
         .session_entries(&checkpoint.session_id)
         .into_iter()
-        .map(encode)
+        .map(|entry| encode(&entry.message))
         .collect::<Result<Vec<_>, _>>()?;
+    let request =
+        crate::graph::fetch::rath::RathRequest::replace_messages(&request, Value::array(entries))?;
+    let Some(FetchBody::Value(source)) = request.body_ref() else {
+        return Err(invalid());
+    };
     let body = object([
         ("version", 1_u32.into()),
-        ("session", checkpoint.session_id.as_str().into()),
-        ("execution", encode(ctx.execution_id())?),
-        ("request", request),
-        ("entries", Value::array(entries)),
+        ("request", source.clone()),
         ("guidance", encode(guidance)?),
         ("budget_conclusion", budget_conclusion.into()),
     ])?;
-    Ok(FetchRequest::new("POST", "pravah://prepare").body(FetchBody::Value(body)))
+    Ok(FetchRequest::new("POST", "pravah://agent-prepare").body(FetchBody::Value(body)))
 }
 
 pub(super) fn read_field<T: DeserializeOwned>(value: &Value, name: &str) -> Result<T, GraphError> {
@@ -73,15 +75,10 @@ impl AgentEffectCheckpoint {
     /// Only the envelope is new; input and nested checkpoints keep their shared ownership.
     pub(super) fn into_value(self) -> Result<Value, GraphError> {
         match self {
-            Self::Configure {
-                version,
-                input,
-                state,
-            } => object([
+            Self::Configure { version, input } => object([
                 ("effect", "configure".into()),
                 ("version", version.into()),
                 ("input", input),
-                ("state", state.unwrap_or(Value::NULL)),
             ]),
             Self::Control {
                 version,
@@ -95,11 +92,6 @@ impl AgentEffectCheckpoint {
                 version,
                 checkpoint,
             } => boundary("generate", version, checkpoint),
-            Self::Record { version, next } => object([
-                ("effect", "record".into()),
-                ("version", version.into()),
-                ("next", next),
-            ]),
         }
     }
 
@@ -108,8 +100,7 @@ impl AgentEffectCheckpoint {
         let kind = field(value, "effect")?.as_str().ok_or_else(invalid)?;
         let version = read_field(value, "version")?;
         let allowed = match kind {
-            "configure" => &["effect", "version", "input", "state"][..],
-            "record" => &["effect", "version", "next"][..],
+            "configure" => &["effect", "version", "input"][..],
             "control" | "prepare" | "generate" => &["effect", "version", "checkpoint"][..],
             _ => return Err(invalid()),
         };
@@ -129,11 +120,6 @@ impl AgentEffectCheckpoint {
             "configure" => Self::Configure {
                 version,
                 input: field(value, "input")?.clone(),
-                state: optional_value(value, "state"),
-            },
-            "record" => Self::Record {
-                version,
-                next: field(value, "next")?.clone(),
             },
             "control" => Self::Control {
                 version,
@@ -156,7 +142,6 @@ impl Prepared {
     pub(super) fn into_response(self) -> Result<FetchResponse, GraphError> {
         Ok(FetchResponse::new(200).body(FetchBody::Value(object([
             ("version", self.version.into()),
-            ("decision", encode(self.decision)?),
             ("generation", self.generation),
         ])?)))
     }
@@ -167,7 +152,6 @@ impl Prepared {
         };
         Ok(Self {
             version: read_field(value, "version")?,
-            decision: read_field(value, "decision")?,
             generation: field(value, "generation")?.clone(),
         })
     }
@@ -230,44 +214,17 @@ impl EdgeAgentCheckpoint {
     }
 }
 
-/// Stages the normal continuation wire representation without recoding its checkpoint/output.
-pub(super) fn transition_value(next: ContinuationTransition) -> Result<Value, GraphError> {
-    object([
-        ("fetch", encode(next.fetch)?),
-        ("history", encode(next.history)?),
-        ("checkpoint", next.checkpoint.unwrap_or(Value::NULL)),
-        ("state", next.state.unwrap_or(Value::NULL)),
-        ("outputs", Value::array(next.outputs)),
-        ("writes", encode(next.writes)?),
-        ("child_calls", encode(next.child_calls)?),
-        ("suspension", encode(next.suspension)?),
-    ])
-}
-
-/// Restores a staged transition; validation still occurs at the runtime commit boundary.
-pub(super) fn read_transition(value: &Value) -> Result<ContinuationTransition, GraphError> {
-    Ok(ContinuationTransition {
-        fetch: read_field(value, "fetch")?,
-        history: read_field(value, "history")?,
-        checkpoint: optional_value(value, "checkpoint"),
-        state: optional_value(value, "state"),
-        outputs: field(value, "outputs")?
-            .as_array()
-            .ok_or_else(invalid)?
-            .to_vec(),
-        writes: read_field(value, "writes")?,
-        child_calls: read_field(value, "child_calls")?,
-        suspension: read_field(value, "suspension")?,
-    })
-}
-
 impl AgentHook {
     /// Builds an operation-local request that shares its authored payload and invocation input.
     pub(super) fn into_request(self) -> Result<FetchRequest, GraphError> {
         let operation = match self.operation {
-            AgentHookOperation::Configure { input } => {
-                object([("Configure", object([("input", input)])?)])?
-            }
+            AgentHookOperation::Configure {
+                input,
+                execution_id,
+            } => object([(
+                "Configure",
+                object([("input", input), ("execution_id", encode(execution_id)?)])?,
+            )])?,
             AgentHookOperation::Control { observation } => object([(
                 "Control",
                 object([("observation", observation_value(observation)?)])?,
@@ -297,6 +254,7 @@ impl AgentHook {
         let operation = match kind {
             "Configure" => AgentHookOperation::Configure {
                 input: field(content, "input")?.clone(),
+                execution_id: read_field(content, "execution_id")?,
             },
             "Control" => AgentHookOperation::Control {
                 observation: read_observation(field(content, "observation")?)?,

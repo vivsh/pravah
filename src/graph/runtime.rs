@@ -32,6 +32,7 @@ mod fingerprint;
 mod helpers;
 mod history;
 mod liveness;
+mod maintenance;
 mod path;
 mod reclaim;
 mod snapshot;
@@ -50,7 +51,7 @@ use snapshot::validate_snapshot_state;
 use sparse::{SparseState, expand_state, sparse_state};
 
 /// Current serialized runtime snapshot version.
-pub const SNAPSHOT_VERSION: u32 = 10;
+pub const SNAPSHOT_VERSION: u32 = 12;
 
 #[derive(Clone)]
 struct CompiledGraph {
@@ -256,6 +257,30 @@ impl PreparedGraph {
     /// Fails before returning a runtime when the entry value is incompatible
     /// with the prepared graph.
     pub fn start(&self, input: Value, execution_id: Uuid) -> Result<Runtime, GraphError> {
+        self.start_runtime(input, execution_id, MessageHistory::new())
+    }
+
+    /// Starts a fresh execution taking ownership of validated, completed working history.
+    /// Agents select imported conversations through their configuration keys. Invalid row
+    /// identities, positions or incomplete message groups fail before execution starts.
+    /// Supply a fresh execution UUID for this independent execution.
+    pub fn start_with_history(
+        &self,
+        input: Value,
+        execution_id: Uuid,
+        history: MessageHistory,
+    ) -> Result<Runtime, GraphError> {
+        history.validate_import()?;
+        self.start_runtime(input, execution_id, history)
+    }
+
+    /// Initializes checked entry state; supplied history has already passed its public boundary.
+    fn start_runtime(
+        &self,
+        input: Value,
+        execution_id: Uuid,
+        history: MessageHistory,
+    ) -> Result<Runtime, GraphError> {
         let mut state = State {
             execution_id,
             ..State::default()
@@ -275,15 +300,14 @@ impl PreparedGraph {
             registry: Arc::clone(&self.registry),
             graph_fingerprint: self.fingerprint,
             state,
-            history: MessageHistory::new(),
+            history,
         })
     }
 
     /// Restores an isolated runtime after checking version, graph, and VM state.
     ///
-    /// The supplied context and runtime services are intentionally not
-    /// serialized. Attach a fresh context here and configure services with the
-    /// `with_*` methods after restoration.
+    /// Runtime dependencies are intentionally not serialized. Supply fresh
+    /// context and services to the external FetchExecutor used after restoration.
     ///
     /// Version, fingerprint, sparse state, frame, continuation, and suspension
     /// validation complete before a runtime is returned.

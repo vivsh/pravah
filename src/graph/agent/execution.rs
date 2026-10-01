@@ -13,23 +13,24 @@ impl ContinuationHandler for AgentHandler {
         payload: &'a Value,
         state: Option<Value>,
         inputs: Vec<Value>,
-        _ctx: ContinuationContext<'_>,
+        ctx: ContinuationContext<'_>,
     ) -> Result<ContinuationTransition, GraphError> {
+        super::conversation::validate_empty_state(state.as_ref())?;
         let metadata = AgentPayloadView::read(payload)?;
         let input = single_input(inputs, "agent")?;
         let hook = AgentHook {
-            version: 1,
+            version: super::effects::AGENT_HOOK_VERSION,
             handler: metadata.agent_id.into(),
             payload: payload.clone(),
             operation: AgentHookOperation::Configure {
                 input: input.clone(),
+                execution_id: ctx.execution_id(),
             },
         };
         effect(
             AgentEffectCheckpoint::Configure {
                 version: CHECKPOINT_VERSION,
                 input,
-                state,
             },
             hook.into_request()?,
         )
@@ -131,7 +132,7 @@ impl AgentHandler {
         }
         let observation = self.loop_data(payload, &checkpoint, point, &ctx)?;
         let hook = AgentHook {
-            version: 1,
+            version: super::effects::AGENT_HOOK_VERSION,
             handler: payload.agent_id.into(),
             payload: payload.raw.clone(),
             operation: AgentHookOperation::Control { observation },
@@ -264,7 +265,7 @@ impl AgentHandler {
         self.apply_decision(payload, checkpoint, point, decision)
     }
 
-    /// Freezes one preparation request without calling a client or a policy.
+    /// Freezes generation directly; only files and provider-specific reminders need an async hook.
     fn dispatch(
         &self,
         payload: &AgentPayloadView<'_>,
@@ -275,6 +276,18 @@ impl AgentHandler {
         let request = super::request::generation(payload, &checkpoint, conclusion.is_some())?;
         let mut guidance = Vec::new();
         append_guidance(&mut guidance, checkpoint.guidance.as_deref());
+        if !matches!(conclusion, Some(ConclusionCause::TurnBudget))
+            && let Some(generation) =
+                inline_generation(ctx.history(), &checkpoint.session_id, &request, &guidance)?
+        {
+            return effect(
+                AgentEffectCheckpoint::Generate {
+                    version: CHECKPOINT_VERSION,
+                    checkpoint: checkpoint.into_value()?,
+                },
+                generation,
+            );
+        }
         let preparation = super::effect_values::preparation_request(
             &checkpoint,
             request,
@@ -350,7 +363,7 @@ impl AgentHandler {
         checkpoint.metrics.record_output(usage)?;
         let transition = ContinuationTransition {
             checkpoint: None,
-            state: completed_agent_state(&checkpoint)?,
+            state: None,
             outputs: vec![output],
             writes: Vec::new(),
             child_calls: Vec::new(),
@@ -637,6 +650,33 @@ impl AgentHandler {
             .map(Arc::as_ref)
             .ok_or_else(|| GraphError::Invalid(format!("tool runtime {index} is missing")))
     }
+}
+
+/// Encodes retained messages once; file inputs require external materialization before freezing.
+fn inline_generation(
+    history: &crate::history::MessageHistory,
+    session: &str,
+    request: &Value,
+    guidance: &[Message],
+) -> Result<Option<crate::graph::FetchRequest>, GraphError> {
+    let entries = history.session_entries(session);
+    if entries.iter().any(|entry| {
+        entry.message.attachments.iter().any(|attachment| {
+            !matches!(
+                attachment,
+                crate::clients::Attachment::Inline { .. } | crate::clients::Attachment::Url { .. }
+            )
+        })
+    }) {
+        return Ok(None);
+    }
+    let messages = entries
+        .iter()
+        .map(|entry| encode(&entry.message))
+        .chain(guidance.iter().map(encode))
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::graph::fetch::rath::RathRequest::replace_messages(request, Value::array(messages))
+        .map(Some)
 }
 
 /// Selects the one shared dispatch phase for normal and budget conclusion paths.

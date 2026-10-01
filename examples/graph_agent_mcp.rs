@@ -56,7 +56,7 @@ async fn configure(question: Question, _ctx: Context) -> Result<AgentConfig, Gra
         "Answer from the selected resource. Cite its URI.",
         Message::user(question.text),
     )
-    .keep_alive()
+    .key("conversation")
     .resources([McpResourceRef::new("handbook", question.resource_uri)])
     .tool_filter(ToolFilter::new(move |_| question.allow_search)))
 }

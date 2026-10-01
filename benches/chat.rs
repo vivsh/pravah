@@ -61,7 +61,7 @@ fn agent(root: Agent<String>) -> Agent<String> {
 }
 
 async fn configure(input: String, _ctx: Context) -> Result<AgentConfig, GraphError> {
-    Ok(AgentConfig::new("test:///test", "Answer.", Message::user(input)).keep_alive())
+    Ok(AgentConfig::new("test:///test", "Answer.", Message::user(input)).key("conversation"))
 }
 
 /// Measures bounded-history steady-state sends, excluding initialization and warmup.

@@ -4,11 +4,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use futures::future::BoxFuture;
 
-use crate::graph::{AgentClientOperation, GraphError, HandlerRegistry, RuntimeServices};
-use crate::{
-    Context,
-    history::{Compactor, HistoryStore},
-};
+use crate::Context;
+use crate::graph::{AgentClientOperation, GraphError, HandlerRegistry};
 
 use super::{
     Fetch, FetchBody, FetchResponse,
@@ -30,15 +27,10 @@ pub trait DynFetchHandler: Send + Sync {
 pub struct FetchExecutor {
     context: Context,
     registry: Arc<HandlerRegistry>,
-    services: RuntimeServices,
     schemes: BTreeMap<String, Arc<dyn DynFetchHandler>>,
 }
 
 impl FetchExecutor {
-    pub(crate) fn with_services(mut self, services: RuntimeServices) -> Self {
-        self.services = services;
-        self
-    }
     /// Creates a graph-independent dispatcher without registered graph handlers.
     ///
     /// Agent and tool hooks require [`FetchExecutor::with_registry`] or a
@@ -51,7 +43,6 @@ impl FetchExecutor {
         Self {
             context,
             registry,
-            services: RuntimeServices::default(),
             schemes: BTreeMap::new(),
         }
     }
@@ -70,23 +61,6 @@ impl FetchExecutor {
     /// Borrows the registered graph handlers, without copying the registry.
     pub fn registry(&self) -> &HandlerRegistry {
         &self.registry
-    }
-
-    /// Borrows the external history-service bundle.
-    pub fn services(&self) -> &RuntimeServices {
-        &self.services
-    }
-
-    /// Installs pre-dispatch working-memory preparation outside the VM.
-    pub fn with_compactor(mut self, compactor: impl Compactor + 'static) -> Self {
-        self.services = self.services.with_compactor(compactor);
-        self
-    }
-
-    /// Installs the store used for acknowledged history batches.
-    pub fn with_store(mut self, store: impl HistoryStore + 'static) -> Self {
-        self.services = self.services.with_store(store);
-        self
     }
 
     /// Registers a unique application scheme. Built-in schemes cannot be shadowed.
@@ -121,13 +95,7 @@ impl FetchExecutor {
             "http" | "https" => self.http(fetch).await,
             "rath" => self.rath(fetch).await,
             "pravah" => {
-                crate::graph::agent::execute_hook(
-                    fetch,
-                    &self.context,
-                    &self.registry,
-                    &self.services,
-                )
-                .await
+                crate::graph::agent::execute_hook(fetch, &self.context, &self.registry).await
             }
             _ => match self.schemes.get(scheme) {
                 Some(handler) => handler.execute(fetch, self.context.clone()).await,

@@ -71,7 +71,7 @@ async fn check_restored(snapshot: Snapshot) -> Result<(), TestError> {
     assert!(factory.calls().is_empty());
     chat.send("next").await?;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(store.record_count(), 2);
+    assert_eq!(store.record_count(), 4);
     Ok(())
 }
 

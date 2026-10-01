@@ -6,8 +6,10 @@ use super::entries::HistoryEntry;
 ///
 /// Snapshots own runtime history for restore. Stores are append sinks for
 /// audit, export, or external persistence. Implementations must treat an
-/// existing entry position as an idempotent replay so a failed batch can be
-/// retried without duplicating durable rows.
+/// existing entry ID as an idempotent replay so a failed batch or restoration
+/// can redeliver without duplicating durable rows. Positions are scoped to history,
+/// not globally unique. Original rows are saved before working-history pruning;
+/// generated compaction summaries are not appended to this audit sink.
 pub trait HistoryStore: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
 

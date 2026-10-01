@@ -191,17 +191,13 @@ async fn request_view_matches_tool_loop_and_conclusion() -> Result<(), GraphErro
 async fn tool_loop_rejects_protected_eviction() -> Result<(), GraphError> {
     let factory = scripted_tools();
     let flow = compile(workflow)?;
-    let executor = flow
-        .prepared()
-        .executor(
-            Context::default().with_providers(pravah::testing::providers(OverrideFactory(
-                factory.clone(),
-            ))?),
-        )
-        .with_compactor(ObserveTools {
-            reject_tools: true,
-            ..ObserveTools::default()
-        });
+    let executor = flow.prepared().executor(Context::default().with_providers(
+        pravah::testing::providers(OverrideFactory(factory.clone()))?,
+    ));
+    let mut manager = pravah::HistoryManager::new().with_compactor(ObserveTools {
+        reject_tools: true,
+        ..ObserveTools::default()
+    });
     let mut runtime = flow.start(
         Question {
             text: "research".into(),
@@ -210,7 +206,7 @@ async fn tool_loop_rejects_protected_eviction() -> Result<(), GraphError> {
     )?;
     for _ in 0..100 {
         let before = serde_json::to_value(runtime.snapshot()?).expect("snapshot");
-        match host::step(&mut runtime, &executor).await {
+        match host::step_with_manager(&mut runtime, &executor, &mut manager).await {
             Err(GraphError::HistoryCompactionValidation { .. }) => {
                 assert_eq!(
                     serde_json::to_value(runtime.snapshot()?).expect("snapshot"),

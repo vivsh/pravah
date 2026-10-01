@@ -13,7 +13,6 @@ fn checkpoint() -> Result<EdgeAgentCheckpoint, GraphError> {
             memory: Some("memory".into()),
             provider_config: None,
             max_output_tokens: Some(64),
-            keep_alive: true,
             tools: Vec::new(),
             resources: Vec::new(),
         })?,
@@ -49,7 +48,6 @@ fn effect_envelope_shapes() -> Result<(), GraphError> {
         AgentEffectCheckpoint::Configure {
             version: CHECKPOINT_VERSION,
             input: checkpoint.clone(),
-            state: None,
         },
         AgentEffectCheckpoint::Control {
             version: CHECKPOINT_VERSION,
@@ -62,13 +60,6 @@ fn effect_envelope_shapes() -> Result<(), GraphError> {
         AgentEffectCheckpoint::Generate {
             version: CHECKPOINT_VERSION,
             checkpoint: checkpoint.clone(),
-        },
-        AgentEffectCheckpoint::Record {
-            version: CHECKPOINT_VERSION,
-            next: transition_value(ContinuationTransition {
-                checkpoint: Some(checkpoint),
-                ..Default::default()
-            })?,
         },
     ] {
         let expected = encode(&effect)?;

@@ -39,12 +39,83 @@ tool rounds, standalone assistant messages, system summaries and pending user in
 do not add completed turns. It does not validate malformed histories and does not
 alter cumulative usage or agent-budget metrics.
 
+## Start a new workflow with completed history
+
+Exact restoration uses the original workflow and its snapshot. To start new
+work instead, supply completed working history to a freshly compiled workflow:
+
+```rust
+let history = MessageHistory::from_entries(stored_entries);
+let mut execution = workflow.start_with_history(input, execution_id, history)?;
+```
+
+The runtime takes ownership; no replay or checkpoint migration occurs. Configure
+an agent with `.key("customer/42")` to select entries whose `session_id` is
+`key:customer/42`, regardless of their originating call site. Unkeyed agents
+start fresh sessions. Use a new execution UUID for this new work, just as for any
+independent start. Imported entries must have unique IDs, strictly increasing
+positions, well-formed summaries, complete tool groups and no unfinished exchange.
+Evicted rows are rejected; load only the working rows you intend to retain.
+Different session histories may be interleaved by their global append positions.
+
+`from_entries` reconstructs usage only from supplied messages. To retain cumulative
+usage after compaction, supply a complete serialized `MessageHistory` instead.
+This is not a database loader: the application retrieves rows, selects conversations
+and manages external archival retention.
+
 ## Compactors
+
+`MessageHistory` remains part of runtime and its snapshot. A runtime-only
+`HistoryManager` owns store acknowledgements and policy dependencies—not another
+history. It saves original user, assistant, tool-call and tool-result entries;
+generated summaries belong to working history, not the append-only audit store.
+After restoration, attach a fresh manager. Retained entries may be redelivered,
+so the store must deduplicate by entry UUID. Rows already pruned cannot be
+recovered from a checkpoint; persist them before pruning.
+
+For manual graph execution:
+
+```rust
+let mut manager = HistoryManager::new()
+    .with_store(store)
+    .with_compactor(policy);
+loop {
+    manager.maintain(&mut execution, ctx.clone()).await?;
+    if let Some(fetch) = execution.pending_fetch() {
+        let id = fetch.id();
+        let response = executor.execute(fetch).await?;
+        execution.resume_fetch(id, Ok(response))?;
+    }
+    match execution.next()? {
+        Step::Continue | Step::Fetch(_) => {}
+        Step::Suspend(_) | Step::Done(_) => {
+            manager.maintain(&mut execution, ctx.clone()).await?;
+            break;
+        }
+    }
+}
+```
+
+Retry a failed maintenance call without advancing execution. The manager retains
+successful partial acknowledgements; a new manager may replay writes. Compaction
+only runs before an unfrozen model request, not against a pending Fetch.
+
+Policies may implement the synchronous trigger method:
+
+```rust
+fn needs_compaction(&self, history: &MessageHistory, session_id: &str) -> bool {
+    history.turn_count(session_id) >= 8
+}
+```
+
+The default triggers at each eligible dispatch. `manager.needs_compaction(&execution)`
+checks this predicate without constructing a client. It does not check persistence.
+Reported usage can inform a heuristic; this does not enforce exact token budgets.
 
 Configure builder chats with `.compactor(policy).store(history_store)` before
 the final `.build(ctx)?`, or before synchronous snapshot restoration.
-For function-defined chats and explicit workflows, install a fallible `Compactor` with `chat.with_compactor(policy)`,
-`executor.with_compactor(policy)` or `RuntimeServices::with_compactor(policy)`.
+For function-defined chats use `chat.with_compactor(policy)`. For explicit workflows use
+`HistoryManager::new().with_compactor(policy)`.
 The trait method is:
 
 ```rust
@@ -97,7 +168,9 @@ Ok(CompactionResult {
 
 A non-empty summary requires replaced entries. Invalid prefixes, incomplete tool
 groups and attempts to alter protected input fail atomically. The compactor runs
-once before each model execution attempt, never after final output. Application
+once per eligible dispatch in async Chat, never after final output. Explicit
+repeated maintenance at the same boundary can run it again; external writes must
+be idempotent. Application
 errors propagate as `GraphError::HistoryCompaction`; unsafe decisions use
 `GraphError::HistoryCompactionValidation`.
 
@@ -107,7 +180,8 @@ transaction. Replacing history does not delete database records or automatically
 retrieve saved facts for future prompts. Attach fresh compactors and Context
 dependencies after snapshot restoration.
 
-This naming change adds no snapshot format change or migration. The modern names
+The current history-boundary change rejects old agent continuations; recreate old
+executions rather than rewriting fingerprints. The modern names
 replace `FlowHistory`, `HistoryPreparer`, `HistoryPreparation`, `HistoryReplacement`
 and `with_history_preparer`; the callback is now `compact`, not `prepare`. Legacy
 compaction behavior remains separately available under `pravah::legacy`.

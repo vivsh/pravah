@@ -5,32 +5,28 @@ use super::intervention::checkpoint_point;
 use super::*;
 use crate::graph::registry::HistoryChange;
 use crate::graph::{FetchBody, FetchError, FetchRequest, FetchResponse};
-use crate::history::{CompactionResult, HistoryEntry};
+
+pub(super) const AGENT_HOOK_VERSION: u32 = 2;
+
+/// Rejects configure hooks lacking the execution identity required for Chat defaults.
+pub(super) fn check_agent_hook_version(got: u32) -> Result<(), GraphError> {
+    if got == AGENT_HOOK_VERSION {
+        return Ok(());
+    }
+    Err(GraphError::UnsupportedVersion {
+        format: "agent hook",
+        got,
+        expected: AGENT_HOOK_VERSION,
+    })
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "effect", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum AgentEffectCheckpoint {
-    Configure {
-        version: u32,
-        input: Value,
-        state: Option<Value>,
-    },
-    Control {
-        version: u32,
-        checkpoint: Value,
-    },
-    Prepare {
-        version: u32,
-        checkpoint: Value,
-    },
-    Generate {
-        version: u32,
-        checkpoint: Value,
-    },
-    Record {
-        version: u32,
-        next: Value,
-    },
+    Configure { version: u32, input: Value },
+    Control { version: u32, checkpoint: Value },
+    Prepare { version: u32, checkpoint: Value },
+    Generate { version: u32, checkpoint: Value },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -47,30 +43,22 @@ pub(super) struct AgentHook {
     reason = "operation-local observations avoid another heap allocation"
 )]
 pub(super) enum AgentHookOperation {
-    Configure { input: Value },
+    Configure { input: Value, execution_id: Uuid },
     Control { observation: AgentLoopData },
 }
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Configured {
+    pub key: Option<String>,
     pub resolved: ResolvedAgentConfig,
     pub message: Message,
     pub budget: Option<AgentBudgetState>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct RecordRequest {
-    pub version: u32,
-    pub entries: Vec<HistoryEntry>,
-}
-
-#[derive(Serialize, Deserialize)]
 pub(super) struct PreparationRequest {
     pub version: u32,
-    pub session: String,
-    pub execution: Uuid,
     pub request: crate::graph::fetch::rath::RathRequest,
-    pub entries: Vec<HistoryEntry>,
     pub guidance: Vec<Message>,
     pub budget_conclusion: bool,
 }
@@ -78,7 +66,6 @@ pub(super) struct PreparationRequest {
 #[derive(Serialize, Deserialize)]
 pub(super) struct Prepared {
     pub version: u32,
-    pub decision: CompactionResult,
     pub generation: Value,
 }
 
@@ -110,10 +97,6 @@ pub(super) fn effect(
         fetch: Some(request),
         ..Default::default()
     })
-}
-
-pub(super) fn request(url: &str, data: impl Serialize) -> Result<FetchRequest, GraphError> {
-    Ok(FetchRequest::new("POST", url).body(FetchBody::Value(encode(data)?)))
 }
 
 pub(super) fn response(data: impl Serialize) -> Result<FetchResponse, GraphError> {
@@ -149,31 +132,19 @@ pub(super) fn success(
     Ok(response)
 }
 
-/// Stages an acknowledged append and the next transition without mutating runtime history.
+/// Stages a synchronous append; the caller persists committed rows outside the VM.
 pub(super) fn record(
     ctx: ContinuationContext<'_>,
     session: &str,
     agent: &str,
     messages: Vec<Message>,
-    next: ContinuationTransition,
+    mut next: ContinuationTransition,
 ) -> Result<ContinuationTransition, GraphError> {
     let entries = ctx
         .history()
         .stage_entries(ctx.execution_id(), session, agent, messages)?;
-    let request = request(
-        "pravah://history",
-        RecordRequest {
-            version: 1,
-            entries,
-        },
-    )?;
-    effect(
-        AgentEffectCheckpoint::Record {
-            version: CHECKPOINT_VERSION,
-            next: super::effect_values::transition_value(next)?,
-        },
-        request,
-    )
+    next.history.push(HistoryChange::Append(entries));
+    Ok(next)
 }
 
 impl AgentHandler {
@@ -218,29 +189,15 @@ impl AgentHandler {
             outcome => success(outcome)?,
         };
         match state {
-            AgentEffectCheckpoint::Configure {
-                version,
-                input,
-                state,
-            } => {
+            AgentEffectCheckpoint::Configure { version, input } => {
                 check_version(version)?;
                 self.accept_configuration(
                     &AgentPayloadView::read(payload_value)?,
                     input,
-                    state,
                     fetch.id(),
                     &response,
                     ctx,
                 )
-            }
-            AgentEffectCheckpoint::Record { version, next } => {
-                check_version(version)?;
-                decode::<()>(response.body_ref())?;
-                let record: RecordRequest = decode(fetch.request().body_ref())?;
-                check_protocol(record.version)?;
-                let mut next = super::effect_values::read_transition(&next)?;
-                next.history.push(HistoryChange::Append(record.entries));
-                Ok(next)
             }
             AgentEffectCheckpoint::Prepare {
                 version,
@@ -250,19 +207,13 @@ impl AgentHandler {
                 let prepared = Prepared::from_response(&response)?;
                 check_protocol(prepared.version)?;
                 let generation = FetchRequest::from_value(&prepared.generation)?;
-                let session_id = super::effect_values::read_field(&checkpoint, "session_id")?;
-                let mut next = effect(
+                effect(
                     AgentEffectCheckpoint::Generate {
                         version,
                         checkpoint,
                     },
                     generation,
-                )?;
-                next.history.push(HistoryChange::Compact {
-                    session_id,
-                    decision: prepared.decision,
-                });
-                Ok(next)
+                )
             }
             AgentEffectCheckpoint::Control {
                 version,
@@ -299,17 +250,17 @@ impl AgentHandler {
         }
     }
 
-    /// Installs resolved invocation state only after its initial history batch is acknowledged.
+    /// Commits invocation state and its initial message in one synchronous transition.
     fn accept_configuration(
         &self,
         payload: &AgentPayloadView<'_>,
         input: Value,
-        state: Option<Value>,
         id: Uuid,
         response: &FetchResponse,
         ctx: ContinuationContext<'_>,
     ) -> Result<ContinuationTransition, GraphError> {
         let Configured {
+            key,
             resolved,
             message,
             budget,
@@ -320,11 +271,7 @@ impl AgentHandler {
             ));
         }
         validate_resolved_config(&resolved)?;
-        let session_id = if resolved.keep_alive {
-            restore_agent_state(state)?.unwrap_or_else(|| id.to_string())
-        } else {
-            id.to_string()
-        };
+        let session_id = super::conversation::select_session(key, id, ctx.history())?;
         let mut checkpoint = EdgeAgentCheckpoint {
             version: CHECKPOINT_VERSION,
             phase: EdgeAgentPhase::BeforeModel,
@@ -396,9 +343,8 @@ pub(super) fn validate_effect_checkpoint(
 ) -> Result<(), GraphError> {
     let checkpoint = AgentEffectCheckpoint::from_value(value)?;
     match checkpoint {
-        AgentEffectCheckpoint::Configure { version, state, .. } => {
+        AgentEffectCheckpoint::Configure { version, .. } => {
             check_version(version)?;
-            restore_agent_state(state)?;
         }
         AgentEffectCheckpoint::Control {
             version,
@@ -416,22 +362,6 @@ pub(super) fn validate_effect_checkpoint(
             let checkpoint = EdgeAgentCheckpoint::from_value(&checkpoint)?;
             check_version(checkpoint.version)?;
             validate_checkpoint(tools, &checkpoint)?;
-        }
-        AgentEffectCheckpoint::Record { version, next } => {
-            check_version(version)?;
-            let next = super::effect_values::read_transition(&next)?;
-            if next.fetch.is_some() || !next.history.is_empty() {
-                return Err(GraphError::SnapshotValidation(
-                    "invalid staged history transition".into(),
-                ));
-            }
-            if let Some(checkpoint) = next.checkpoint {
-                let checkpoint: EdgeAgentCheckpoint = from_value(checkpoint).map_err(|_| {
-                    GraphError::SnapshotValidation("invalid staged agent checkpoint".into())
-                })?;
-                check_version(checkpoint.version)?;
-                validate_checkpoint(tools, &checkpoint)?;
-            }
         }
     }
     Ok(())

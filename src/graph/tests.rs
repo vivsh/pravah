@@ -2347,7 +2347,7 @@ async fn configure_edge_chat_agent(
 ) -> Result<AgentConfig, GraphError> {
     configure_edge_agent(input, ctx)
         .await
-        .map(AgentConfig::keep_alive)
+        .map(|config| config.key("conversation"))
 }
 
 fn edge_agent(root: Agent<EdgeAgentInput>) -> Agent<EdgeAgentOutput> {
@@ -4204,32 +4204,22 @@ async fn agent_history_batch_failure_does_not_commit_a_prefix() -> Result<(), cr
     let mut runtime = flow
         .start(EdgeAgentInput { text: "hi".into() }, uuid::Uuid::nil())
         .expect("runtime should build");
-    let executor = executor.with_store(store);
-    assert_eq!(
-        host::step(&mut runtime, &executor).await.unwrap(),
-        Step::Continue
-    );
-    assert_eq!(
-        host::step(&mut runtime, &executor).await.unwrap(),
-        Step::Continue
-    );
-    assert_eq!(
-        host::step(&mut runtime, &executor).await.unwrap(),
-        Step::Continue
-    );
-
-    let err = host::step(&mut runtime, &executor)
-        .await
-        .expect_err("second message in tool-call batch should fail");
-    assert!(matches!(err, GraphError::HistoryPersistence(_)));
-    let snapshot = runtime
-        .snapshot()
-        .expect("snapshot should remain available");
-    assert_eq!(
-        snapshot.history().entries().len(),
-        1,
-        "assistant tool-call prefix must not enter runtime history"
-    );
+    let mut manager = crate::HistoryManager::new().with_store(store);
+    loop {
+        let before = serde_json::to_value(runtime.snapshot().unwrap()).unwrap();
+        match host::step_with_manager(&mut runtime, &executor, &mut manager).await {
+            Err(GraphError::HistoryPersistence(_)) => {
+                assert_eq!(
+                    before,
+                    serde_json::to_value(runtime.snapshot().unwrap()).unwrap()
+                );
+                assert_eq!(runtime.history().entries().len(), 3);
+                break;
+            }
+            Ok(Step::Continue) => {}
+            other => panic!("expected persistence failure, got {other:?}"),
+        }
+    }
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     Ok(())
 }

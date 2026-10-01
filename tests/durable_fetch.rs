@@ -329,17 +329,14 @@ async fn history_failure_retains_completed_generation() -> Result<(), GraphError
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(chat.pending_fetch().is_none());
     let snapshot = chat.snapshot()?;
-    assert_eq!(snapshot.history().entries().len(), 1);
-    let before = serde_json::to_value(&snapshot).map_err(codec)?;
+    assert_eq!(snapshot.history().entries().len(), 2);
+    let before = serde_json::to_value(snapshot.history()).map_err(codec)?;
     let mut restored = builder().restore::<()>(json_roundtrip(snapshot)?, context(&calls))?;
-    assert!(matches!(
-        restored.next(),
-        Err(GraphError::FetchFailed { .. })
-    ));
+    assert!(matches!(restored.next()?, ChatStep::Done(_)));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         before,
-        serde_json::to_value(restored.snapshot()?).map_err(codec)?
+        serde_json::to_value(restored.snapshot()?.history()).map_err(codec)?
     );
     Ok(())
 }

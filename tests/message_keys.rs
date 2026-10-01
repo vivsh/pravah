@@ -42,7 +42,7 @@ async fn configure(input: Input, _ctx: Context) -> Result<AgentConfig, GraphErro
         "Answer briefly.",
         Message::user(input.text).with_key(input.key),
     )
-    .keep_alive())
+    .key("conversation"))
 }
 
 fn workflow(root: Flow<Input>) -> Flow<String> {
@@ -136,11 +136,15 @@ async fn graph_preserves_message_keys() -> Result<(), TestError> {
     for snapshot in copies(&runtime.snapshot()?)? {
         let observer = ObserveKey::default();
         let executor = pravah::graph::FetchExecutor::new(context()?)
-            .with_registry(Arc::new(flow.registry().clone()))
+            .with_registry(Arc::new(flow.registry().clone()));
+        let mut manager = pravah::HistoryManager::new()
             .with_store(observer.clone())
             .with_compactor(observer.clone());
         let mut runtime = flow.restore(snapshot)?;
         loop {
+            manager
+                .maintain(&mut runtime, executor.context().clone())
+                .await?;
             match runtime.next()? {
                 Step::Continue => {}
                 Step::Fetch(fetch) => {
@@ -148,6 +152,9 @@ async fn graph_preserves_message_keys() -> Result<(), TestError> {
                 }
                 Step::Suspend(_) => return Err(GraphError::ChatSuspended.into()),
                 Step::Done(output) => {
+                    manager
+                        .maintain(&mut runtime, executor.context().clone())
+                        .await?;
                     assert_eq!(flow.decode_output(output)?, "answer");
                     break;
                 }

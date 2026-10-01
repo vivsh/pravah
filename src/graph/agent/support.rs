@@ -6,7 +6,7 @@ pub(super) async fn resolve_agent_config(
     payload: &AgentPayloadView<'_>,
     config: AgentConfig,
     ctx: &Context,
-) -> Result<(ResolvedAgentConfig, Message, Option<AgentBudgetState>), GraphError> {
+) -> Result<super::effects::Configured, GraphError> {
     validate_agent_config(payload, &config)?;
     let mut refs = BTreeSet::new();
     for resource in &config.resources {
@@ -32,11 +32,15 @@ pub(super) async fn resolve_agent_config(
         memory: config.memory,
         provider_config: config.provider_config,
         max_output_tokens: config.max_output_tokens,
-        keep_alive: config.keep_alive,
         tools,
         resources,
     };
-    Ok((resolved, config.message, budget))
+    Ok(super::effects::Configured {
+        key: config.key,
+        resolved,
+        message: config.message,
+        budget,
+    })
 }
 
 /// Checks activation settings that must hold before history can change.
@@ -51,6 +55,11 @@ fn validate_agent_config(
     if config.model.trim().is_empty() {
         return Err(GraphError::AgentConfigValidation(
             "model must not be empty".into(),
+        ));
+    }
+    if config.key.as_ref().is_some_and(|key| key.trim().is_empty()) {
+        return Err(GraphError::AgentConfigValidation(
+            "conversation key must not be empty".into(),
         ));
     }
     if !matches!(config.message.role, Role::User) {
@@ -284,28 +293,6 @@ pub(super) fn persist_checkpoint(
     })
 }
 
-/// Restores the keep-alive session identity from opaque continuation state.
-pub(super) fn restore_agent_state(state: Option<Value>) -> Result<Option<String>, GraphError> {
-    let Some(state) = state else {
-        return Ok(None);
-    };
-    let state: EdgeAgentSavedState = from_value(state)
-        .map_err(|err| GraphError::Invalid(format!("failed to decode agent saved state: {err}")))?;
-    if state.version != CHECKPOINT_VERSION {
-        return Err(GraphError::UnsupportedVersion {
-            format: "agent saved state",
-            got: state.version,
-            expected: CHECKPOINT_VERSION,
-        });
-    }
-    if state.session_id.is_empty() {
-        return Err(GraphError::SnapshotValidation(
-            "agent saved state session id is empty".into(),
-        ));
-    }
-    Ok(Some(state.session_id))
-}
-
 /// Validates agent-specific checkpoint and saved state during graph restore.
 pub(crate) fn validate_agent_snapshot_state(
     payload: &Value,
@@ -316,13 +303,11 @@ pub(crate) fn validate_agent_snapshot_state(
     if !is_agent {
         return Ok(false);
     }
+    super::conversation::validate_empty_state(state)?;
     let payload = decode_payload(payload)?;
     if let Some(checkpoint) = checkpoint {
         if checkpoint.get("effect").is_some() {
             super::effects::validate_effect_checkpoint(&payload.tools, checkpoint)?;
-            if let Some(state) = state {
-                restore_agent_state(Some(state.clone()))?;
-            }
             return Ok(true);
         }
         let checkpoint: EdgeAgentCheckpoint = from_value(checkpoint.clone()).map_err(|err| {
@@ -336,9 +321,6 @@ pub(crate) fn validate_agent_snapshot_state(
             });
         }
         validate_checkpoint(&payload.tools, &checkpoint)?;
-    }
-    if let Some(state) = state {
-        restore_agent_state(Some(state.clone()))?;
     }
     Ok(true)
 }
@@ -597,20 +579,6 @@ fn checkpoint_point_for_validation(phase: &EdgeAgentPhase) -> Option<AgentInterv
         | EdgeAgentPhase::AcceptedTools { .. }
         | EdgeAgentPhase::PendingTool { .. } => None,
     }
-}
-
-pub(super) fn completed_agent_state(
-    checkpoint: &EdgeAgentCheckpoint,
-) -> Result<Option<Value>, GraphError> {
-    if !checkpoint.keep_alive()? {
-        return Ok(None);
-    }
-    to_value(EdgeAgentSavedState {
-        version: CHECKPOINT_VERSION,
-        session_id: checkpoint.session_id.clone(),
-    })
-    .map(Some)
-    .map_err(|err| GraphError::Invalid(format!("failed to encode agent saved state: {err}")))
 }
 
 pub(super) fn transition_with_children(

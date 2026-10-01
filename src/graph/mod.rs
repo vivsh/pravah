@@ -3,11 +3,13 @@
 //! This module exposes the serializable untyped graph, typed builder, VM
 //! runtime, and continuation registry used by production graph workflows.
 
+pub use crate::history::HistoryManager;
+
 /// Agent facade built on continuation nodes.
 mod agent;
 /// Imperative untyped graph builder.
 pub mod builder;
-/// Chat helper built from mark/goto, keep-alive agent, and suspend.
+/// Chat helper built from mark/goto, a keyed agent, and suspend.
 pub mod chat;
 /// Diagram rendering for serializable graph-backed flows.
 pub mod diagram;
@@ -67,7 +69,7 @@ pub use model::{
 pub use registry::{
     ContinuationChildCall, ContinuationContext, ContinuationEvent, ContinuationHandler,
     ContinuationSuspension, ContinuationTransition, EdgeWrite, HandlerRegistry, HistoryChange,
-    RuntimeServices, ValueHandler,
+    ValueHandler,
 };
 pub use runtime::{GraphFingerprint, PreparedGraph, Runtime, SNAPSHOT_VERSION, Snapshot};
 pub use state::{State, Step, Suspension};

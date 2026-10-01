@@ -86,12 +86,20 @@ pub struct CompactionResult {
     pub summary: Option<String>,
 }
 
-/// Fallible application policy invoked once before each model execution attempt.
+/// Fallible application policy invoked by caller-owned history maintenance.
+/// Chat invokes it once before each eligible model dispatch; explicit repeated
+/// maintenance at the same dispatch may invoke it again.
 /// Errors prevent execution and leave history unchanged. External work should be idempotent.
 /// The supplied context belongs to the execution, including fresh dependencies after restore.
 pub trait Compactor: Send + Sync {
     /// Application error preserved as the source of `GraphError::HistoryCompaction`.
     type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Returns whether an upcoming dispatch needs maintenance. Defaults to every dispatch.
+    /// Use session turns or reported usage for heuristics, not exact request token accounting.
+    fn needs_compaction(&self, _history: &super::MessageHistory, _session_id: &str) -> bool {
+        true
+    }
 
     /// Chooses a safe replacement for completed history using the upcoming request context.
     /// `ctx` provides runtime dependencies; external writes are not atomic with history replacement.
@@ -104,6 +112,7 @@ pub trait Compactor: Send + Sync {
 
 #[async_trait]
 pub(crate) trait DynCompactor: Send + Sync {
+    fn needs_compaction_dyn(&self, history: &super::MessageHistory, session_id: &str) -> bool;
     async fn compact_dyn(
         &self,
         request: CompactionRequest<'_>,
@@ -113,6 +122,9 @@ pub(crate) trait DynCompactor: Send + Sync {
 
 #[async_trait]
 impl<T: Compactor> DynCompactor for T {
+    fn needs_compaction_dyn(&self, history: &super::MessageHistory, session_id: &str) -> bool {
+        self.needs_compaction(history, session_id)
+    }
     /// Forwards request dependencies and retains the application's error as its source.
     async fn compact_dyn(
         &self,

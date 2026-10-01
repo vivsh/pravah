@@ -9,7 +9,7 @@ async fn control(_: AgentLoop<String>, _: Context) -> Result<AgentDecision, Grap
 async fn configured(memory: String) -> Result<Chat<String, String>, GraphError> {
     let mut chat = builder().control(control).build(Context::default())?;
     chat.submit(ChatRequest::from("question").memory(memory))?;
-    for _ in 0..2 {
+    for _ in 0..1 {
         loop {
             match chat.next()? {
                 ChatStep::Continue => {}

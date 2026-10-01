@@ -34,11 +34,23 @@ async fn failed_preparation_preserves_history_and_pending_request() -> Result<()
             .compactor(InvalidPolicy(mode))
             .build(context(&calls))?;
         chat.submit_with_key("protected", "key")?;
-        let fetch = preparation::pending(&mut chat).await?;
+        loop {
+            if !chat.snapshot()?.history().entries().is_empty() {
+                break;
+            }
+            match chat.next()? {
+                ChatStep::Continue => {}
+                ChatStep::Fetch(fetch) => {
+                    let response = chat.executor().execute(&fetch).await?;
+                    chat.resume_fetch(fetch.id(), Ok(response))?;
+                }
+                _ => return Err(codec("expected activation")),
+            }
+        }
         let before = serde_json::to_value(chat.snapshot()?).map_err(codec)?;
         for _ in 0..2 {
-            assert!(chat.executor().execute(&fetch).await.is_err());
-            assert_eq!(chat.pending_fetch().map(Fetch::id), Some(fetch.id()));
+            assert!(chat.maintain().await.is_err());
+            assert!(chat.pending_fetch().is_none());
             assert_eq!(
                 serde_json::to_value(chat.snapshot()?).map_err(codec)?,
                 before

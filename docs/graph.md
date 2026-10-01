@@ -72,7 +72,7 @@ let executor = flow.prepared().executor(ctx);
 ```
 
 Install runtime-only client and MCP registrations on `Context` again during
-restoration. Reattach history stores and compactors to the executor when used.
+restoration. Reattach a fresh `HistoryManager` for stores and compactors when used.
 Live clients and service handles are absent from snapshots, but supplied request
 data can contain credentials or other sensitive content; secure its storage.
 Resolved agent configuration, memory, selected tools,
@@ -146,23 +146,23 @@ tool-call IDs, or automatic deduplication identifiers. This also works with
 [Chat](chat.md#application-message-keys).
 
 History entries have stable positions. `HistoryStore` implementations must
-treat a repeated position as an idempotent replay so a partially persisted
+deduplicate repeated entry IDs so a partially persisted
 batch can be retried safely.
 
-Import `HistoryStore`, `Compactor`, `CompactionRequest`, `HistoryEntry`, and
+Import `HistoryManager`, `HistoryStore`, `Compactor`, `CompactionRequest`, `HistoryEntry`, and
 `CompactionResult` directly from `pravah`. The same types are available under
 `pravah::history` for applications that prefer an explicit module path.
 
-Use `FetchExecutor::with_compactor` to prepare summary-based working memory
-before each model execution. `compact(&self, request, ctx)` receives the bound
-execution `Context` for application dependencies, effective request options and
-framework guidance, along with separate committed and protected history views.
-Replacement is validated and applied atomically; the current user/tool exchange
-cannot be evicted. Successfully replaced rows are physically removed from
-snapshots without resetting usage counters or changing retained identities.
-Policy errors prevent model execution. The policy is never run after final
-output and must be reattached after restore. See the [chat guide](chat.md#history-persistence-and-working-memory)
-for decisions, error handling, audit-store semantics, and sizing limitations.
+Use `HistoryManager::new().with_store(store).with_compactor(policy)` outside the
+VM. Call `manager.maintain(&mut execution, ctx.clone()).await?` before stepping
+and after completion. It persists original messages before any compaction.
+Without a manager, history accumulates in runtime and snapshots without trimming.
+
+The policy receives effective request options, framework guidance, and separate
+committed/protected history views at an upcoming agent dispatch. Current input
+and tool groups are protected. Invalid replacements leave history unchanged.
+After a maintenance failure, retry maintenance without redispatching a completed
+Fetch. See the [history guide](history.md) for the explicit execution loop.
 
 ## Legacy API
 

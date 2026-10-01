@@ -1,5 +1,23 @@
 use crate::graph::{FetchExecutor, GraphError, Runtime, Step};
 
+/// Keeps maintenance external while preserving the unit-test host's single-observation stepping.
+pub(crate) async fn step_with_manager(
+    runtime: &mut Runtime,
+    executor: &FetchExecutor,
+    manager: &mut crate::HistoryManager,
+) -> Result<Step, GraphError> {
+    manager
+        .maintain(runtime, executor.context().clone())
+        .await?;
+    let outcome = step(runtime, executor).await?;
+    if matches!(outcome, Step::Done(_)) {
+        manager
+            .maintain(runtime, executor.context().clone())
+            .await?;
+    }
+    Ok(outcome)
+}
+
 /// Executes external requests locally until the next VM-only observation.
 /// A failed executor call remains pending; the test chooses whether to retry it.
 pub(crate) async fn step(

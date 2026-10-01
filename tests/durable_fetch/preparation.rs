@@ -1,6 +1,6 @@
 use super::*;
 use pravah::clients::Attachment;
-use pravah::graph::{FetchBody, fetch::rath::RathRequest, from_value};
+use pravah::graph::{FetchBody, fetch::rath::RathRequest};
 use pravah::{Agent, AgentConfig, ChatRequest};
 
 fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, GraphError> {
@@ -21,7 +21,12 @@ pub(super) async fn pending(chat: &mut Chat<String, String>) -> Result<Fetch, Gr
     loop {
         match chat.next()? {
             ChatStep::Continue => {}
-            ChatStep::Fetch(fetch) if fetch.request().url() == "pravah://prepare" => {
+            ChatStep::Fetch(fetch)
+                if matches!(
+                    fetch.request().url(),
+                    "pravah://agent-prepare" | "rath://generate"
+                ) =>
+            {
                 return Ok(fetch);
             }
             ChatStep::Fetch(fetch) => {
@@ -31,11 +36,6 @@ pub(super) async fn pending(chat: &mut Chat<String, String>) -> Result<Fetch, Gr
             _ => return Err(GraphError::Invalid("expected preparation".into())),
         }
     }
-}
-
-fn generation(response: &FetchResponse) -> Result<&Value, GraphError> {
-    let request = field(body(response.body_ref())?, "generation")?;
-    field(field(request, "body")?, "data")
 }
 
 /// Preparation shares options and retained messages while preserving the ordinary Rath wire shape.
@@ -50,14 +50,13 @@ async fn preparation_shares_validated_messages_and_options() -> Result<(), Graph
     )?;
     let fetch = pending(&mut chat).await?;
     let source = body(fetch.request().body_ref())?;
-    let reply = chat.executor().execute(&fetch).await?;
-    let generation = generation(&reply)?;
-    let old_options = field(field(source, "request")?, "options")?;
+    let generation = source;
+    let old_options = field(source, "options")?;
     assert!(std::ptr::eq(
         field(old_options, "preamble")?,
         field(field(generation, "options")?, "preamble")?
     ));
-    let entries = field(source, "entries")?
+    let entries = field(source, "messages")?
         .as_array()
         .ok_or_else(|| codec("entries"))?;
     let messages = field(generation, "messages")?
@@ -66,12 +65,11 @@ async fn preparation_shares_validated_messages_and_options() -> Result<(), Graph
     assert_eq!(entries.len(), messages.len());
     for (entry, message) in entries.iter().zip(messages) {
         assert!(std::ptr::eq(
-            field(field(entry, "message")?, "content")?,
+            field(entry, "content")?,
             field(message, "content")?
         ));
     }
-    let encoded = field(body(reply.body_ref())?, "generation")?.clone();
-    let request: FetchRequest = from_value(encoded).map_err(codec)?;
+    let request = fetch.request().clone();
     let decoded = RathRequest::from_fetch_request(&request)?;
     let normal = RathRequest::new(
         decoded.model(),
@@ -112,7 +110,7 @@ async fn configure_attachments(path: String, _: Context) -> Result<AgentConfig, 
             path,
         },
     ];
-    Ok(AgentConfig::new("openai:///test", "test", message).keep_alive())
+    Ok(AgentConfig::new("openai:///test", "test", message).key("conversation"))
 }
 
 /// Files materialize once; restored generation retains frozen bytes and original history metadata.

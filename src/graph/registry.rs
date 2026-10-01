@@ -3,61 +3,12 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::history::{
-    CompactionResult, Compactor, DynCompactor, DynHistoryStore, HistoryEntry, HistoryStore,
-    MessageHistory, NoopHistoryStore,
-};
+use crate::history::{CompactionResult, HistoryEntry, MessageHistory};
 
 use super::error::GraphError;
 use super::ids::{EdgeId, HandlerKey};
 use super::model::TypeSpec;
 use super::value::Value;
-
-#[derive(Clone)]
-/// External executor service bundle for history persistence and preparation.
-///
-/// Configure history behavior through `FetchExecutor::with_compactor` and
-/// `FetchExecutor::with_store`; snapshots never contain these services.
-pub struct RuntimeServices {
-    compactor: Option<Arc<dyn DynCompactor>>,
-    store: Arc<dyn DynHistoryStore>,
-}
-
-impl Default for RuntimeServices {
-    fn default() -> Self {
-        Self {
-            compactor: None,
-            store: Arc::new(NoopHistoryStore),
-        }
-    }
-}
-
-impl RuntimeServices {
-    /// Creates services without a preparation policy and with a no-op history store.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Installs the fallible policy run before each model execution, never after output.
-    pub fn with_compactor(mut self, compactor: impl Compactor + 'static) -> Self {
-        self.compactor = Some(Arc::new(compactor));
-        self
-    }
-
-    /// Replaces the history store used to record appended history entries.
-    pub fn with_store(mut self, store: impl HistoryStore + 'static) -> Self {
-        self.store = Arc::new(store);
-        self
-    }
-
-    pub(crate) fn store(&self) -> &dyn DynHistoryStore {
-        self.store.as_ref()
-    }
-
-    pub(crate) fn compactor(&self) -> Option<&dyn DynCompactor> {
-        self.compactor.as_deref()
-    }
-}
 
 /// Immutable execution information supplied to a synchronous continuation.
 #[derive(Clone, Copy)]

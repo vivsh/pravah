@@ -68,6 +68,10 @@ application state have fixed Rust types; model responses are decoded into
 For a text-only conversation, use `Chat::builder::<String, String>()` and
 `chat.send("Hello").await?`.
 
+In composed workflows, give an agent an `AgentConfig::key(...)` to share one
+conversation across steps and child flows. Chat supplies its own stable key by
+default; conversation history remains part of its checkpoint.
+
 These snippets run inside an async function returning a compatible `Result`.
 Configure provider credentials before sending; see [client setup](docs/clients.md).
 For a complete example that needs no provider credentials, see the
@@ -227,7 +231,7 @@ should be idempotent or deduplicated as appropriate.
 
 ```toml
 [dependencies]
-pravah = "0.4.19"
+pravah = "0.4.20"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 ```

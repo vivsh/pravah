@@ -12,7 +12,7 @@ async fn configure(input: String, _ctx: Context) -> Result<AgentConfig, GraphErr
         "Answer briefly.",
         Message::user(input).with_key("configured"),
     )
-    .keep_alive())
+    .key("conversation"))
 }
 
 /// Explicit keys override function configuration for one submission, not later turns.

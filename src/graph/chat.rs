@@ -5,7 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::{Fetch, FetchError, FetchExecutor, FetchResponse};
 use crate::Context;
-use crate::history::{Compactor, HistoryStore};
+use crate::history::{Compactor, HistoryManager, HistoryStore};
 use uuid::Uuid;
 
 use super::agent::Agent;
@@ -39,8 +39,8 @@ impl<O> ChatTurn<O> {
 
 /// Typed conversation and application state backed by one graph runtime.
 ///
-/// Builder chats always retain history; function-defined agents must enable
-/// `keep_alive`. Application state persists independently and is never added to prompts.
+/// Chats retain one conversation using an explicit configuration key or a default
+/// derived from their execution UUID. Application state is never added to prompts.
 ///
 /// Inputs cannot bypass the chat's fixed type, even through a request envelope:
 /// ```compile_fail
@@ -58,6 +58,7 @@ impl<O> ChatTurn<O> {
 pub struct Chat<I, O, S = ()> {
     runtime: Runtime,
     executor: FetchExecutor,
+    history_manager: Option<HistoryManager>,
     state_var: VarId,
     input_boundaries: [NodeId; 2],
     _marker: PhantomData<fn(I, S) -> O>,
@@ -110,6 +111,7 @@ where
         Ok(Self {
             runtime,
             executor,
+            history_manager: None,
             state_var,
             input_boundaries,
             _marker: PhantomData,
@@ -140,6 +142,7 @@ where
         let chat = Self {
             runtime,
             executor,
+            history_manager: None,
             state_var,
             input_boundaries,
             _marker: PhantomData,
@@ -175,13 +178,17 @@ where
 
     /// Sets the fallible pre-request history policy; reattach it after snapshot restore.
     pub fn with_compactor(mut self, compactor: impl Compactor + 'static) -> Self {
-        self.executor = self.executor.with_compactor(compactor);
+        self.history_manager = Some(
+            self.history_manager
+                .unwrap_or_default()
+                .with_compactor(compactor),
+        );
         self
     }
 
     /// Replaces the history store used to record chat messages.
     pub fn with_store(mut self, store: impl HistoryStore + 'static) -> Self {
-        self.executor = self.executor.with_store(store);
+        self.history_manager = Some(self.history_manager.unwrap_or_default().with_store(store));
         self
     }
 
@@ -271,6 +278,24 @@ where
         &self.executor
     }
 
+    /// Installs caller-owned maintenance dependencies; reattach after restoration.
+    pub fn with_history_manager(mut self, manager: HistoryManager) -> Self {
+        self.history_manager = Some(manager);
+        self
+    }
+
+    /// Persists committed messages and optionally prepares history before the next step.
+    /// Manual Chat driving must call this explicitly; send calls it automatically.
+    /// Errors leave the VM retryable; retry maintenance without resubmitting input.
+    pub async fn maintain(&mut self) -> Result<(), GraphError> {
+        if let Some(manager) = &mut self.history_manager {
+            manager
+                .maintain(&mut self.runtime, self.executor.context().clone())
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Borrows the pending request, preserving its original durable identity.
     pub fn pending_fetch(&self) -> Option<&Fetch> {
         self.runtime.pending_fetch()
@@ -294,6 +319,7 @@ where
     /// their portable outcome is already recorded for subsequent steps or restoration.
     async fn finish_send(&mut self) -> Result<ChatTurn<O>, GraphError> {
         loop {
+            self.maintain().await?;
             match self.next()? {
                 ChatStep::Continue => {}
                 ChatStep::Fetch(fetch) => match self.executor.execute(&fetch).await {
@@ -315,7 +341,10 @@ where
                     }
                 },
                 ChatStep::Suspend(_) => return Err(GraphError::ChatSuspended),
-                ChatStep::Done(turn) => return Ok(turn),
+                ChatStep::Done(turn) => {
+                    self.maintain().await?;
+                    return Ok(turn);
+                }
             }
         }
     }

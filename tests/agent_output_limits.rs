@@ -129,20 +129,6 @@ impl Compactor for ObserveCap {
     }
 }
 
-/// Bounds deterministic test execution without hiding unexpected suspension.
-async fn finish(runtime: &mut Runtime, executor: &FetchExecutor) -> Result<(), TestError> {
-    for _ in 0..50 {
-        match host::step(runtime, executor).await? {
-            Step::Continue => {}
-            Step::Done(_) => return Ok(()),
-            Step::Fetch(_) | Step::Suspend(_) => {
-                return Err(TestError::Missing("unexpected suspension"));
-            }
-        }
-    }
-    Err(TestError::Missing("execution did not complete"))
-}
-
 /// Finds the serialized agent checkpoint without depending on compiled frame indices.
 fn checkpoint_mut(snapshot: &mut Value) -> Result<&mut Value, TestError> {
     let frames = snapshot
@@ -198,13 +184,11 @@ async fn request_cap_is_optional_and_visible_to_preparation() -> Result<(), Test
     for cap in [None, Some(2048), Some(u32::MAX)] {
         let script = ScriptedFactory::new().then_output(json!("answer"));
         let calls = Arc::new(AtomicUsize::new(0));
-        let executor = flow
-            .prepared()
-            .executor(context(script.clone(), cap)?)
-            .with_compactor(ObserveCap {
-                calls: calls.clone(),
-                cap,
-            });
+        let executor = flow.prepared().executor(context(script.clone(), cap)?);
+        let mut manager = pravah::HistoryManager::new().with_compactor(ObserveCap {
+            calls: calls.clone(),
+            cap,
+        });
         let mut runtime = flow.start(
             Request {
                 cap,
@@ -212,7 +196,7 @@ async fn request_cap_is_optional_and_visible_to_preparation() -> Result<(), Test
             },
             uuid::Uuid::nil(),
         )?;
-        finish(&mut runtime, &executor).await?;
+        host::finish_with_manager(&mut runtime, &executor, &mut manager).await?;
         assert_eq!(script.calls().len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -234,11 +218,11 @@ async fn tool_loops_and_forced_conclusion_keep_the_cap() -> Result<(), TestError
         let calls = Arc::new(AtomicUsize::new(0));
         let executor = flow
             .prepared()
-            .executor(context(script.clone(), Some(2048))?)
-            .with_compactor(ObserveCap {
-                calls: calls.clone(),
-                cap: Some(2048),
-            });
+            .executor(context(script.clone(), Some(2048))?);
+        let mut manager = pravah::HistoryManager::new().with_compactor(ObserveCap {
+            calls: calls.clone(),
+            cap: Some(2048),
+        });
         let mut runtime = flow.start(
             Request {
                 turns,
@@ -246,7 +230,7 @@ async fn tool_loops_and_forced_conclusion_keep_the_cap() -> Result<(), TestError
             },
             uuid::Uuid::nil(),
         )?;
-        finish(&mut runtime, &executor).await?;
+        host::finish_with_manager(&mut runtime, &executor, &mut manager).await?;
         assert_eq!(script.calls().len(), 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }

@@ -4,7 +4,6 @@ use crate::clients::{
     Message, ModelUrl, Provider, ProviderFactory, ProviderRegistry,
 };
 use crate::graph::FetchError;
-use crate::history::{CompactionRequest, CompactionResult, Compactor, HistoryEntry, HistoryStore};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use uuid::Uuid;
 
@@ -168,100 +167,19 @@ async fn graph_free_worker_executes_serialized_fetch() -> Result<(), GraphError>
     Ok(())
 }
 
-struct CountingCompactor(Arc<AtomicUsize>);
-
-impl Compactor for CountingCompactor {
-    type Error = std::convert::Infallible;
-
-    async fn compact(
-        &self,
-        request: CompactionRequest<'_>,
-        _context: Context,
-    ) -> Result<CompactionResult, Self::Error> {
-        assert_eq!(request.session_id(), "session");
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(CompactionResult::default())
-    }
-}
-
-struct CountingStore(Arc<AtomicUsize>);
-
-impl HistoryStore for CountingStore {
-    type Error = std::convert::Infallible;
-
-    async fn record(&self, entry: &HistoryEntry) -> Result<(), Self::Error> {
-        assert_eq!(entry.position, 0);
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
-/// Builds a provider-backed preparation hook without any graph state.
-fn preparation_fetch() -> Result<Fetch, GraphError> {
-    let request = RathRequest::new(
-        "openai:///recorded?temperature=0.2",
-        ClientOptions::default(),
-        Vec::new(),
-    );
-    let body = crate::graph::to_value(serde_json::json!({
-        "version": 1,
-        "session": "session",
-        "execution": Uuid::from_u128(4),
-        "request": request,
-        "entries": [],
-        "guidance": [],
-        "budget_conclusion": false,
-    }))
-    .map_err(|error| GraphError::FetchValidation(error.to_string()))?;
-    Ok(Fetch::new(
-        Uuid::from_u128(5),
-        Arc::new(
-            super::super::FetchRequest::new("POST", "pravah://prepare")
-                .body(FetchBody::Value(body)),
-        ),
-    ))
-}
-
-/// Builds a history acknowledgement hook using a fixed, reproducible entry ID.
-fn history_fetch() -> Result<Fetch, GraphError> {
-    let entry = HistoryEntry {
-        id: Uuid::from_u128(6),
-        position: 0,
-        session_id: "session".into(),
-        agent_id: "agent".into(),
-        evicted: false,
-        message: Message::user("input"),
-    };
-    let body = crate::graph::to_value(serde_json::json!({
-        "version": 1,
-        "entries": [entry],
-    }))
-    .map_err(|error| GraphError::FetchValidation(error.to_string()))?;
-    Ok(Fetch::new(
-        Uuid::from_u128(7),
-        Arc::new(
-            super::super::FetchRequest::new("POST", "pravah://history")
-                .body(FetchBody::Value(body)),
-        ),
-    ))
-}
-
-/// Framework preparation and persistence use worker-installed services without a graph.
+/// Removed history hooks are rejected; the external dispatcher never owns maintenance.
 #[tokio::test]
-async fn graph_free_worker_uses_history_services() -> Result<(), GraphError> {
-    let factory_calls = Arc::new(AtomicUsize::new(0));
-    let compactor_calls = Arc::new(AtomicUsize::new(0));
-    let store_calls = Arc::new(AtomicUsize::new(0));
-    let context = Context::default().with_providers(ProviderRegistry::with_builtin_factory(
-        Factory(factory_calls.clone()),
-    ));
-    let executor = FetchExecutor::new(context)
-        .with_compactor(CountingCompactor(compactor_calls.clone()))
-        .with_store(CountingStore(store_calls.clone()));
-    assert_eq!(executor.execute(&preparation_fetch()?).await?.status(), 200);
-    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(compactor_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(executor.execute(&history_fetch()?).await?.status(), 200);
-    assert_eq!(store_calls.load(Ordering::SeqCst), 1);
+async fn history_hooks_are_not_executable() -> Result<(), GraphError> {
+    let executor = FetchExecutor::new(Context::default());
+    for url in ["pravah://history", "pravah://prepare"] {
+        let fetch = Fetch::new(
+            Uuid::nil(),
+            Arc::new(crate::graph::FetchRequest::new("POST", url)),
+        );
+        assert!(matches!(
+            executor.execute(&fetch).await,
+            Err(GraphError::FetchValidation(_))
+        ));
+    }
     Ok(())
 }

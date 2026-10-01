@@ -86,6 +86,10 @@ pub enum GraphError {
     #[error("history persistence failed: {0}")]
     HistoryPersistence(String),
 
+    /// History supplied to a fresh execution has invalid identities or message groups.
+    #[error("history validation failed: {0}")]
+    HistoryValidation(String),
+
     /// An application could not prepare working memory for the upcoming request.
     #[error("history compaction failed for '{session_id}': {source}")]
     HistoryCompaction {
@@ -112,6 +116,10 @@ pub enum GraphError {
     /// An agent returned an invalid resolved configuration.
     #[error("agent configuration is invalid: {0}")]
     AgentConfigValidation(String),
+
+    /// A keyed conversation already contains an unfinished user/tool exchange.
+    #[error("agent conversation is already active")]
+    AgentConversationBusy,
 
     /// An agent's intervention controller could not evaluate a boundary.
     #[error("agent control failed for '{agent}': {reason}")]

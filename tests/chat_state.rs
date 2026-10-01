@@ -44,7 +44,7 @@ async fn configure(input: String, ctx: Context) -> Result<AgentConfig, GraphErro
     if let Some(calls) = ctx.deps().get::<std::sync::atomic::AtomicUsize>() {
         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
-    Ok(AgentConfig::new("test:///test", "Answer.", Message::user(input)).keep_alive())
+    Ok(AgentConfig::new("test:///test", "Answer.", Message::user(input)).key("conversation"))
 }
 
 /// Makes codec round trips usable for pristine, idle and unfinished executions.

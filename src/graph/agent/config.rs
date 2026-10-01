@@ -176,7 +176,7 @@ pub struct AgentConfig {
     pub(crate) memory: Option<String>,
     pub(crate) provider_config: Option<JsonValue>,
     pub(crate) max_output_tokens: Option<u32>,
-    pub(crate) keep_alive: bool,
+    pub(crate) key: Option<String>,
     pub(crate) tool_filter: ToolFilter,
     pub(crate) resources: Vec<McpResourceRef>,
     pub(crate) turn_budget: Option<u32>,
@@ -204,7 +204,7 @@ impl AgentConfig {
             memory: None,
             provider_config: None,
             max_output_tokens: None,
-            keep_alive: false,
+            key: None,
             tool_filter: ToolFilter::all(),
             resources: Vec::new(),
             turn_budget: None,
@@ -243,9 +243,13 @@ impl AgentConfig {
         self
     }
 
-    /// Keeps one agent session across repeated invocation of this graph node.
-    pub fn keep_alive(mut self) -> Self {
-        self.keep_alive = true;
+    /// Selects a conversation shared across invocations and child flows in this runtime.
+    ///
+    /// The key must contain non-whitespace text and is preserved exactly. Omission
+    /// creates a fresh conversation. Select a distinct key for each user/thread;
+    /// this is independent of the initial message's correlation key.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
         self
     }
 
@@ -305,7 +309,6 @@ pub(crate) struct ResolvedAgentConfig {
     pub provider_config: Option<JsonValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
-    pub keep_alive: bool,
     pub tools: Vec<String>,
     pub resources: Vec<ResolvedResource>,
 }

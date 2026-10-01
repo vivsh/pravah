@@ -876,6 +876,24 @@ where
         self.prepared.start(input, execution_id)
     }
 
+    /// Starts a new execution with completed history owned by the returned runtime.
+    /// Configuration keys select imported sessions; this neither restores nor replays old work.
+    /// Supply a fresh execution UUID, not the imported execution's identity.
+    /// Typed input conversion and history validation fail before execution begins.
+    pub fn start_with_history(
+        &self,
+        input: I,
+        execution_id: Uuid,
+        history: crate::history::MessageHistory,
+    ) -> Result<Runtime, GraphError> {
+        let input = to_value(input).map_err(|error| GraphError::ValueConversion {
+            target: "workflow input".into(),
+            reason: error.to_string(),
+        })?;
+        self.prepared
+            .start_with_history(input, execution_id, history)
+    }
+
     /// Restores an execution without calling handlers or attaching runtime services.
     ///
     /// Fails when the snapshot version, graph fingerprint, or VM state is

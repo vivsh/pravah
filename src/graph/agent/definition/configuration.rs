@@ -114,7 +114,7 @@ where
 {
     AgentConfigurator {
         data: Some(contract),
-        call: Arc::new(move |input, data, ctx| {
+        call: Arc::new(move |input, data, _, ctx| {
             let instructions = instructions.clone();
             async move {
                 let input = from_value(input)

@@ -11,14 +11,6 @@ pub(crate) struct ValidatedCompactionResult {
 }
 
 impl ValidatedCompactionResult {
-    pub(crate) fn summary_message(&self) -> Option<&Message> {
-        self.summary.as_ref().map(|entry| &entry.message)
-    }
-
-    pub(crate) fn removed_count(&self) -> usize {
-        self.remove_ids.len()
-    }
-
     /// Updates an operation-local borrowed preview without copying any retained message.
     pub(crate) fn preview<'a>(&'a self, session: &str, entries: &mut Vec<&'a HistoryEntry>) {
         let insert_at = entries.iter().position(|entry| entry.session_id == session);

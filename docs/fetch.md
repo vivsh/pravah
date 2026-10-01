@@ -42,16 +42,14 @@ response and failure round trip without network access.
 For a worker that has a persisted Fetch but no graph, construct an executor once
 with `FetchExecutor::new(ctx)` and call `executor.execute(&fetch).await`. This
 supports HTTP and Rath requests; register application schemes on the executor
-when needed. Framework preparation and history hooks can use an installed
-compactor or store. Install a history store when durable history delivery is
-required; the default store acknowledges without persisting entries.
+when needed. Persistence and compaction are not Fetch operations; use a caller-owned
+`HistoryManager` as described in the [history guide](history.md).
 
 Agent and tool hooks need their matching Rust handlers. Install an
 `Arc<HandlerRegistry>` with `.with_registry(registry)`, or obtain an executor
 from `workflow.prepared().executor(ctx)` before releasing the workflow. The
 executor can then run independently of the graph or VM. Missing handlers and
-unknown schemes fail explicitly. The executor owns runtime services; the VM
-does not.
+unknown schemes fail explicitly. The executor owns execution dependencies, never history or maintenance state.
 
 To select a Rath LLM work lane before execution, decode
 `pravah::graph::fetch::rath::RathRequest::from_fetch_request(fetch.request())`

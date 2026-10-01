@@ -6,12 +6,15 @@ impl<T> Agent<T> {
     pub(crate) fn for_chat(mut self) -> Self {
         if let Some(configure) = self.definition.configure.as_mut() {
             let original = Arc::clone(&configure.call);
-            configure.call = Arc::new(move |value, data, ctx| {
+            configure.call = Arc::new(move |value, data, execution_id, ctx| {
                 let original = Arc::clone(&original);
                 async move {
                     let request = ChatRequest::decode(&value)
                         .map_err(|e| GraphError::AgentConfigValidation(e.to_string()))?;
-                    let mut config = original(request.input, data, ctx).await?;
+                    let mut config = original(request.input, data, execution_id, ctx).await?;
+                    if config.key.is_none() {
+                        config.key = Some(execution_id.to_string());
+                    }
                     if let Some(memory) = request.memory {
                         config.memory = Some(memory);
                     }

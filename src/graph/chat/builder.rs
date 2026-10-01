@@ -1,7 +1,7 @@
 use super::Chat;
 use super::request::validate_resources;
+use crate::HistoryManager;
 use crate::clients::Message;
-use crate::graph::RuntimeServices;
 use crate::graph::agent::{RequestedToolBudget, agent_tool_identity};
 use crate::{
     Agent, AgentConfig, AgentDecision, AgentLoop, Compactor, Context, GraphError, HistoryStore,
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
 use std::{error::Error, future::Future, marker::PhantomData};
 
-/// Builds a graph-backed, keep-alive Chat without an application configure callback.
+/// Builds a graph-backed Chat retaining one keyed conversation without a configure callback.
 /// All settings except instructions are graph data and must match when restoring.
 /// New instructions apply only when an invocation has not committed configuration.
 pub struct ChatBuilder<I, O, S = ()> {
@@ -21,13 +21,14 @@ pub struct ChatBuilder<I, O, S = ()> {
     agent: Agent<I>,
     errors: Vec<String>,
     state: S,
-    services: Option<RuntimeServices>,
+    services: Option<HistoryManager>,
     _marker: PhantomData<fn() -> O>,
 }
 
 /// Immutable definition data, decoded only when an invocation configures its agent.
 #[derive(Default, Serialize, Deserialize, JsonSchema)]
 struct ChatSettings {
+    key: Option<String>,
     model: String,
     provider_config: Option<JsonValue>,
     max_output_tokens: Option<u32>,
@@ -37,7 +38,7 @@ struct ChatSettings {
 }
 
 impl Chat<(), ()> {
-    /// Starts a keep-alive Chat with fixed input `I` rendered as JSON and output `O`.
+    /// Starts a conversation with fixed input `I` rendered as JSON and output `O`.
     pub fn builder<I, O>() -> ChatBuilder<I, O> {
         ChatBuilder {
             settings: ChatSettings::default(),
@@ -52,6 +53,18 @@ impl Chat<(), ()> {
 }
 
 impl<I, O, S> ChatBuilder<I, O, S> {
+    /// Installs caller-owned history maintenance, replacing earlier store/policy settings.
+    /// The manager is runtime-only and must be supplied again after restoration.
+    pub fn history_manager(mut self, manager: HistoryManager) -> Self {
+        self.services = Some(manager);
+        self
+    }
+    /// Selects this Chat's conversation key, replacing any earlier value.
+    /// Empty keys fail at build/restore; omission derives an isolated key from the execution UUID.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.settings.key = Some(key.into());
+        self
+    }
     /// Sets initial application state for a new chat, replacing any previous value or state type.
     /// State is converted only at build and lives exclusively in the runtime afterward.
     pub fn state<T>(self, state: T) -> ChatBuilder<I, O, T> {
@@ -196,6 +209,13 @@ where
     if settings.model.trim().is_empty() {
         errors.push("model must not be empty".into());
     }
+    if settings
+        .key
+        .as_ref()
+        .is_some_and(|key| key.trim().is_empty())
+    {
+        errors.push("conversation key must not be empty".into());
+    }
     if settings.max_output_tokens == Some(0) {
         errors.push("max output tokens must be positive".into());
     }
@@ -215,10 +235,10 @@ where
 
 fn attach_services<I, O, S>(
     mut chat: Chat<I, O, S>,
-    services: Option<RuntimeServices>,
+    services: Option<HistoryManager>,
 ) -> Chat<I, O, S> {
     if let Some(services) = services {
-        chat.executor = chat.executor.with_services(services);
+        chat.history_manager = Some(services);
     }
     chat
 }
@@ -243,7 +263,8 @@ async fn configure_chat<I: Serialize>(
         reason: error.to_string(),
     })?;
     let message = Message::user(content);
-    let mut config = AgentConfig::new(settings.model, instructions, message).keep_alive();
+    let mut config = AgentConfig::new(settings.model, instructions, message);
+    config.key = settings.key;
     config.provider_config = settings.provider_config;
     config.max_output_tokens = settings.max_output_tokens;
     config.turn_budget = settings.turn_budget;

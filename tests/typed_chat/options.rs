@@ -35,7 +35,7 @@ async fn configure(input: Question, _: Context) -> Result<AgentConfig, GraphErro
     )
     .memory("configured-memory")
     .tool_filter(ToolFilter::only(Vec::<String>::new()))
-    .keep_alive())
+    .key("conversation"))
 }
 
 fn question() -> Question {

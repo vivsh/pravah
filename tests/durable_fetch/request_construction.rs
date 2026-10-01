@@ -65,12 +65,12 @@ async fn generation_construction_shares_immutable_values() -> Result<(), GraphEr
         runtime.resume_fetch(configure.id(), Ok(configured))?;
         let preparation = loop {
             let fetch = next_fetch(&mut runtime)?;
-            if fetch.request().url() == "pravah://prepare" {
+            if fetch.request().url() == "rath://generate" {
                 break fetch;
             }
             runtime.resume_fetch(fetch.id(), Ok(executor.execute(&fetch).await?))?;
         };
-        let request = field(body(preparation.request().body_ref())?, "request")?;
+        let request = body(preparation.request().body_ref())?;
         check_request(request, &payload, &resolved, memory)?;
     }
     Ok(())
@@ -115,7 +115,11 @@ fn check_request(
         .with_tool_choice(ToolChoice::Auto)
         .with_max_output_tokens(123)
         .with_provider_config(from_value::<serde_json::Value>(provider.clone()).map_err(codec)?);
-    let expected = RathRequest::new("openai:///recorded", expected, Vec::new());
+    let expected = RathRequest::new(
+        "openai:///recorded",
+        expected,
+        vec![Message::user("question")],
+    );
     assert_eq!(request, &pravah::graph::to_value(expected).map_err(codec)?);
     Ok(())
 }

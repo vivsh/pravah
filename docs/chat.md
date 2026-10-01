@@ -142,16 +142,18 @@ async fn configure_tutor(
         "openai:///gpt-5",
         "You are a concise Rust tutor.",
         Message::user(question.text),
-    )
-    .keep_alive())
+    ))
 }
 
 let mut chat = Chat::new(tutor, Context::default())?;
 ```
 
 `Question` and `Answer` are application types implementing `Serialize`,
-`DeserializeOwned`, and `JsonSchema`. Enable `keep_alive` when later calls to
-`send` should retain the same model-visible conversation.
+`DeserializeOwned`, and `JsonSchema`. Chat automatically retains the same
+model-visible conversation across sends. By default its conversation key is
+derived from the Chat's execution UUID and survives restoration. To choose an
+application identity, use `.key("customer/42")` on a builder or `AgentConfig`.
+These conversation keys are separate from per-message keys.
 
 The configuration function runs for each new chat input. It may select the
 model, instructions, initial user message, memory, tools, resources, and
@@ -210,7 +212,7 @@ previous state unchanged. Only explicit state access performs typed conversion.
 
 State is included in the same `Snapshot` as execution and conversation history;
 no separate state record is needed. Persist the complete snapshot together.
-It is independent of `keep_alive`, history summaries, and `AgentConfig::memory`.
+It is independent of conversation keys, history summaries, and `AgentConfig::memory`.
 Agents and tools cannot implicitly read or mutate it. Include relevant fields
 explicitly in a message input when the model needs them; state is not
 automatically placed in prompts or conversation history.
@@ -281,7 +283,6 @@ async fn configure_support(
         "Resolve the request using only relevant account information.",
         Message::user(question.text),
     )
-    .keep_alive()
     .turn_budget(6)
     .tool_budget::<FindAccount>(2))
 }
@@ -309,9 +310,9 @@ application services are not serialized; bind them through the restoration
 `Context` or the service setters before continuing.
 
 For stateful chats, specify the same state type during restoration. Two-argument
-`Chat::<_, _>` selects unit state. Snapshot formats are unchanged, but snapshots
-from the older lazy-construction chat graph have a different fingerprint and
-cannot be restored into this API. Drain those chats or retain their matching runtime.
+`Chat::<_, _>` selects unit state. Older keep-alive snapshots are rejected: the
+current API uses keyed conversations rather than per-node saved sessions. Retain
+the matching older runtime to finish them; there is no automatic migration.
 
 ## History Persistence And Working Memory
 
@@ -339,9 +340,17 @@ let restored = Chat::<_, _>::from_snapshot(tutor, snapshot, restored_ctx)?
 The persistence and preparation contracts are part of Pravah's modern root API;
 applications do not need to import `pravah::legacy` to implement them.
 
-Pravah records staged history before committing it to runtime history. A store
-may observe a successfully written prefix if a later write fails, so stores
-should deduplicate retries by stable history position.
+The synchronous runtime commits messages as execution progresses. Chat then
+uses its optional `HistoryManager` to persist original entries before pruning.
+Stores must deduplicate redelivery by stable entry ID, including after restoration.
+A persistence failure retains committed messages and model progress; call
+`chat.maintain().await?` to retry maintenance without another model call.
+
+Manual `submit/next/resume_fetch` usage requires explicit `chat.maintain().await?`
+before stepping and after completion. Async `send` handles maintenance automatically.
+Builder `.store(...)` and `.compactor(...)` configure the same manager; alternatively
+supply `.history_manager(manager)` before `.build(ctx)?`.
+Without a manager, messages remain in snapshots and history grows without trimming.
 
 Implement `Compactor::compact(&self, request, ctx)` to return
 `Result<CompactionResult, YourError>`. The owned `Context` is a shared clone of
@@ -368,7 +377,7 @@ exclude framework summaries and tool messages while preserving original indices.
 Use the summary as prior context, not new conversation evidence. Replacement
 indices must still cover the full prefix, including the old summary.
 
-Pravah invokes the policy once before each model execution attempt, including
+Async Chat invokes the policy once before each eligible model dispatch, including
 tool-loop redispatch and forced conclusion, and never after the final response.
 It validates the whole decision and resulting tool-call/result groups before
 changing history. Policy errors propagate as `GraphError::HistoryCompaction`
@@ -376,8 +385,9 @@ with the original error as their source; invalid decisions return
 `GraphError::HistoryCompactionValidation`. Neither error executes the model or
 changes the history/checkpoint present before preparation. The pending user
 message has already been recorded by then. For application-controlled retries,
-drive the workflow with `Runtime::next()` and retry that step, or restore its
-snapshot with fresh dependencies. This change does not add an in-flight retry
+retry `HistoryManager::maintain` without stepping, or `chat.maintain()` when
+manually driving Chat. Repeated explicit maintenance can rerun the policy at
+the same boundary. Restoration reattaches fresh dependencies. This does not add an in-flight retry
 operation to `Chat::send()`; calling `send()` again on an unfinished turn returns
 `GraphError::ChatNotReady`. Restoring an unfinished Chat preserves that limitation;
 it does not automatically resume the failed dispatch.

@@ -113,13 +113,10 @@ async fn configure_rejection(
     .tool_budget::<LookupRequest>(1))
 }
 
-async fn configure_keep_alive(
-    input: BudgetRequest,
-    ctx: Context,
-) -> Result<AgentConfig, GraphError> {
+async fn configure_keyed(input: BudgetRequest, ctx: Context) -> Result<AgentConfig, GraphError> {
     configure_budgeted(input, ctx)
         .await
-        .map(AgentConfig::keep_alive)
+        .map(|config| config.key("conversation"))
 }
 
 /// Builds intentionally invalid settings to verify accumulated errors.
@@ -236,8 +233,8 @@ fn rejection_budget_agent(root: Agent<BudgetRequest>) -> Agent<BudgetAnswer> {
         .configure(configure_rejection)
 }
 
-fn keep_alive_budget_agent(root: Agent<BudgetRequest>) -> Agent<BudgetAnswer> {
-    root.tools(lookup_tools).configure(configure_keep_alive)
+fn keyed_budget_agent(root: Agent<BudgetRequest>) -> Agent<BudgetAnswer> {
+    root.tools(lookup_tools).configure(configure_keyed)
 }
 
 fn controlled_budget_flow(root: Flow<BudgetRequest>) -> Flow<BudgetAnswer> {
@@ -641,9 +638,9 @@ async fn rejected_proposal_does_not_consume_tool_budget() -> Result<(), crate::G
     Ok(())
 }
 
-/// Verifies keep-alive history does not carry exhausted budgets into a new invocation.
+/// Verifies keyed history does not carry exhausted budgets into a new invocation.
 #[tokio::test]
-async fn keep_alive_agent_resets_budgets_for_each_invocation() -> Result<(), crate::GraphError> {
+async fn keyed_agent_resets_budgets_for_each_invocation() -> Result<(), crate::GraphError> {
     let factory = RecordedFactory::new([
         tool_response(vec![tool_call("first", "one")]),
         output_response("first answer"),
@@ -651,7 +648,7 @@ async fn keep_alive_agent_resets_budgets_for_each_invocation() -> Result<(), cra
         output_response("second answer"),
     ]);
     let ctx = test_context(factory.clone(), None)?;
-    let mut chat = Chat::new(keep_alive_budget_agent, ctx).expect("chat initializes");
+    let mut chat = Chat::new(keyed_budget_agent, ctx).expect("chat initializes");
 
     let first = chat
         .send(BudgetRequest {
@@ -805,9 +802,10 @@ async fn history_failure_leaves_budget_admission_retryable() -> Result<(), crate
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
-    let executor = executor.with_store(store);
+    let mut manager = crate::HistoryManager::new().with_store(store);
 
-    await_history_failure(&mut runtime, &executor).await;
+    await_history_failure(&mut runtime, &executor, &mut manager).await;
+    manager.maintain(&mut runtime, ctx).await?;
     let output = run_to_output(&flow, &mut runtime, &executor).await.unwrap();
     assert_eq!(output.text, "retried");
     let unavailable = factory.messages()[1]
@@ -819,9 +817,13 @@ async fn history_failure_leaves_budget_admission_retryable() -> Result<(), crate
 }
 
 /// Advances until the injected persistence error reaches the caller.
-async fn await_history_failure(runtime: &mut Runtime, executor: &FetchExecutor) {
+async fn await_history_failure(
+    runtime: &mut Runtime,
+    executor: &FetchExecutor,
+    manager: &mut crate::HistoryManager,
+) {
     loop {
-        match host::step(runtime, executor).await {
+        match host::step_with_manager(runtime, executor, manager).await {
             Ok(Step::Continue) => {}
             Err(GraphError::HistoryPersistence(_)) => return,
             Ok(other) => panic!("expected retryable history failure, got {other:?}"),

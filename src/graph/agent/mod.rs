@@ -28,6 +28,7 @@ mod budget_tests;
 mod checkpoint;
 mod config;
 mod control;
+mod conversation;
 mod definition;
 mod effect_values;
 mod effects;
@@ -37,6 +38,8 @@ pub(crate) use function_tool::FunctionTool;
 mod external;
 pub(crate) use external::execute_hook;
 mod intervention;
+mod maintenance;
+pub(crate) use maintenance::dispatch_request;
 mod output;
 mod payload;
 mod preparation;
@@ -63,7 +66,7 @@ use payload::AgentPayloadView;
 use support::*;
 
 const PAYLOAD_VERSION: u32 = 5;
-const CHECKPOINT_VERSION: u32 = 6;
+const CHECKPOINT_VERSION: u32 = 8;
 
 /// Validates the identity duplicated in an agent's generic continuation payload.
 pub(crate) fn validate_payload_handler(

@@ -73,7 +73,7 @@ async fn configure_tutor(question: Question, _ctx: Context) -> Result<AgentConfi
         "Answer briefly.",
         Message::user(question.text),
     )
-    .keep_alive())
+    .key("conversation"))
 }
 
 /// Verifies preparation replaces old exchanges before execution and protects the new input.

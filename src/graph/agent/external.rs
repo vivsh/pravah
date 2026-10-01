@@ -2,10 +2,7 @@
 
 use super::effects::*;
 use super::*;
-use crate::graph::{DynFetchHandler, Fetch, FetchResponse, RuntimeServices};
-use crate::history::{
-    CompactionRequest, CompactionResult, protected_start, validate_message_groups,
-};
+use crate::graph::{DynFetchHandler, Fetch, FetchResponse};
 
 impl DynFetchHandler for AgentHandler {
     fn execute<'a>(
@@ -15,7 +12,7 @@ impl DynFetchHandler for AgentHandler {
     ) -> BoxFuture<'a, Result<FetchResponse, GraphError>> {
         async move {
             let hook = AgentHook::from_request(fetch.request())?;
-            check_protocol(hook.version)?;
+            check_agent_hook_version(hook.version)?;
             let payload = self.validated_payload(&hook.payload)?;
             if hook.handler != payload.agent_id {
                 return Err(GraphError::FetchValidation(
@@ -23,18 +20,15 @@ impl DynFetchHandler for AgentHandler {
                 ));
             }
             match hook.operation {
-                AgentHookOperation::Configure { input } => {
+                AgentHookOperation::Configure {
+                    input,
+                    execution_id,
+                } => {
                     let config = self
                         .configure
-                        .configure(input, payload.configuration, context.clone())
+                        .configure(input, payload.configuration, execution_id, context.clone())
                         .await?;
-                    let (resolved, message, budget) =
-                        resolve_agent_config(&payload, config, &context).await?;
-                    response(Configured {
-                        resolved,
-                        message,
-                        budget,
-                    })
+                    response(resolve_agent_config(&payload, config, &context).await?)
                 }
                 AgentHookOperation::Control { observation } => {
                     let configured = observation
@@ -100,7 +94,6 @@ pub(crate) async fn execute_hook(
     fetch: &Fetch,
     context: &Context,
     registry: &HandlerRegistry,
-    services: &RuntimeServices,
 ) -> Result<FetchResponse, GraphError> {
     if fetch.request().method() != "POST" || !fetch.request().headers().is_empty() {
         return Err(GraphError::FetchValidation(
@@ -117,19 +110,7 @@ pub(crate) async fn execute_hook(
                 })?;
             handler.execute(fetch, context.clone()).await
         }
-        "pravah://prepare" => prepare(fetch, context, services).await,
-        "pravah://history" => {
-            let request: RecordRequest = decode(fetch.request().body_ref())?;
-            check_protocol(request.version)?;
-            for entry in request.entries {
-                services
-                    .store()
-                    .record_dyn(&entry)
-                    .await
-                    .map_err(|error| GraphError::HistoryPersistence(error.to_string()))?;
-            }
-            response(())
-        }
+        "pravah://agent-prepare" => prepare(fetch, context).await,
         _ => Err(GraphError::FetchValidation("unknown framework hook".into())),
     }
 }
@@ -146,35 +127,33 @@ fn hook_handler(fetch: &Fetch) -> Result<&str, GraphError> {
         .and_then(Value::as_u64)
         .and_then(|version| u32::try_from(version).ok())
         .ok_or_else(|| GraphError::FetchValidation("missing hook version".into()))?;
-    check_protocol(version)?;
+    if fetch.request().url() == "pravah://agent" {
+        check_agent_hook_version(version)?;
+    } else {
+        check_protocol(version)?;
+    }
     body.get("handler")
         .and_then(Value::as_str)
         .ok_or_else(|| GraphError::FetchValidation("missing hook handler".into()))
 }
 
 /// Computes one candidate and materializes its attachments without mutating committed history.
-async fn prepare(
-    fetch: &Fetch,
-    context: &Context,
-    services: &RuntimeServices,
-) -> Result<FetchResponse, GraphError> {
+async fn prepare(fetch: &Fetch, context: &Context) -> Result<FetchResponse, GraphError> {
     let mut preparation: PreparationRequest = decode(fetch.request().body_ref())?;
     check_protocol(preparation.version)?;
     let mut guidance = std::mem::take(&mut preparation.guidance);
-    let decision = prepare_policy(&preparation, &mut guidance, context, services).await?;
-    let messages = super::preparation::messages(
-        &preparation,
-        fetch.request(),
-        decision.clone(),
-        guidance,
-        context,
-    )
-    .await?;
+    if preparation.budget_conclusion {
+        let client = preparation_client(&preparation, context).await?;
+        guidance.push(Message::user(crate::clients::conclusion_message(
+            &client.provider(),
+        )));
+    }
+    let messages =
+        super::preparation::messages(&preparation, fetch.request(), guidance, context).await?;
     let source = super::effect_values::body_field(fetch.request().body_ref(), "request")?;
     let generation = crate::graph::fetch::rath::RathRequest::replace_messages(source, messages)?;
     Prepared {
         version: 1,
-        decision,
         generation: generation.into_value()?,
     }
     .into_response()
@@ -196,47 +175,4 @@ async fn preparation_client(
             operation: crate::graph::AgentClientOperation::Create,
             source,
         })
-}
-
-/// Resolves policy inputs locally; without a policy or reminder the client is created at generation.
-async fn prepare_policy(
-    preparation: &PreparationRequest,
-    guidance: &mut Vec<Message>,
-    context: &Context,
-    services: &RuntimeServices,
-) -> Result<CompactionResult, GraphError> {
-    let compactor = services.compactor();
-    if compactor.is_none() && !preparation.budget_conclusion {
-        return Ok(CompactionResult::default());
-    }
-    let client = preparation_client(preparation, context).await?;
-    if preparation.budget_conclusion {
-        guidance.push(Message::user(crate::clients::conclusion_message(
-            &client.provider(),
-        )));
-    }
-    let Some(compactor) = compactor else {
-        return Ok(CompactionResult::default());
-    };
-    let entries = preparation.entries.iter().collect::<Vec<_>>();
-    validate_message_groups(entries.iter().map(|entry| &entry.message)).map_err(|reason| {
-        GraphError::HistoryCompactionValidation {
-            session_id: preparation.session.clone(),
-            reason,
-        }
-    })?;
-    let (committed, protected) = entries.split_at(protected_start(&entries));
-    compactor
-        .compact_dyn(
-            CompactionRequest {
-                session_id: &preparation.session,
-                model: preparation.request.model(),
-                options: client.options(),
-                framework_messages: guidance,
-                committed,
-                protected,
-            },
-            context.clone(),
-        )
-        .await
 }
