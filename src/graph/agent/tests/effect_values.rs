@@ -53,9 +53,9 @@ fn effect_envelope_shapes() -> Result<(), GraphError> {
             version: CHECKPOINT_VERSION,
             checkpoint: checkpoint.clone(),
         },
-        AgentEffectCheckpoint::Prepare {
+        AgentEffectCheckpoint::Flush {
             version: CHECKPOINT_VERSION,
-            checkpoint: checkpoint.clone(),
+            transition: checkpoint.clone(),
         },
         AgentEffectCheckpoint::Generate {
             version: CHECKPOINT_VERSION,

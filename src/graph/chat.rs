@@ -3,9 +3,9 @@ use std::marker::PhantomData;
 use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
 
-use super::{Fetch, FetchError, FetchExecutor, FetchResponse};
+use super::{AgentExecutor, AgentRequest, AgentResponse};
 use crate::Context;
-use crate::history::{Compactor, HistoryManager, HistoryStore};
+use crate::history::{Compactor, HistoryStore};
 use uuid::Uuid;
 
 use super::agent::Agent;
@@ -24,7 +24,7 @@ pub use builder::ChatBuilder;
 pub use request::ChatRequest;
 
 /// One assistant response produced by graph chat.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ChatTurn<O> {
     /// Decoded assistant response.
     pub output: O,
@@ -57,8 +57,7 @@ impl<O> ChatTurn<O> {
 /// ```
 pub struct Chat<I, O, S = ()> {
     runtime: Runtime,
-    executor: FetchExecutor,
-    history_manager: Option<HistoryManager>,
+    executor: AgentExecutor,
     state_var: VarId,
     input_boundaries: [NodeId; 2],
     _marker: PhantomData<fn(I, S) -> O>,
@@ -111,7 +110,6 @@ where
         Ok(Self {
             runtime,
             executor,
-            history_manager: None,
             state_var,
             input_boundaries,
             _marker: PhantomData,
@@ -121,7 +119,8 @@ where
     /// Restores execution and application state using freshly supplied runtime context.
     ///
     /// Validates the graph, VM state and decoding into `S` without running handlers.
-    /// Reattach history policies and stores after restoration. Old chat graphs are rejected.
+    /// Saved history intent is retained; reattach stores and compactors after restoration.
+    /// Old chat graphs are rejected.
     pub fn from_snapshot(
         agent: fn(Agent<I>) -> Agent<O>,
         snapshot: Snapshot,
@@ -142,7 +141,6 @@ where
         let chat = Self {
             runtime,
             executor,
-            history_manager: None,
             state_var,
             input_boundaries,
             _marker: PhantomData,
@@ -176,19 +174,18 @@ where
             .write_chat_state(self.state_var, encode_state(state)?)
     }
 
-    /// Sets the fallible pre-request history policy; reattach it after snapshot restore.
+    /// Installs compaction dependencies and opts this chat into request-time working memory.
+    /// Reinstall dependencies after restore; checkpointed intent and acknowledgements remain in the VM.
     pub fn with_compactor(mut self, compactor: impl Compactor + 'static) -> Self {
-        self.history_manager = Some(
-            self.history_manager
-                .unwrap_or_default()
-                .with_compactor(compactor),
-        );
+        self.runtime.enable_chat_history(false, true);
+        self.executor = self.executor.with_compactor(compactor);
         self
     }
 
-    /// Replaces the history store used to record chat messages.
+    /// Installs persistence/retrieval dependencies and enables keyed conversation loading.
     pub fn with_store(mut self, store: impl HistoryStore + 'static) -> Self {
-        self.history_manager = Some(self.history_manager.unwrap_or_default().with_store(store));
+        self.runtime.enable_chat_history(true, false);
+        self.executor = self.executor.with_store(store);
         self
     }
 
@@ -198,6 +195,17 @@ where
     /// owns durable storage of the snapshot; invalid runtime state causes failure.
     pub fn snapshot(&self) -> Result<Snapshot, GraphError> {
         self.runtime.snapshot()
+    }
+
+    /// Reports whether execution references this history session ID; inspection allocates nothing.
+    pub fn conversation_is_active(&self, conversation_id: &str) -> bool {
+        self.runtime.conversation_is_active(conversation_id)
+    }
+
+    /// Drops inactive working conversation history without deleting its archive or requiring persistence.
+    /// Use the exact history session ID. Active turns reject removal; a later keyed turn may reload.
+    pub fn drop_conversation(&mut self, conversation_id: &str) -> Result<(), GraphError> {
+        self.runtime.drop_conversation(conversation_id)
     }
 
     /// Converts input at a chat boundary and runs until the next assistant response.
@@ -262,7 +270,7 @@ where
     pub fn next(&mut self) -> Result<ChatStep<O>, GraphError> {
         match self.runtime.next()? {
             Step::Continue => Ok(ChatStep::Continue),
-            Step::Fetch(fetch) => Ok(ChatStep::Fetch(fetch)),
+            Step::Agent(request) => Ok(ChatStep::Agent(request)),
             Step::Suspend(value) if self.runtime.chat_ready(&[self.input_boundaries[1]]) => {
                 Ok(ChatStep::Done(self.decode_response(value)?))
             }
@@ -274,40 +282,18 @@ where
     }
 
     /// Borrows the external executor; it retains no conversation or pending-operation state.
-    pub fn executor(&self) -> &FetchExecutor {
+    pub fn executor(&self) -> &AgentExecutor {
         &self.executor
     }
 
-    /// Installs caller-owned maintenance dependencies; reattach after restoration.
-    pub fn with_history_manager(mut self, manager: HistoryManager) -> Self {
-        self.history_manager = Some(manager);
-        self
+    /// Borrows the pending agent operation without acquiring or retaining runtime access.
+    pub fn pending_agent(&self) -> Option<&AgentRequest> {
+        self.runtime.pending_agent()
     }
 
-    /// Persists committed messages and optionally prepares history before the next step.
-    /// Manual Chat driving must call this explicitly; send calls it automatically.
-    /// Errors leave the VM retryable; retry maintenance without resubmitting input.
-    pub async fn maintain(&mut self) -> Result<(), GraphError> {
-        if let Some(manager) = &mut self.history_manager {
-            manager
-                .maintain(&mut self.runtime, self.executor.context().clone())
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// Borrows the pending request, preserving its original durable identity.
-    pub fn pending_fetch(&self) -> Option<&Fetch> {
-        self.runtime.pending_fetch()
-    }
-
-    /// Accepts an external outcome; call next to process it.
-    pub fn resume_fetch(
-        &mut self,
-        id: Uuid,
-        outcome: Result<FetchResponse, FetchError>,
-    ) -> Result<(), GraphError> {
-        self.runtime.resume_fetch(id, outcome)
+    /// Accepts a worker completion; next interprets its outcome and recorded acknowledgements.
+    pub fn resume_agent(&mut self, response: AgentResponse) -> Result<(), GraphError> {
+        self.runtime.resume_agent(response)
     }
 
     /// Accepts a typed value for an internal agent or tool suspension.
@@ -315,36 +301,17 @@ where
         self.runtime.resume(input)
     }
 
-    /// Executes each Fetch once. Local errors retain their source for this caller;
-    /// their portable outcome is already recorded for subsequent steps or restoration.
+    /// Drives synchronous steps and asynchronous workers without retrying failed operations.
     async fn finish_send(&mut self) -> Result<ChatTurn<O>, GraphError> {
         loop {
-            self.maintain().await?;
             match self.next()? {
                 ChatStep::Continue => {}
-                ChatStep::Fetch(fetch) => match self.executor.execute(&fetch).await {
-                    Ok(response) => self.resume_fetch(fetch.id(), Ok(response))?,
-                    Err(error) => {
-                        let failure = FetchError::from_execution_error(&error).map_err(|err| {
-                            GraphError::ValueConversion {
-                                target: "portable execution error".into(),
-                                reason: err.to_string(),
-                            }
-                        })?;
-                        self.resume_fetch(fetch.id(), Err(failure))?;
-                        if error.client_error().is_some_and(|source| {
-                            source.kind() == crate::clients::ErrorKind::OutputLimitReached
-                        }) {
-                            self.runtime.next()?;
-                        }
-                        return Err(error);
-                    }
-                },
-                ChatStep::Suspend(_) => return Err(GraphError::ChatSuspended),
-                ChatStep::Done(turn) => {
-                    self.maintain().await?;
-                    return Ok(turn);
+                ChatStep::Agent(request) => {
+                    let response = self.executor.execute(&request).await;
+                    self.resume_agent(response)?;
                 }
+                ChatStep::Suspend(_) => return Err(GraphError::ChatSuspended),
+                ChatStep::Done(turn) => return Ok(turn),
             }
         }
     }
@@ -394,12 +361,12 @@ fn encode_state<S: Serialize>(state: S) -> Result<Value, GraphError> {
 }
 
 /// Result of one manually driven Chat step; errors use the ordinary Result channel.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum ChatStep<O> {
     /// Internal synchronous progress.
     Continue,
     /// One external request awaiting delivery.
-    Fetch(Fetch),
+    Agent(AgentRequest),
     /// Agent or tool input is required, not a completed assistant response.
     Suspend(Value),
     /// The assistant response is complete and the chat is ready for another submission.

@@ -3,6 +3,9 @@ use std::time::Instant;
 #[path = "chat/cases.rs"]
 mod cases;
 
+#[path = "chat/tool_loop.rs"]
+mod tool_loop;
+
 use pravah::clients::{
     Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmBackend, Message,
     ModelUrl, Provider, ProviderFactory,
@@ -165,6 +168,9 @@ fn main() -> Result<(), GraphError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(|error| GraphError::Invalid(error.to_string()))?;
-    run(&runtime)?;
-    cases::run(&runtime)
+    if std::env::var_os("PRAVAH_BENCH_CASE").is_none() {
+        run(&runtime)?;
+    }
+    cases::run(&runtime)?;
+    tool_loop::run(&runtime)
 }

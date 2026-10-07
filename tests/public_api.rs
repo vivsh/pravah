@@ -24,6 +24,10 @@ struct RootHistoryStore;
 impl HistoryStore for RootHistoryStore {
     type Error = std::convert::Infallible;
 
+    async fn load(&self, _key: &str) -> Result<Vec<HistoryEntry>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     async fn record(&self, _entry: &HistoryEntry) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -75,7 +79,7 @@ async fn modern_typed_api_is_available_at_crate_root() -> Result<(), GraphError>
         match execution.next()? {
             Step::Continue => {}
             Step::Done(value) => break compiled.decode_output(value)?,
-            Step::Suspend(_) | Step::Fetch(_) => {
+            Step::Suspend(_) | Step::Agent(_) => {
                 return Err(GraphError::Invalid("root export test suspended".into()));
             }
         }

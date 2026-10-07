@@ -194,22 +194,27 @@ async fn tool_loop_rejects_protected_eviction() -> Result<(), GraphError> {
     let executor = flow.prepared().executor(Context::default().with_providers(
         pravah::testing::providers(OverrideFactory(factory.clone()))?,
     ));
-    let mut manager = pravah::HistoryManager::new().with_compactor(ObserveTools {
+    let executor = executor.with_compactor(ObserveTools {
         reject_tools: true,
         ..ObserveTools::default()
     });
-    let mut runtime = flow.start(
-        Question {
-            text: "research".into(),
-        },
-        uuid::Uuid::nil(),
-    )?;
+    let mut runtime = flow
+        .start(
+            Question {
+                text: "research".into(),
+            },
+            uuid::Uuid::nil(),
+        )?
+        .with_history(pravah::HistoryPolicy {
+            compact: true,
+            ..Default::default()
+        })?;
     for _ in 0..100 {
-        let before = serde_json::to_value(runtime.snapshot()?).expect("snapshot");
-        match host::step_with_manager(&mut runtime, &executor, &mut manager).await {
-            Err(GraphError::HistoryCompactionValidation { .. }) => {
+        let before = serde_json::to_value(runtime.snapshot()?.history()).expect("snapshot");
+        match host::step(&mut runtime, &executor).await {
+            Err(GraphError::AgentFailed { .. }) => {
                 assert_eq!(
-                    serde_json::to_value(runtime.snapshot()?).expect("snapshot"),
+                    serde_json::to_value(runtime.snapshot()?.history()).expect("snapshot"),
                     before
                 );
                 assert_eq!(factory.calls().len(), 1);

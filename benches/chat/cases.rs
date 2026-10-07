@@ -149,7 +149,7 @@ fn large_inputs(rt: &tokio::runtime::Runtime) -> Result<(), GraphError> {
 }
 
 /// Measures initialized sends, including necessary input allocation and conversion.
-fn measure<I, R>(
+pub(super) fn measure<I, R>(
     rt: &tokio::runtime::Runtime,
     name: &str,
     chat: &mut Chat<I, String>,
@@ -160,6 +160,9 @@ where
     I: Serialize + DeserializeOwned + JsonSchema + Send + Sync + 'static,
     R: Into<ChatRequest<I>>,
 {
+    if std::env::var("PRAVAH_BENCH_CASE").is_ok_and(|selected| selected != name) {
+        return Ok(());
+    }
     let mut send = || {
         if keyed {
             rt.block_on(chat.send_with_key(input(), "message-key"))

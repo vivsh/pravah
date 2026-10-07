@@ -1,5 +1,5 @@
 use pravah::clients::Message;
-use pravah::graph::FetchExecutor;
+use pravah::graph::AgentExecutor;
 use pravah::history::MessageHistory;
 use pravah::testing::ScriptedFactory;
 use pravah::{Agent, AgentConfig, Chat, Context, Flow, GraphError, Runtime, Step, compile};
@@ -130,7 +130,7 @@ fn codec(error: impl std::fmt::Display) -> GraphError {
 async fn finish_restoring(
     flow: &pravah::CompiledFlow<Request, String>,
     runtime: &mut Runtime,
-    executor: &FetchExecutor,
+    executor: &AgentExecutor,
 ) -> Result<(), GraphError> {
     for index in 0..200 {
         if matches!(host::step(runtime, executor).await?, Step::Done(_)) {
@@ -208,7 +208,12 @@ async fn each_keeps_keyed_sessions_and_isolates_fresh_invocations() -> Result<()
         [1, 1, 3, 1, 1]
     );
     let entries = runtime.history().entries();
-    assert_ne!(entries[6].session_id, entries[8].session_id);
+    assert_eq!(entries.len(), 6);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.session_id.starts_with("key:"))
+    );
     let independent = flow.start(vec![request(Some("a"))], Uuid::from_u128(1))?;
     assert!(independent.history().is_empty());
     Ok(())

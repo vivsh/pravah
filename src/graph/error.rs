@@ -23,24 +23,17 @@ impl std::fmt::Display for AgentClientOperation {
 #[derive(Debug, Error)]
 /// Error type for graph construction, validation, and VM execution failures.
 pub enum GraphError {
-    /// A delivered portable failure could not be handled by the owning continuation.
-    #[error("external operation failed")]
-    FetchFailed {
-        /// Portable diagnostics, not the original local Rust error object.
+    /// A malformed agent request or completion rejected before execution-state mutation.
+    #[error("invalid agent operation: {0}")]
+    AgentRequestValidation(String),
+    /// A portable externally delivered agent failure, not an original local Rust source.
+    #[error("agent operation failed")]
+    AgentFailed {
+        /// Serializable worker diagnostics, not an original local Rust source object.
         #[source]
-        source: super::fetch::FetchError,
+        source: super::agent_request::AgentError,
     },
-    /// An HTTP transport failed; its source omits the potentially private URL.
-    #[error("Fetch HTTP transport failed")]
-    FetchTransport {
-        /// Transport diagnostics; request contents are not part of Display.
-        #[source]
-        source: reqwest::Error,
-    },
-    /// An external request or delivered outcome has an invalid protocol envelope.
-    #[error("invalid Fetch: {0}")]
-    FetchValidation(String),
-    /// A Chat request failed validation before the suspended execution accepted it.
+    /// A Chat request failed validation before accepting a submission.
     #[error("invalid chat request: {reason}")]
     ChatRequestValidation {
         /// Reason the request must be corrected before submission.
@@ -117,7 +110,7 @@ pub enum GraphError {
     #[error("agent configuration is invalid: {0}")]
     AgentConfigValidation(String),
 
-    /// A keyed conversation already contains an unfinished user/tool exchange.
+    /// A conversation is retained by active execution or already contains an unfinished exchange.
     #[error("agent conversation is already active")]
     AgentConversationBusy,
 
@@ -238,6 +231,14 @@ pub enum GraphError {
 }
 
 impl GraphError {
+    /// Borrows portable worker diagnostics after a durable agent completion.
+    /// These retain normalized metadata, not the original local Rust source object.
+    pub fn agent_error(&self) -> Option<&super::agent_request::AgentError> {
+        match self {
+            Self::AgentFailed { source } => Some(source),
+            _ => None,
+        }
+    }
     /// Borrows the original Rath error for client creation or execution failures.
     /// Returns None for runtime validation and the separate AgentOutputLimit error.
     /// Inspect response bodies explicitly; do not log private diagnostics by default.

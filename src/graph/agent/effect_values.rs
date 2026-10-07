@@ -1,9 +1,7 @@
 //! Concrete durable envelopes that retain shared VM values instead of recoding them.
 
 use super::effects::*;
-use super::function_tool::ToolHook;
 use super::*;
-use crate::graph::{FetchBody, FetchRequest, FetchResponse};
 use std::borrow::Cow;
 
 fn invalid() -> GraphError {
@@ -22,45 +20,6 @@ fn object<const N: usize>(fields: [(&'static str, Value); N]) -> Result<Value, G
 
 fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, GraphError> {
     value.get(name).ok_or_else(invalid)
-}
-
-/// Borrows a required field from a structured boundary body, rejecting malformed envelopes.
-pub(super) fn body_field<'a>(
-    body: Option<&'a FetchBody>,
-    name: &str,
-) -> Result<&'a Value, GraphError> {
-    let Some(FetchBody::Value(value)) = body else {
-        return Err(invalid());
-    };
-    field(value, name)
-}
-
-/// Serializes borrowed history once; the request owns its encoded values after this operation.
-pub(super) fn preparation_request(
-    checkpoint: &EdgeAgentCheckpoint,
-    request: Value,
-    guidance: Vec<Message>,
-    budget_conclusion: bool,
-    ctx: ContinuationContext<'_>,
-) -> Result<FetchRequest, GraphError> {
-    let entries = ctx
-        .history()
-        .session_entries(&checkpoint.session_id)
-        .into_iter()
-        .map(|entry| encode(&entry.message))
-        .collect::<Result<Vec<_>, _>>()?;
-    let request =
-        crate::graph::fetch::rath::RathRequest::replace_messages(&request, Value::array(entries))?;
-    let Some(FetchBody::Value(source)) = request.body_ref() else {
-        return Err(invalid());
-    };
-    let body = object([
-        ("version", 1_u32.into()),
-        ("request", source.clone()),
-        ("guidance", encode(guidance)?),
-        ("budget_conclusion", budget_conclusion.into()),
-    ])?;
-    Ok(FetchRequest::new("POST", "pravah://agent-prepare").body(FetchBody::Value(body)))
 }
 
 pub(super) fn read_field<T: DeserializeOwned>(value: &Value, name: &str) -> Result<T, GraphError> {
@@ -84,10 +43,14 @@ impl AgentEffectCheckpoint {
                 version,
                 checkpoint,
             } => boundary("control", version, checkpoint),
-            Self::Prepare {
+            Self::Flush {
                 version,
-                checkpoint,
-            } => boundary("prepare", version, checkpoint),
+                transition,
+            } => object([
+                ("effect", "flush".into()),
+                ("version", version.into()),
+                ("transition", transition),
+            ]),
             Self::Generate {
                 version,
                 checkpoint,
@@ -101,7 +64,8 @@ impl AgentEffectCheckpoint {
         let version = read_field(value, "version")?;
         let allowed = match kind {
             "configure" => &["effect", "version", "input"][..],
-            "control" | "prepare" | "generate" => &["effect", "version", "checkpoint"][..],
+            "control" | "generate" => &["effect", "version", "checkpoint"][..],
+            "flush" => &["effect", "version", "transition"][..],
             _ => return Err(invalid()),
         };
         if value
@@ -125,34 +89,15 @@ impl AgentEffectCheckpoint {
                 version,
                 checkpoint: field(value, "checkpoint")?.clone(),
             },
-            "prepare" => Self::Prepare {
+            "flush" => Self::Flush {
                 version,
-                checkpoint: field(value, "checkpoint")?.clone(),
+                transition: field(value, "transition")?.clone(),
             },
             "generate" => Self::Generate {
                 version,
                 checkpoint: field(value, "checkpoint")?.clone(),
             },
             _ => return Err(invalid()),
-        })
-    }
-}
-
-impl Prepared {
-    pub(super) fn into_response(self) -> Result<FetchResponse, GraphError> {
-        Ok(FetchResponse::new(200).body(FetchBody::Value(object([
-            ("version", self.version.into()),
-            ("generation", self.generation),
-        ])?)))
-    }
-
-    pub(super) fn from_response(response: &FetchResponse) -> Result<Self, GraphError> {
-        let Some(FetchBody::Value(value)) = response.body_ref() else {
-            return Err(invalid());
-        };
-        Ok(Self {
-            version: read_field(value, "version")?,
-            generation: field(value, "generation")?.clone(),
         })
     }
 }
@@ -214,89 +159,8 @@ impl EdgeAgentCheckpoint {
     }
 }
 
-impl AgentHook {
-    /// Builds an operation-local request that shares its authored payload and invocation input.
-    pub(super) fn into_request(self) -> Result<FetchRequest, GraphError> {
-        let operation = match self.operation {
-            AgentHookOperation::Configure {
-                input,
-                execution_id,
-            } => object([(
-                "Configure",
-                object([("input", input), ("execution_id", encode(execution_id)?)])?,
-            )])?,
-            AgentHookOperation::Control { observation } => object([(
-                "Control",
-                object([("observation", observation_value(observation)?)])?,
-            )])?,
-        };
-        Ok(
-            FetchRequest::new("POST", "pravah://agent").body(FetchBody::Value(object([
-                ("version", self.version.into()),
-                ("handler", self.handler.into()),
-                ("payload", self.payload),
-                ("operation", operation),
-            ])?)),
-        )
-    }
-
-    /// Reads only the selected callback envelope; authored metadata remains shared.
-    pub(super) fn from_request(request: &FetchRequest) -> Result<Self, GraphError> {
-        let Some(FetchBody::Value(value)) = request.body_ref() else {
-            return Err(invalid());
-        };
-        let operation = field(value, "operation")?;
-        let mut variants = operation.object_entries().ok_or_else(invalid)?;
-        let (kind, content) = variants.next().ok_or_else(invalid)?;
-        if variants.next().is_some() {
-            return Err(invalid());
-        }
-        let operation = match kind {
-            "Configure" => AgentHookOperation::Configure {
-                input: field(content, "input")?.clone(),
-                execution_id: read_field(content, "execution_id")?,
-            },
-            "Control" => AgentHookOperation::Control {
-                observation: read_observation(field(content, "observation")?)?,
-            },
-            _ => return Err(invalid()),
-        };
-        Ok(Self {
-            version: read_field(value, "version")?,
-            handler: read_field(value, "handler")?,
-            payload: field(value, "payload")?.clone(),
-            operation,
-        })
-    }
-}
-
-impl ToolHook {
-    /// Moves the existing tool input into its durable envelope without traversing it.
-    pub(super) fn into_request(self) -> Result<FetchRequest, GraphError> {
-        Ok(
-            FetchRequest::new("POST", "pravah://tool").body(FetchBody::Value(object([
-                ("version", self.version.into()),
-                ("handler", self.handler.into()),
-                ("input", self.input),
-            ])?)),
-        )
-    }
-
-    /// Checks routing fields while sharing the opaque input with the caller's request.
-    pub(super) fn from_request(request: &FetchRequest) -> Result<Self, GraphError> {
-        let Some(FetchBody::Value(value)) = request.body_ref() else {
-            return Err(invalid());
-        };
-        Ok(Self {
-            version: read_field(value, "version")?,
-            handler: read_field(value, "handler")?,
-            input: field(value, "input")?.clone(),
-        })
-    }
-}
-
 /// Keeps user-owned controller input/state shared while encoding the observation metadata.
-fn observation_value(data: AgentLoopData) -> Result<Value, GraphError> {
+pub(super) fn observation_value(data: AgentLoopData) -> Result<Value, GraphError> {
     object([
         ("input", data.input),
         ("point", encode(data.point)?),
@@ -314,7 +178,7 @@ fn observation_value(data: AgentLoopData) -> Result<Value, GraphError> {
 }
 
 /// Reconstructs the callback's owned view without recursively cloning its opaque values.
-fn read_observation(value: &Value) -> Result<AgentLoopData, GraphError> {
+pub(super) fn read_observation(value: &Value) -> Result<AgentLoopData, GraphError> {
     Ok(AgentLoopData {
         input: field(value, "input")?.clone(),
         point: read_field(value, "point")?,

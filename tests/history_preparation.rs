@@ -107,4 +107,4 @@ async fn replacement_reaches_client_and_bounds_history() -> Result<(), GraphErro
 }
 #[path = "support/host.rs"]
 mod host;
-use pravah::graph::FetchExecutor;
+use pravah::graph::AgentExecutor;

@@ -34,6 +34,13 @@ struct FailingStore;
 impl crate::legacy::store::HistoryStore for FailingStore {
     type Error = TestHistoryError;
 
+    async fn load(
+        &self,
+        _key: &str,
+    ) -> Result<Vec<crate::legacy::history::HistoryEntry>, Self::Error> {
+        Err(TestHistoryError("loading not supported by this fixture"))
+    }
+
     async fn record(
         &self,
         _entry: &crate::legacy::history::HistoryEntry,

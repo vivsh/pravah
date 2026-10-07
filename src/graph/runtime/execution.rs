@@ -95,7 +95,6 @@ impl Runtime {
                 self.complete_node(frame_index, &node)?;
                 Ok(Step::Continue)
             }
-            CompiledNodeKind::Fetch => self.execute_fetch(frame_index, &node),
             CompiledNodeKind::Load { var, key } => {
                 let frame = self.frame(frame_index)?;
                 let input = read_single_input(frame, &node)?;
@@ -456,6 +455,7 @@ impl Runtime {
         write_variable(self.frame_mut(frame_index)?, var, value)
     }
 
+    /// Exits completed frames and releases their conversations only after successful parent delivery.
     pub(super) fn try_exit_frames(&mut self) -> Result<Step, GraphError> {
         loop {
             let Some(frame) = self.state.frames.last() else {
@@ -469,62 +469,77 @@ impl Runtime {
             if !edge_ready(frame, exit)? {
                 return Ok(Step::Continue);
             }
-            let mut frame = self
+            if frame.return_target.is_none() && self.state.frames.len() != 1 {
+                return Err(GraphError::Invalid(
+                    "root frame exited while parent frames remain".into(),
+                ));
+            }
+            let frame = self
                 .state
                 .frames
                 .pop()
                 .ok_or_else(|| GraphError::Invalid("frame stack unexpectedly empty".into()))?;
-            let output = take_edge(&mut frame, exit)?;
-            let return_target = frame.return_target;
-            if let Some(target) = return_target {
-                let parent_index = self
-                    .state
-                    .frames
-                    .len()
-                    .checked_sub(1)
-                    .ok_or_else(|| GraphError::Invalid("child frame has no parent".into()))?;
-                match target {
-                    ReturnTarget::Edge { parent_edge } => {
-                        let parent_graph_index = self.frame(parent_index)?.graph_index;
-                        let parent_graph =
-                            self.callables.get(parent_graph_index).ok_or_else(|| {
-                                GraphError::Invalid("parent graph index is invalid".into())
-                            })?;
-                        validate_edge_value(
-                            &parent_graph.graph,
-                            parent_edge,
-                            &output,
-                            "subflow return",
-                        )?;
-                        let parent = self.frame_mut(parent_index)?;
-                        write_edge(parent, parent_edge, output)?;
-                    }
-                    ReturnTarget::Either { parent_node } => {
-                        self.complete_either_child(parent_index, parent_node, output)?;
-                    }
-                    ReturnTarget::Each { parent_node } => {
-                        self.complete_each_child(parent_index, parent_node, output)?;
-                    }
-                    ReturnTarget::Continuation {
-                        parent_node,
-                        call_id,
-                    } => {
-                        self.complete_continuation_child(
-                            parent_index,
-                            parent_node,
-                            call_id,
-                            output,
-                        )?;
-                    }
-                }
-            } else {
-                if !self.state.frames.is_empty() {
-                    return Err(GraphError::Invalid(
-                        "root frame exited while parent frames remain".into(),
-                    ));
-                }
+            if let Some(output) = self.exit_frame(frame, exit)? {
                 return Ok(Step::Done(output));
             }
+        }
+    }
+
+    /// Retains a child and its working history when checked return delivery fails.
+    fn exit_frame(&mut self, mut frame: Frame, exit: EdgeId) -> Result<Option<Value>, GraphError> {
+        let output = take_edge(&mut frame, exit)?;
+        if let Some(mut target) = frame.return_target.take() {
+            if let Err(error) = self.deliver_frame_output(&mut target, output.clone()) {
+                frame.return_target = Some(target);
+                *frame
+                    .values
+                    .get_mut(exit.0)
+                    .ok_or(GraphError::MissingEdge(exit))? = Some(output);
+                self.state.frames.push(frame);
+                return Err(error);
+            }
+            self.history
+                .remove_frame_conversations(&frame.unkeyed_conversations);
+            Ok(None)
+        } else {
+            self.history
+                .remove_frame_conversations(&frame.unkeyed_conversations);
+            Ok(Some(output))
+        }
+    }
+
+    /// Validates parent delivery before committing it; no conversation cleanup occurs here.
+    fn deliver_frame_output(
+        &mut self,
+        target: &mut ReturnTarget,
+        output: Value,
+    ) -> Result<(), GraphError> {
+        let parent_index = self
+            .state
+            .frames
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| GraphError::Invalid("child frame has no parent".into()))?;
+        match target {
+            ReturnTarget::Edge { parent_edge } => {
+                let graph_index = self.frame(parent_index)?.graph_index;
+                let graph = self
+                    .callables
+                    .get(graph_index)
+                    .ok_or_else(|| GraphError::Invalid("parent graph index is invalid".into()))?;
+                validate_edge_value(&graph.graph, *parent_edge, &output, "subflow return")?;
+                write_edge(self.frame_mut(parent_index)?, *parent_edge, output)
+            }
+            ReturnTarget::Either { parent_node } => {
+                self.complete_either_child(parent_index, *parent_node, output)
+            }
+            ReturnTarget::Each { parent_node } => {
+                self.complete_each_child(parent_index, *parent_node, output)
+            }
+            ReturnTarget::Continuation {
+                parent_node,
+                call_id,
+            } => self.complete_continuation_child(parent_index, *parent_node, call_id, output),
         }
     }
 
@@ -545,7 +560,7 @@ impl Runtime {
         output: Value,
     ) -> Result<(), GraphError> {
         let node = self.compiled_node(parent_index, parent_node)?.clone();
-        let mut checkpoint = self.take_each_checkpoint(parent_index, parent_node)?;
+        let mut checkpoint = self.read_each_checkpoint(parent_index, parent_node)?;
         checkpoint.outputs.push(output);
         checkpoint.index = checkpoint
             .index
@@ -553,6 +568,11 @@ impl Runtime {
             .ok_or_else(|| GraphError::Invalid("each checkpoint index overflowed".into()))?;
         if checkpoint.index >= checkpoint.items.len() {
             self.write_outputs(parent_index, &node, vec![Value::array(checkpoint.outputs)])?;
+            *self
+                .frame_mut(parent_index)?
+                .checkpoints
+                .get_mut(parent_node.0)
+                .ok_or(GraphError::MissingNode(parent_node))? = None;
             return Ok(());
         }
         let CompiledNodeKind::Each { child_index } = &node.kind else {
@@ -561,15 +581,18 @@ impl Runtime {
                 node.name
             )));
         };
+        let child =
+            self.prepare_each_child(parent_index, parent_node, *child_index, &checkpoint)?;
         self.set_node_checkpoint(parent_index, parent_node, &checkpoint)?;
-        self.push_each_child(parent_index, parent_node, *child_index, &checkpoint)
+        self.state.frames.push(child);
+        Ok(())
     }
 
     pub(super) fn complete_continuation_child(
         &mut self,
         parent_index: usize,
         parent_node: NodeId,
-        call_id: String,
+        call_id: &mut String,
         output: Value,
     ) -> Result<(), GraphError> {
         let slot = self
@@ -578,7 +601,10 @@ impl Runtime {
             .get_mut(parent_index)
             .and_then(|frame| frame.continuation_inboxes.get_mut(parent_node.0))
             .ok_or(GraphError::MissingNode(parent_node))?;
-        slot.push(ContinuationInput::Child { call_id, output });
+        slot.push(ContinuationInput::Child {
+            call_id: std::mem::take(call_id),
+            output,
+        });
         Ok(())
     }
 
@@ -618,17 +644,18 @@ impl Runtime {
         Ok(())
     }
 
-    pub(super) fn take_each_checkpoint(
-        &mut self,
+    /// Reads a shared checkpoint without removing it before fallible child-return validation.
+    pub(super) fn read_each_checkpoint(
+        &self,
         frame_index: usize,
         node: NodeId,
     ) -> Result<EachVmCheckpoint, GraphError> {
         let value = self
             .state
             .frames
-            .get_mut(frame_index)
-            .and_then(|frame| frame.checkpoints.get_mut(node.0))
-            .and_then(Option::take)
+            .get(frame_index)
+            .and_then(|frame| frame.checkpoints.get(node.0))
+            .and_then(Clone::clone)
             .ok_or_else(|| GraphError::Invalid("each checkpoint is missing".into()))?;
         crate::graph::from_value(value)
             .map_err(|err| GraphError::Invalid(format!("failed to decode each  checkpoint: {err}")))
@@ -641,6 +668,19 @@ impl Runtime {
         child_index: usize,
         checkpoint: &EachVmCheckpoint,
     ) -> Result<(), GraphError> {
+        let child = self.prepare_each_child(parent_index, parent_node, child_index, checkpoint)?;
+        self.state.frames.push(child);
+        Ok(())
+    }
+
+    /// Prepares and validates the next child before either checkpoint or stack mutation.
+    fn prepare_each_child(
+        &self,
+        parent_index: usize,
+        parent_node: NodeId,
+        child_index: usize,
+        checkpoint: &EachVmCheckpoint,
+    ) -> Result<Frame, GraphError> {
         let item = checkpoint
             .items
             .get(checkpoint.index)
@@ -664,8 +704,7 @@ impl Runtime {
                 "each parent is not at the top of the frame stack".into(),
             ));
         }
-        self.state.frames.push(child);
-        Ok(())
+        Ok(child)
     }
 
     pub(super) fn frame(&self, frame_index: usize) -> Result<&Frame, GraphError> {

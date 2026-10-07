@@ -6,7 +6,6 @@ pub(super) fn validate_snapshot_state(
     root_index: usize,
     state: &State,
 ) -> Result<(), GraphError> {
-    super::fetch::validate_fetch_state(callables, state)?;
     if state.frames.is_empty() {
         if state.waiting.is_some() {
             return Err(GraphError::SnapshotValidation(
@@ -150,6 +149,29 @@ pub(super) fn validate_snapshot_state(
             let CompiledNodeKind::Continuation { payload, .. } = &compiled_node.kind else {
                 continue;
             };
+            let authored = graph
+                .graph
+                .node(compiled_node.id)
+                .ok_or(GraphError::MissingNode(compiled_node.id))?;
+            let children = match &authored.kind {
+                NodeKind::Continuation { children, .. } => children.as_slice(),
+                _ => &[],
+            };
+            crate::graph::agent::validate_json_snapshot(
+                payload,
+                children,
+                frame.checkpoints.get(node_index).and_then(Option::as_ref),
+                authored
+                    .inputs
+                    .first()
+                    .and_then(|id| frame.values.get(id.0))
+                    .and_then(Option::as_ref),
+                authored
+                    .outputs
+                    .first()
+                    .and_then(|id| frame.values.get(id.0))
+                    .and_then(Option::as_ref),
+            )?;
             validate_agent_snapshot_state(
                 payload,
                 frame.checkpoints.get(node_index).and_then(Option::as_ref),

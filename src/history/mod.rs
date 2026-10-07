@@ -4,8 +4,9 @@ mod compactor;
 mod entries;
 mod import;
 mod inspection;
+pub(crate) use inspection::SUMMARY_AGENT_ID;
 pub(crate) mod legacy_compactor;
-mod manager;
+mod policy;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -19,6 +20,6 @@ pub(crate) use entries::{
 };
 pub(crate) use legacy_compactor::{DynHistoryCompactor, count_complete_turns};
 pub(crate) use legacy_compactor::{HistoryCompactor, NoopCompactor};
-pub use manager::HistoryManager;
+pub use policy::HistoryPolicy;
 pub(crate) use store::DynHistoryStore;
 pub use store::{HistoryStore, NoopHistoryStore};

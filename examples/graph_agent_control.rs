@@ -70,9 +70,9 @@ async fn main() -> Result<(), GraphError> {
     loop {
         match execution.next()? {
             Step::Continue => {}
-            Step::Fetch(fetch) => {
-                let response = executor.execute(&fetch).await?;
-                execution.resume_fetch(fetch.id(), Ok(response))?;
+            Step::Agent(fetch) => {
+                let response = executor.execute(&fetch).await;
+                execution.resume_agent(response)?;
             }
             Step::Suspend(payload) => {
                 println!("Approval request: {payload}");

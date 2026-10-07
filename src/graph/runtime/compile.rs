@@ -45,7 +45,6 @@ fn compile_graph_at(
             }
             NodeKind::Builtin { .. }
             | NodeKind::PureHandler { .. }
-            | NodeKind::Fetch
             | NodeKind::Suspend { .. }
             | NodeKind::Load { .. }
             | NodeKind::Store { .. }
@@ -86,7 +85,6 @@ pub(super) fn compile_nodes(
         let kind = match &node.kind {
             NodeKind::Builtin { op } => CompiledNodeKind::Builtin { op: op.clone() },
             NodeKind::PureHandler { key } => CompiledNodeKind::PureHandler { key: key.clone() },
-            NodeKind::Fetch => CompiledNodeKind::Fetch,
             NodeKind::Load { var, key } => CompiledNodeKind::Load {
                 var: *var,
                 key: key.clone(),
@@ -233,6 +231,7 @@ pub(super) fn new_frame(
         continuation_child_queues: vec![Vec::new(); graph.graph.nodes.len()],
         node_epochs: vec![0; graph.graph.nodes.len()],
         reader_counts: graph.liveness.initial_counters()?,
+        unkeyed_conversations: Vec::new(),
         return_target,
     })
 }

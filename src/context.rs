@@ -40,7 +40,7 @@ struct ContextInner {
 
 /// Runtime-only dependencies and policy supplied to external execution.
 ///
-/// Modern workflows attach a context to a `FetchExecutor`; Chat owns that
+/// Modern workflows attach a context to a `AgentExecutor`; Chat owns that
 /// executor for its session. Tools and callbacks receive shared clones, while
 /// the synchronous VM and its snapshots contain no live context.
 /// Cloning is cheap because the inner state is reference-counted.

@@ -7,8 +7,8 @@ use uuid::Uuid;
 use crate::history::MessageHistory;
 
 use super::agent::support::{validate_agent_snapshot_state, validate_agent_suspension};
+use super::agent_request::{AgentRequest, AgentResponse};
 use super::error::GraphError;
-use super::fetch::{Fetch, FetchError, FetchRequest, FetchResponse};
 use super::ids::{EdgeId, HandlerKey, NodeId, VarId};
 use super::model::{BuiltinNode, NodeKind, UntypedGraph, VarInit, VarKey, VarScope, Variable};
 use super::registry::{
@@ -22,12 +22,14 @@ use super::state::{
 use super::validation::{validate_graph_shape, validate_registry_keys};
 use super::value::{Value, to_value};
 
+mod agent;
+mod agent_history;
 mod chat;
 mod compile;
 mod continuation;
+mod conversations;
 mod dce;
 mod execution;
-mod fetch;
 mod fingerprint;
 mod helpers;
 mod history;
@@ -45,13 +47,14 @@ use dce::DcePlan;
 pub use fingerprint::GraphFingerprint;
 use helpers::*;
 use liveness::{LivenessPlan, ReleaseAction};
+use maintenance::validate_history_progress;
 use path::{CallSite, GraphPath};
 use reclaim::rebuild_reader_counts;
 use snapshot::validate_snapshot_state;
 use sparse::{SparseState, expand_state, sparse_state};
 
 /// Current serialized runtime snapshot version.
-pub const SNAPSHOT_VERSION: u32 = 12;
+pub const SNAPSHOT_VERSION: u32 = 15;
 
 #[derive(Clone)]
 struct CompiledGraph {
@@ -92,7 +95,6 @@ enum CompiledNodeKind {
     PureHandler {
         key: HandlerKey,
     },
-    Fetch,
     Continuation {
         key: HandlerKey,
         payload: Arc<Value>,
@@ -206,8 +208,8 @@ struct EachVmCheckpoint {
 
 impl PreparedGraph {
     /// Builds an external executor sharing this graph's immutable registry.
-    pub fn executor(&self, context: crate::Context) -> super::fetch::FetchExecutor {
-        super::fetch::FetchExecutor::from_registry(context, Arc::clone(&self.registry))
+    pub fn executor(&self, context: crate::Context) -> super::agent_request::AgentExecutor {
+        super::agent_request::AgentExecutor::from_registry(context, Arc::clone(&self.registry))
     }
     /// Validates and compiles a graph and its handler registry once.
     ///
@@ -264,6 +266,8 @@ impl PreparedGraph {
     /// Agents select imported conversations through their configuration keys. Invalid row
     /// identities, positions or incomplete message groups fail before execution starts.
     /// Supply a fresh execution UUID for this independent execution.
+    /// Unkeyed imported sessions belong to the root frame and are removed when it exits;
+    /// keyed sessions remain available until explicitly dropped. Supplied usage totals remain intact.
     pub fn start_with_history(
         &self,
         input: Value,
@@ -293,6 +297,7 @@ impl PreparedGraph {
         let entry = root_graph.graph.entry;
         validate_edge_value(&root_graph.graph, entry, &input, "entry input")?;
         write_edge(&mut frame, entry, input)?;
+        conversations::register_sessions(&mut frame, history.entries());
         state.frames.push(frame);
 
         Ok(Runtime {
@@ -307,7 +312,7 @@ impl PreparedGraph {
     /// Restores an isolated runtime after checking version, graph, and VM state.
     ///
     /// Runtime dependencies are intentionally not serialized. Supply fresh
-    /// context and services to the external FetchExecutor used after restoration.
+    /// context and services to the external AgentExecutor used after restoration.
     ///
     /// Version, fingerprint, sparse state, frame, continuation, and suspension
     /// validation complete before a runtime is returned.
@@ -326,8 +331,12 @@ impl PreparedGraph {
         }
         let mut state =
             expand_state(&self.callables, snapshot.state).map_err(as_snapshot_validation_error)?;
+        validate_history_progress(&state, &snapshot.history)?;
+        agent::validate_agent_state(&self.callables, &state, &snapshot.history)
+            .map_err(as_snapshot_validation_error)?;
         validate_snapshot_state(&self.callables, self.root_index, &state)
             .map_err(as_snapshot_validation_error)?;
+        conversations::validate_conversation_owners(&self.callables, &state, &snapshot.history)?;
         rebuild_reader_counts(&self.callables, &mut state)?;
 
         Ok(Runtime {
@@ -368,7 +377,6 @@ fn validate_continuation_payloads(
             }
             NodeKind::Builtin { .. }
             | NodeKind::PureHandler { .. }
-            | NodeKind::Fetch
             | NodeKind::Suspend { .. }
             | NodeKind::Load { .. }
             | NodeKind::Store { .. }
@@ -386,7 +394,13 @@ impl Runtime {
             } => output_validator.as_deref(),
             _ => None,
         };
-        ContinuationContext::new(self.state.execution_id, &self.history, validator)
+        ContinuationContext::new(
+            self.state.execution_id,
+            &self.history,
+            validator,
+            &self.state.history_policy,
+            &self.state.loaded_conversation_keys,
+        )
     }
 
     /// Borrows the sole execution-history owner without taking a lock.

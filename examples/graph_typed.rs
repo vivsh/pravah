@@ -47,7 +47,7 @@ fn main() -> Result<(), ExampleError> {
                 }
                 return Ok(());
             }
-            Step::Fetch(_) | Step::Suspend(_) => {
+            Step::Agent(_) | Step::Suspend(_) => {
                 return Err(ExampleError::from("pure workflow requested input"));
             }
         }

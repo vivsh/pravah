@@ -222,15 +222,15 @@ unfinished execution, `get` and `snapshot` remain available but `set` and `send`
 return `GraphError::ChatNotReady`. There is no automatic retry or in-flight retry
 method. If an agent controller or child tool suspends, `send` returns
 `GraphError::ChatSuspended`, not an assistant response. Use Chat's manual
-`next`, `resume`, and `resume_fetch` methods when the application owns orchestration;
-see [external request delivery](fetch.md).
+`submit`, `next`, `resume`, and `resume_agent` methods when the application owns orchestration;
+see [agent worker delivery](agent_execution.md).
 
-Client creation and execution failures from either send method retain their Rath
-diagnostics. Use `error.client_error()` or match
-`GraphError::AgentClient { operation, source }`; see [client error inspection](clients.md#inspect-client-errors).
-Async sends record a portable failure in the continuation before returning the
-original local error. Restoration preserves the portable diagnostics, not the
-original Rust source object, and does not redispatch that completed operation.
+Client creation and execution failures from either send method retain portable Rath
+diagnostics. Use `error.agent_error()` or match `GraphError::AgentFailed { source }`;
+see [client error inspection](clients.md#inspect-client-errors).
+Async sends accept the same portable completion used by external workers.
+Restoration preserves its diagnostics, not the original Rust source object,
+and does not redispatch that completed operation.
 Inspecting an error does not make an unfinished Chat ready for another submission.
 
 See the [deterministic Chat builder example](../examples/graph_chat_builder.rs) for a
@@ -291,6 +291,77 @@ async fn configure_support(
 See [clients.md](clients.md) for model URLs, tools, dynamic filters, memory,
 attachments, and agent configuration.
 
+### Catalogue-defined JSON tools
+
+Use `Toolset::json` when a catalogue supplies tool definitions at runtime. Both
+`Agent::tools` and `ChatBuilder::tools` execute their `FnOnce` builder immediately,
+so it can capture fetched definitions. Each registered handler is a reusable,
+capturing `Fn(serde_json::Value, Context)` returning an asynchronous
+`Result<serde_json::Value, ToolError>`.
+
+```rust
+let mut chat = Chat::builder::<String, String>()
+    .model("openai:///gpt-5")
+    .instructions("Assist staff")
+    .tools(move |tools| {
+        tools.json(definition, Some(output_schema), move |args, ctx| {
+            proxy(operation.clone(), args, ctx)
+        })
+    })
+    .tool_budget_named("find_staff_member", 2)
+    .build(ctx)?;
+```
+
+`definition` is Rath's `ToolDefinition`, with the model-facing alias, description
+and canonical input schema. `operation` is an application-owned trusted binding;
+it stays outside model-controlled arguments. The proxy uses `Context` to obtain
+the application's service, current-user credentials and permissions. The same
+proxy can serve many aliases without Rust request/response types per endpoint.
+See the runnable [JSON tools example](../examples/graph_json_tools.rs).
+
+Input requires an explicit root `type: "object"`. Schemas use a fixed Draft
+2020-12 profile, with its standard dialect URI optionally declared at the root.
+Supported assertions include required fields, nullable type unions, enums, numeric
+and length bounds, additional/schema-valued properties, composition, conditionals
+and unevaluated properties/items. Local `$defs` and acyclic same-document JSON
+Pointer `$ref`s are supported, including `~0`/`~1` escapes and assertion siblings.
+Unsupported dialects, unknown keywords/formats, remote/file references, recursion,
+anchors, `$id` rebasing, custom vocabularies and content keywords fail construction.
+No schema retrieval occurs. Descriptive annotations remain unchanged; defaults
+are never inserted, and `readOnly`/`writeOnly` do not enforce permissions.
+
+Formats are asserted: `date`, `date-time`, `time`, `duration`, `email`, `idn-email`,
+`hostname`, `idn-hostname`, `ipv4`, `ipv6`, `uri`, `uri-reference`, `uri-template`,
+`iri`, `iri-reference`, `uuid`, `regex`, `json-pointer` and `relative-json-pointer`.
+Arguments and results are validated without coercion, filtering extra keys,
+inventing null fields, or reparsing successful JSON strings. Values retain the
+existing VM numeric limits: finite f64 and signed/unsigned 64-bit integers.
+
+The output schema applies only to successful tool values. `None` explicitly
+permits any JSON success; `Some(false)` rejects every success. `ToolError`
+envelopes bypass this schema and retain their correctable/fatal classification.
+Invalid arguments produce a correctable validation error before the handler runs
+and consume the existing alias budget. Invalid successful outputs are fatal and
+remain accepted failures across restore; the handler is not replayed automatically.
+Named budgets work in `AgentConfig` too, sharing identity with typed budgets.
+Duplicate names, reserved `__rath_final_output`, zero/unknown/duplicate budgets and
+invalid schemas fail at the applicable build/activation boundary.
+
+Pravah passes the canonical input schema to Rath and enforces it locally. Rath's
+provider-specific presentation can impose stricter requirements or lose assertions;
+this API does not guarantee equivalent provider support for every admitted schema.
+Tool output schemas do not become the model's final-answer schema.
+
+Persist the exact catalogue revision and compatible operation bindings alongside
+the separately retained graph. Changing aliases, descriptions, order, or either
+schema changes its fingerprint and rejects exact snapshot continuation. Restoring
+uses a newly supplied `Context`, so handlers must check current permissions even
+for checkpointed calls. Imported conversation history can start a new execution
+with a new catalogue; it does not resume the old one. Detached worker hosts must
+select the matching registry because a tool request alone carries no deployment
+identity. HTTP routing, authentication, storage, retries and external-effect
+idempotency remain application responsibilities.
+
 ## Snapshot And Restore
 
 Take a snapshot before the first message or between completed turns and persist
@@ -340,17 +411,18 @@ let restored = Chat::<_, _>::from_snapshot(tutor, snapshot, restored_ctx)?
 The persistence and preparation contracts are part of Pravah's modern root API;
 applications do not need to import `pravah::legacy` to implement them.
 
-The synchronous runtime commits messages as execution progresses. Chat then
-uses its optional `HistoryManager` to persist original entries before pruning.
-Stores must deduplicate redelivery by stable entry ID, including after restoration.
-A persistence failure retains committed messages and model progress; call
-`chat.maintain().await?` to retry maintenance without another model call.
+The synchronous runtime commits accepted messages as execution progresses.
+Builder `.store(...)` enables persistence and loading; `.compactor(...)` enables
+working-memory preparation. Their dependencies live only in the agent executor.
+Original entries are persisted before replacement and final output is flushed
+before a turn completes. Stores must deduplicate redelivery by stable entry ID.
+Successful write acknowledgements survive later failures and restoration.
 
-Manual `submit/next/resume_fetch` usage requires explicit `chat.maintain().await?`
-before stepping and after completion. Async `send` handles maintenance automatically.
-Builder `.store(...)` and `.compactor(...)` configure the same manager; alternatively
-supply `.history_manager(manager)` before `.build(ctx)?`.
-Without a manager, messages remain in snapshots and history grows without trimming.
+Manual `submit/next/resume_agent` and async `send` use the same worker operations;
+neither requires a separate maintenance call. A store failure after generation
+retains the recorded model result and never causes automatic regeneration.
+Reinstall required services when restoring. Without a store or compactor,
+messages remain in snapshots and history grows without trimming.
 
 Implement `Compactor::compact(&self, request, ctx)` to return
 `Result<CompactionResult, YourError>`. The owned `Context` is a shared clone of
@@ -380,15 +452,12 @@ indices must still cover the full prefix, including the old summary.
 Async Chat invokes the policy once before each eligible model dispatch, including
 tool-loop redispatch and forced conclusion, and never after the final response.
 It validates the whole decision and resulting tool-call/result groups before
-changing history. Policy errors propagate as `GraphError::HistoryCompaction`
-with the original error as their source; invalid decisions return
-`GraphError::HistoryCompactionValidation`. Neither error executes the model or
-changes the history/checkpoint present before preparation. The pending user
-message has already been recorded by then. For application-controlled retries,
-retry `HistoryManager::maintain` without stepping, or `chat.maintain()` when
-manually driving Chat. Repeated explicit maintenance can rerun the policy at
-the same boundary. Restoration reattaches fresh dependencies. This does not add an in-flight retry
-operation to `Chat::send()`; calling `send()` again on an unfinished turn returns
+changing history. Worker failures become `GraphError::AgentFailed` with portable
+diagnostics. A preparation failure prevents model execution and leaves working
+history unchanged, although earlier successful store acknowledgements are retained.
+The pending user message has already been recorded by then. Delivery and processing
+are separate; once a failure is accepted, stepping does not redispatch its operation.
+There is no in-flight retry operation in `Chat::send()`; another `send()` returns
 `GraphError::ChatNotReady`. Restoring an unfinished Chat preserves that limitation;
 it does not automatically resume the failed dispatch.
 
@@ -399,8 +468,8 @@ summary rows or delete commands to the store. Snapshots remain the source for
 restoring prepared working memory. Repeated consolidation can bound retained
 past exchanges, but the protected current exchange and summary text still take
 space. Applications choose what knowledge to preserve and how large a summary
-may become. A later attachment or provider failure does not undo a successful
-preparation; policies should tolerate retries.
+may become. A later provider failure does not undo successful preparation or
+persistence. Policies and stores should tolerate host redelivery of unacknowledged work.
 
 Policies and their dependencies are never serialized. Reattach a fresh policy
 after restore, as above. Without a policy, ordinary chat retains its history.
@@ -419,6 +488,15 @@ provide the summarizer, storage, retry handling, and any model-specific size
 estimation. Configure a separate per-request output cap with
 [`AgentConfig::max_output_tokens`](clients.md#limit-generated-output); history
 preparation does not itself enforce that cap or an input-token budget.
+
+## Release Working History
+
+Between completed turns, `chat.conversation_is_active(session_id)` reports false
+and `chat.drop_conversation(session_id)?` releases that working conversation.
+Use the exact `HistoryEntry::session_id` (for example `key:customer/42`). Release
+does not delete the store's archive; the next keyed turn can reload it, or starts
+fresh without a store. Active turns reject removal without mutation. See
+[conversation lifetime](history.md#conversation-lifetime-and-release).
 
 ## Operational Responsibilities
 

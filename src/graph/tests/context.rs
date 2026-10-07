@@ -1,87 +1,124 @@
 use super::*;
-use crate::graph::fetch::DynFetchHandler;
+use crate::graph::agent_request::AgentOperation;
 
 struct ContextDelta(i64);
 
-/// Keeps the arithmetic dependency outside runtime state.
-fn executor(flow: &CompiledFlow<TypedAmount, TypedAmount>, delta: i64) -> FetchExecutor {
+/// Keeps asynchronous dependencies outside the prepared graph and execution snapshots.
+fn executor(flow: &PreparedGraph, delta: i64) -> AgentExecutor {
     let mut deps = Deps::default();
     deps.insert(Arc::new(ContextDelta(delta)));
-    let mut executor =
-        FetchExecutor::new(ctx().with_deps(deps)).with_registry(Arc::new(flow.registry().clone()));
-    executor.register("delta", AddDelta).unwrap();
-    assert!(executor.register("delta", AddDelta).is_err());
-    executor
+    flow.executor(ctx().with_deps(deps))
 }
 
+#[derive(Default)]
 struct AddDelta;
-
-impl DynFetchHandler for AddDelta {
+impl ContinuationHandler for AddDelta {
+    fn start<'a>(
+        &'a self,
+        _: &'a Value,
+        _: Option<Value>,
+        inputs: Vec<Value>,
+        _: ContinuationContext<'_>,
+    ) -> Result<ContinuationTransition, GraphError> {
+        let input = inputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| GraphError::Invalid("missing amount".into()))?;
+        Ok(ContinuationTransition {
+            checkpoint: Some(1_u32.into()),
+            agent: Some(AgentRequest::new(
+                uuid::Uuid::nil(),
+                AgentOperation::Tool {
+                    handler: HandlerKey::new("delta"),
+                    input,
+                },
+            )),
+            ..Default::default()
+        })
+    }
+    fn advance<'a>(
+        &'a self,
+        _: &'a Value,
+        _: Value,
+        event: ContinuationEvent,
+        _: ContinuationContext<'_>,
+    ) -> Result<ContinuationTransition, GraphError> {
+        let ContinuationEvent::Agent { response, .. } = event else {
+            return Err(GraphError::Invalid("missing completion".into()));
+        };
+        let output = response
+            .outcome
+            .map_err(|source| GraphError::AgentFailed { source })?;
+        Ok(ContinuationTransition {
+            outputs: vec![output],
+            ..Default::default()
+        })
+    }
+}
+impl DynAgentHandler for AddDelta {
     fn execute<'a>(
         &'a self,
-        fetch: &'a Fetch,
+        request: &'a AgentRequest,
         context: Context,
-    ) -> BoxFuture<'a, Result<FetchResponse, GraphError>> {
+    ) -> BoxFuture<'a, Result<Value, GraphError>> {
         Box::pin(async move {
-            let Some(FetchBody::Value(value)) = fetch.request().body_ref() else {
-                return Err(GraphError::FetchValidation("missing amount".into()));
+            let AgentOperation::Tool { input, .. } = request.operation.as_ref() else {
+                return Err(GraphError::Invalid("missing tool input".into()));
             };
-            let mut amount: TypedAmount = from_value(value.clone()).unwrap();
+            let mut amount: TypedAmount = from_value(input.clone())
+                .map_err(|error| GraphError::Invalid(error.to_string()))?;
             let delta = context
                 .require::<ContextDelta>()
                 .map_err(|error| GraphError::Invalid(error.to_string()))?;
-            amount.value += delta.0;
-            Ok(FetchResponse::new(200).body(FetchBody::Value(to_value(amount).unwrap())))
+            amount.value = amount
+                .value
+                .checked_add(delta.0)
+                .ok_or_else(|| GraphError::Invalid("amount overflow".into()))?;
+            to_value(amount).map_err(|error| GraphError::Invalid(error.to_string()))
         })
     }
 }
 
-fn request(amount: TypedAmount) -> FetchRequest {
-    FetchRequest::new("POST", "delta://add").body(FetchBody::Value(to_value(amount).unwrap()))
-}
-
-fn response(outcome: Result<FetchResponse, FetchError>) -> TypedAmount {
-    let response = outcome.unwrap();
-    let Some(FetchBody::Value(value)) = response.body_ref() else {
-        panic!("missing amount")
-    };
-    from_value(value.clone()).unwrap()
-}
-
-fn context_bound_amount(root: Flow<TypedAmount>) -> Flow<TypedAmount> {
-    root.map(request)
-        .fetch()
-        .map(response)
-        .map(request)
-        .fetch()
-        .map(response)
+/// Compiles two callback boundaries without embedding runtime dependencies or generic HTTP effects.
+fn context_bound_amount() -> Result<PreparedGraph, GraphError> {
+    let builder = TypedGraphBuilder::<TypedAmount>::new();
+    let first = builder.continuation::<TypedAmount, TypedAmount, AddDelta, _>(builder.root(), ());
+    let second = builder.continuation::<TypedAmount, TypedAmount, AddDelta, _>(first, ());
+    let (graph, mut registry) = builder.finish(second)?.into_parts();
+    registry.insert_agent("delta", AddDelta)?;
+    PreparedGraph::new(graph, registry)
 }
 
 /// Every effect uses the selected host dependencies, independently across runtimes.
 #[tokio::test]
 async fn execution_dependencies_are_external_and_isolated() {
-    let flow = compile(context_bound_amount).unwrap();
+    let flow = context_bound_amount().unwrap();
     for (delta, expected) in [(2, 5), (3, 7)] {
         let executor = executor(&flow, delta);
         let mut runtime = flow
-            .start(TypedAmount { value: 1 }, uuid::Uuid::nil())
+            .start(
+                to_value(TypedAmount { value: 1 }).unwrap(),
+                uuid::Uuid::nil(),
+            )
             .unwrap();
         let Step::Done(output) = host::finish(&mut runtime, &executor).await.unwrap() else {
             panic!("execution should complete");
         };
-        assert_eq!(flow.decode_output(output).unwrap().value, expected);
+        assert_eq!(from_value::<TypedAmount>(output).unwrap().value, expected);
     }
 }
 
 /// A pending request restores with new host dependencies, not serialized dependencies.
 #[tokio::test]
 async fn restore_uses_fresh_executor() {
-    let flow = compile(context_bound_amount).unwrap();
+    let flow = context_bound_amount().unwrap();
     let mut runtime = flow
-        .start(TypedAmount { value: 1 }, uuid::Uuid::nil())
+        .start(
+            to_value(TypedAmount { value: 1 }).unwrap(),
+            uuid::Uuid::nil(),
+        )
         .unwrap();
-    runtime.next().unwrap();
-    assert!(matches!(runtime.next().unwrap(), Step::Fetch(_)));
+    assert!(matches!(runtime.next().unwrap(), Step::Agent(_)));
     let snapshot = runtime.snapshot().unwrap();
     assert!(
         !serde_json::to_string(&snapshot)
@@ -95,19 +132,22 @@ async fn restore_uses_fresh_executor() {
     else {
         panic!("execution should complete");
     };
-    assert_eq!(flow.decode_output(output).unwrap().value, 21);
+    assert_eq!(from_value::<TypedAmount>(output).unwrap().value, 21);
 }
 
 /// Constructing different executors has no effect on deterministic snapshot encoding.
 #[test]
 fn snapshots_are_independent_of_executor_dependencies() {
-    let flow = compile(context_bound_amount).unwrap();
+    let flow = context_bound_amount().unwrap();
     let snapshots = [2, 9].map(|delta| {
         let _executor = executor(&flow, delta);
-        flow.start(TypedAmount { value: 1 }, uuid::Uuid::nil())
-            .unwrap()
-            .snapshot()
-            .unwrap()
+        flow.start(
+            to_value(TypedAmount { value: 1 }).unwrap(),
+            uuid::Uuid::nil(),
+        )
+        .unwrap()
+        .snapshot()
+        .unwrap()
     });
     assert_eq!(
         serde_json::to_vec(&snapshots[0]).unwrap(),

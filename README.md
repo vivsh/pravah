@@ -185,10 +185,10 @@ let mut execution = workflow.start(request, uuid::Uuid::now_v7())?;
 loop {
     match execution.next()? {
         Step::Continue => {}
-        Step::Fetch(fetch) => {
+        Step::Agent(request) => {
             save_checkpoint(execution.snapshot()?).await?;
-            let response = executor.execute(&fetch).await?;
-            execution.resume_fetch(fetch.id(), Ok(response))?;
+            let response = executor.execute(&request).await;
+            execution.resume_agent(response)?;
         }
         Step::Suspend(payload) => {
             save_checkpoint(execution.snapshot()?).await?;
@@ -231,7 +231,7 @@ should be idempotent or deduplicated as appropriate.
 
 ```toml
 [dependencies]
-pravah = "0.4.20"
+pravah = "0.4.21"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 ```

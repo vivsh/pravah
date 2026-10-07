@@ -34,15 +34,12 @@ fn empty_keys_and_saved_state_are_invalid() {
     assert!(validate_empty_state(None).is_ok());
 }
 
-/// Agent hook version one cannot silently omit the execution identity or select an old session.
+/// Prior checkpoint versions cannot silently restore old effect layouts.
 #[test]
-fn obsolete_agent_hooks_are_rejected() {
-    assert!(matches!(
-        super::super::effects::check_agent_hook_version(1),
-        Err(GraphError::UnsupportedVersion {
-            format: "agent hook",
-            got: 1,
-            expected: 2,
-        })
-    ));
+fn obsolete_agent_checkpoints_are_rejected() {
+    let value = super::super::effects::encode(
+        serde_json::json!({"effect":"configure","version":CHECKPOINT_VERSION - 1,"input":null}),
+    )
+    .unwrap();
+    assert!(super::super::effects::validate_effect_checkpoint(&[], &value).is_err());
 }

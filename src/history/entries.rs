@@ -193,6 +193,11 @@ impl MessageHistory {
             self.total_input = add_opt(self.total_input, u.input);
             self.total_output = add_opt(self.total_output, u.output);
         }
+        self.commit_loaded_entry(entry);
+    }
+
+    /// Imports archived context without counting its historical usage as a new execution cost.
+    pub(crate) fn commit_loaded_entry(&mut self, entry: HistoryEntry) {
         self.next_position = self.next_position.max(entry.position.saturating_add(1));
         self.entries.push(entry);
     }
@@ -237,6 +242,19 @@ impl MessageHistory {
     /// Returns all entries, including evicted ones.
     pub fn entries(&self) -> &[HistoryEntry] {
         &self.entries
+    }
+
+    /// Releases working rows without rewinding append identities or cumulative usage.
+    pub(crate) fn remove_conversation(&mut self, session: &str) {
+        self.entries.retain(|entry| entry.session_id != session);
+    }
+
+    /// Releases a frame's sorted sessions in one pass; no persistence operation is involved.
+    pub(crate) fn remove_frame_conversations(&mut self, sessions: &[String]) {
+        if !sessions.is_empty() {
+            self.entries
+                .retain(|entry| sessions.binary_search(&entry.session_id).is_err());
+        }
     }
 
     /// Applies one compaction decision.

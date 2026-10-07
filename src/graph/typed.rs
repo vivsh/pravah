@@ -419,8 +419,10 @@ where
         state.builder.set_exit(output.edge);
         let replacement = UntypedGraphBuilder::new(format!("{}_finished", state.graph_name));
         let builder = std::mem::replace(&mut state.builder, replacement);
+        let registry = state.registry.clone();
+        drop(state);
         let graph = builder.build()?;
-        let prepared = PreparedGraph::new(graph, state.registry.clone())?;
+        let prepared = PreparedGraph::new(graph, registry)?;
         Ok(CompiledFlow {
             prepared,
             _marker: PhantomData,
@@ -910,23 +912,5 @@ where
                 O::schema_name()
             ))
         })
-    }
-}
-
-impl Flow<super::fetch::FetchRequest> {
-    /// Emits an external request and waits for explicit response or failure delivery.
-    pub fn fetch(self) -> Flow<Result<super::fetch::FetchResponse, super::fetch::FetchError>> {
-        let output = with_state(&self.state, |state| {
-            let output = state.builder.edge(
-                "fetch_out",
-                type_spec::<Result<super::fetch::FetchResponse, super::fetch::FetchError>>(),
-            );
-            state
-                .builder
-                .node("fetch", NodeKind::Fetch, vec![self.edge], vec![output]);
-            output
-        })
-        .unwrap_or(self.edge);
-        Flow::from_typed(typed_edge(self.state, output))
     }
 }

@@ -8,7 +8,7 @@ Enable MCP support:
 
 ```toml
 [dependencies]
-pravah = { version = "0.4.20", features = ["mcp"] }
+pravah = { version = "0.4.21", features = ["mcp"] }
 ```
 
 ## Register an MCP Server
@@ -152,7 +152,7 @@ resource provenance are checkpointed. Restoring a snapshot does not rerun the
 configuration function or reread MCP resources. Live server registration and
 model clients remain runtime services and must be supplied again for future
 agent invocations.
-Attach the replacement `Context` to the restored workflow's Fetch executor, or
+Attach the replacement `Context` to the restored workflow's agent executor, or
 pass it to `Chat::from_snapshot`, when credentials or registrations change.
 
 See [`graph_agent_mcp`](../examples/graph_agent_mcp.rs) for the complete

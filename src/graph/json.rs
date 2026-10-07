@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::fetch::{Fetch, FetchError, FetchResponse};
+use super::agent_request::{AgentRequest, AgentResponse};
 use uuid::Uuid;
 
 use super::error::GraphError;
@@ -12,18 +12,17 @@ use super::state::Step;
 use super::value::to_value;
 
 /// Current JSON invocation request and response version.
-pub const JSON_WIRE_VERSION: u32 = 10;
+pub const JSON_WIRE_VERSION: u32 = 11;
 
 /// One external command for a trusted graph-backed workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "operation")]
 pub enum JsonRequest {
     /// Accepts one recorded external outcome without advancing execution.
-    ResumeFetch {
+    ResumeAgent {
         version: u32,
         snapshot: Snapshot,
-        id: Uuid,
-        outcome: Result<FetchResponse, FetchError>,
+        response: AgentResponse,
     },
     /// Starts a new workflow and advances it by one VM step.
     Start {
@@ -44,7 +43,7 @@ pub enum JsonRequest {
 impl JsonRequest {
     fn version(&self) -> u32 {
         match self {
-            Self::ResumeFetch { version, .. }
+            Self::ResumeAgent { version, .. }
             | Self::Start { version, .. }
             | Self::Next { version, .. }
             | Self::Resume { version, .. } => *version,
@@ -57,9 +56,9 @@ impl JsonRequest {
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum JsonResponse {
     /// One durable external operation is awaiting outcome delivery.
-    Fetch {
+    Agent {
         version: u32,
-        fetch: Fetch,
+        request: AgentRequest,
         snapshot: Snapshot,
     },
     /// The workflow advanced and can be stepped again.
@@ -112,14 +111,11 @@ impl JsonInvoker {
     pub fn invoke(&self, request: JsonRequest) -> Result<JsonResponse, GraphError> {
         validate_wire_version(request.version())?;
         let (mut runtime, step) = match request {
-            JsonRequest::ResumeFetch {
-                snapshot,
-                id,
-                outcome,
-                ..
+            JsonRequest::ResumeAgent {
+                snapshot, response, ..
             } => {
                 let mut runtime = self.restore(snapshot)?;
-                runtime.resume_fetch(id, outcome)?;
+                runtime.resume_agent(response)?;
                 (runtime, Step::Continue)
             }
             JsonRequest::Start {
@@ -166,9 +162,9 @@ fn response_from_step(runtime: &mut Runtime, step: Step) -> Result<JsonResponse,
         .map(|suspension| suspension.resume_type().to_owned());
     let snapshot = runtime.snapshot()?;
     Ok(match step {
-        Step::Fetch(fetch) => JsonResponse::Fetch {
+        Step::Agent(request) => JsonResponse::Agent {
             version: JSON_WIRE_VERSION,
-            fetch,
+            request,
             snapshot,
         },
         Step::Continue => JsonResponse::Continue {

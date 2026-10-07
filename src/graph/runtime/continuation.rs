@@ -45,10 +45,10 @@ impl Runtime {
             writes,
             child_calls,
             suspension,
-            fetch,
+            agent,
             history,
         } = transition;
-        if fetch.is_some()
+        if agent.is_some()
             && (checkpoint.is_none()
                 || suspension.is_some()
                 || !outputs.is_empty()
@@ -57,13 +57,13 @@ impl Runtime {
         {
             return Err(GraphError::InvalidContinuationTransition {
                 node: node.name.to_string(),
-                reason: "Fetch requires an exclusive checkpointed external boundary".into(),
+                reason: "agent request requires an exclusive checkpointed external boundary".into(),
             });
         }
-        let fetch = fetch
-            .map(|request| self.prepare_fetch(request))
+        let agent = agent
+            .map(|request| self.prepare_agent(request))
             .transpose()?;
-        let history = self.prepare_history_changes(history)?;
+        let history = self.prepare_history_changes(frame_index, history)?;
         let has_outputs = !outputs.is_empty();
         let has_checkpoint = checkpoint.is_some();
         let has_child_calls = !child_calls.is_empty();
@@ -105,7 +105,7 @@ impl Runtime {
             validate_continuation_suspension(node, suspension)?;
         }
         self.validate_continuation_child_calls(frame_index, node, &child_calls)?;
-        let prepared_child = if fetch.is_none() && !has_suspension {
+        let prepared_child = if agent.is_none() && !has_suspension {
             self.prepare_next_continuation_child_call(frame_index, node, &child_calls)?
         } else {
             None
@@ -181,9 +181,9 @@ impl Runtime {
         } else {
             None
         };
-        self.commit_history_changes(history);
-        if let Some(fetch) = fetch {
-            return Ok(self.commit_fetch(frame_index, node.id, fetch));
+        self.commit_history_changes(frame_index, history)?;
+        if let Some(agent) = agent {
+            return Ok(self.commit_agent(frame_index, node.id, agent));
         }
         Ok(payload.map_or(Step::Continue, Step::Suspend))
     }
@@ -213,9 +213,9 @@ impl Runtime {
                 ContinuationInput::Resume { input } => ContinuationEvent::Resume {
                     input: input.clone(),
                 },
-                ContinuationInput::Fetch { fetch, outcome } => ContinuationEvent::Fetch {
-                    fetch: fetch.clone(),
-                    outcome: outcome.clone(),
+                ContinuationInput::Agent { request, response } => ContinuationEvent::Agent {
+                    request: request.clone(),
+                    response: response.clone(),
                 },
             })
         }

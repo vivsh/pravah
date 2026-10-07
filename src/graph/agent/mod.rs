@@ -21,7 +21,9 @@ use super::registry::{
 use super::value::{Value, from_value, to_value};
 use super::{CompiledFlow, HandlerRegistry};
 
+mod boundary_validation;
 mod budget;
+pub(crate) use boundary_validation::{validate_loaded_configuration, validate_operation};
 #[cfg(test)]
 #[path = "tests/budget.rs"]
 mod budget_tests;
@@ -36,13 +38,12 @@ mod execution;
 mod function_tool;
 pub(crate) use function_tool::FunctionTool;
 mod external;
-pub(crate) use external::execute_hook;
 mod intervention;
-mod maintenance;
-pub(crate) use maintenance::dispatch_request;
+mod json_tool;
+use json_tool::JsonToolContract;
+pub(crate) use json_tool::{validate_json_children, validate_json_outcome, validate_json_snapshot};
 mod output;
 mod payload;
-mod preparation;
 mod request;
 pub(crate) use output::prepare_output_validator;
 pub(crate) mod support;
@@ -65,8 +66,9 @@ use definition::{AgentConfigurator, AgentController};
 use payload::AgentPayloadView;
 use support::*;
 
-const PAYLOAD_VERSION: u32 = 5;
-const CHECKPOINT_VERSION: u32 = 8;
+const PAYLOAD_VERSION: u32 = 6;
+const JSON_PAYLOAD_VERSION: u32 = 7;
+const CHECKPOINT_VERSION: u32 = 9;
 
 /// Validates the identity duplicated in an agent's generic continuation payload.
 pub(crate) fn validate_payload_handler(
@@ -101,7 +103,11 @@ pub(crate) fn validate_payload_handler(
 /// Rewrites identities duplicated inside a typed agent continuation payload.
 pub(crate) fn namespace_payload_handler(payload: &mut Value, handler_key: &str) {
     if payload.get("tool_handler_key").is_some() {
-        if let Ok(value) = Value::object([("tool_handler_key", Value::from(handler_key))]) {
+        let mut fields = vec![("tool_handler_key", Value::from(handler_key))];
+        if let Some(contract) = payload.get("json_contract") {
+            fields.push(("json_contract", contract.clone()));
+        }
+        if let Ok(value) = Value::object(fields) {
             *payload = value;
         }
         return;
@@ -179,6 +185,7 @@ struct AgentToolSpec {
 }
 
 struct EdgeAgentToolRuntime {
+    json_contract: Option<Arc<JsonToolContract>>,
     decode_args: Arc<dyn Fn(JsonValue) -> Result<Value, ToolError> + Send + Sync>,
     render_result:
         Arc<dyn Fn(Value) -> Result<EdgeRenderedToolResult, EdgeToolMessageError> + Send + Sync>,
@@ -271,6 +278,7 @@ impl Toolset {
             parameters: definition.parameters.clone(),
         };
         let runtime = EdgeAgentToolRuntime {
+            json_contract: None,
             decode_args: Arc::new(|value| {
                 let input: I = serde_json::from_value(value).map_err(ToolError::TypeError)?;
                 to_value(input).map_err(|err| ToolError::Fatal(err.to_string()))
@@ -324,53 +332,46 @@ where
     I: JsonSchema,
     O: JsonSchema,
 {
-    let (toolset, controller, configure, configuration, mut errors) = agent.into_parts();
+    let (toolset, controller, configure, configuration, errors) = agent.into_parts();
     let tools = toolset.into_tools();
-    let input_schema = schema_for::<I>();
-    let output_schema = schema_for::<O>();
-    let mut payload_tools = Vec::with_capacity(tools.len());
-    let mut children = Vec::with_capacity(tools.len());
-    let mut registries = Vec::with_capacity(tools.len());
-    let mut runtime_tools = Vec::with_capacity(tools.len());
-    let mut names = BTreeSet::new();
-    for tool in tools {
-        if !names.insert(tool.payload.name.clone()) {
-            errors.push(format!("duplicate agent tool name '{}'", tool.payload.name));
-            continue;
-        }
-        let mut payload = tool.payload;
-        payload.child_index = children.len();
-        payload_tools.push(payload);
-        children.push(tool.graph);
-        registries.push(tool.registry);
-        runtime_tools.push(tool.runtime);
-    }
-    let configure = configure.unwrap_or_else(|| {
-        errors.push("agent configure function is required".into());
-        AgentConfigurator::missing()
-    });
-    let payload = AgentPayload {
-        configuration,
-        version: PAYLOAD_VERSION,
-        agent_id: String::new(),
-        configure_handler_key: String::new(),
-        control_handler_key: controller.as_ref().map(|_| String::new()),
-        input_schema,
-        output_schema,
-        output_type_name: O::schema_name().into_owned(),
-        tools: payload_tools,
+    let version = if tools
+        .iter()
+        .any(|tool| tool.runtime.json_contract.is_some())
+    {
+        JSON_PAYLOAD_VERSION
+    } else {
+        PAYLOAD_VERSION
     };
-    AgentBuild {
-        payload,
-        children,
-        registries,
+    let capacity = tools.len();
+    let missing_configure = configure.is_none();
+    let mut build = AgentBuild {
+        payload: AgentPayload {
+            configuration,
+            version,
+            agent_id: String::new(),
+            configure_handler_key: String::new(),
+            control_handler_key: controller.as_ref().map(|_| String::new()),
+            input_schema: schema_for::<I>(),
+            output_schema: schema_for::<O>(),
+            output_type_name: O::schema_name().into_owned(),
+            tools: Vec::with_capacity(capacity),
+        },
+        children: Vec::with_capacity(capacity),
+        registries: Vec::with_capacity(capacity),
         handler: AgentHandler {
-            tools: runtime_tools,
+            tools: Vec::with_capacity(capacity),
             controller,
-            configure,
+            configure: configure.unwrap_or_else(AgentConfigurator::missing),
         },
         errors,
+    };
+    append_tool_graphs(tools, &mut build);
+    if missing_configure {
+        build
+            .errors
+            .push("agent configure function is required".into());
     }
+    build
 }
 
 #[derive(Clone)]

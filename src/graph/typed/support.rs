@@ -42,10 +42,7 @@ pub(super) fn namespace_graph_handlers(graph: &mut UntypedGraph, prefix: &str) {
                 namespace_graph_handlers(left, prefix);
                 namespace_graph_handlers(right, prefix);
             }
-            NodeKind::Fetch
-            | NodeKind::Builtin { .. }
-            | NodeKind::Suspend { .. }
-            | NodeKind::Goto { .. } => {}
+            NodeKind::Builtin { .. } | NodeKind::Suspend { .. } | NodeKind::Goto { .. } => {}
         }
     }
 }

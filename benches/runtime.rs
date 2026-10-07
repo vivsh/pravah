@@ -6,7 +6,6 @@ use pravah::clients::{
     Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmBackend, Message,
     ModelUrl, Provider, ProviderFactory,
 };
-use pravah::graph::fetch::rath::RathRequest;
 use pravah::graph::{
     Agent, AgentConfig, AgentDecision, AgentLoop, BuiltinNode, CompiledFlow, ContinuationContext,
     ContinuationEvent, ContinuationHandler, ContinuationTransition, EdgeId, Flow, GraphError,
@@ -14,7 +13,7 @@ use pravah::graph::{
     NodeKind, PreparedGraph, Snapshot, Step, TypeSpec, UntypedGraph, UntypedGraphBuilder, Value,
     VarId, VarKey, VarScope, compile, from_value, to_value,
 };
-use pravah::{Context, Fetch, FetchExecutor, FlowConf};
+use pravah::{AgentExecutor, AgentRequest, Context, FlowConf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -142,59 +141,64 @@ async fn run() -> Result<(), GraphError> {
     report_typed_benchmarks()?;
     report_runtime_benchmarks().await?;
     report_agent_benchmarks().await?;
-    report_fetch_executor_benchmarks().await
+    report_agent_executor_benchmarks().await
 }
 
 /// Compares graph-free construction with the existing prepared-graph path.
-async fn report_fetch_executor_benchmarks() -> Result<(), GraphError> {
+async fn report_agent_executor_benchmarks() -> Result<(), GraphError> {
     let flow = compile(benchmark_flow)?;
     let context = context().with_providers(pravah::testing::providers(BenchmarkClientFactory)?);
     let registry = Arc::new(flow.registry().clone());
-    report_allocations("fetch_executor/new", || FetchExecutor::new(context.clone()));
-    report_allocations("fetch_executor/with_registry", || {
-        FetchExecutor::new(context.clone()).with_registry(Arc::clone(&registry))
+    report_allocations("agent_executor/new", || AgentExecutor::new(context.clone()));
+    report_allocations("agent_executor/with_registry", || {
+        AgentExecutor::new(context.clone()).with_registry(Arc::clone(&registry))
     });
-    report_allocations("fetch_executor/prepared", || {
+    report_allocations("agent_executor/prepared", || {
         flow.prepared().executor(context.clone())
     });
-    report_sync("fetch_executor/new", FAST_ITERATIONS, || {
-        FetchExecutor::new(context.clone())
+    report_sync("agent_executor/new", FAST_ITERATIONS, || {
+        AgentExecutor::new(context.clone())
     });
-    report_sync("fetch_executor/with_registry", FAST_ITERATIONS, || {
-        FetchExecutor::new(context.clone()).with_registry(Arc::clone(&registry))
+    report_sync("agent_executor/with_registry", FAST_ITERATIONS, || {
+        AgentExecutor::new(context.clone()).with_registry(Arc::clone(&registry))
     });
-    report_sync("fetch_executor/prepared", FAST_ITERATIONS, || {
+    report_sync("agent_executor/prepared", FAST_ITERATIONS, || {
         flow.prepared().executor(context.clone())
     });
-    let fetch = Fetch::new(
+    let agent_flow = compile(benchmark_flow)?;
+    let setup = agent_flow.prepared().executor(context.clone());
+    let mut runtime = agent_flow.start(
+        AgentFixture {
+            prompt: "input".into(),
+        },
         uuid::Uuid::nil(),
-        Arc::new(
-            RathRequest::new(
-                "test:///benchmark",
-                ClientOptions::default(),
-                vec![Message::user("input")],
-            )
-            .into_fetch_request()?,
-        ),
-    );
-    let standalone = FetchExecutor::new(context.clone());
+    )?;
+    let fetch = loop {
+        match runtime.next()? {
+            Step::Continue => {}
+            Step::Agent(request) if request.kind() == "generate" => break request,
+            Step::Agent(request) => runtime.resume_agent(setup.execute(&request).await)?,
+            _ => return Err(GraphError::Invalid("missing generation benchmark".into())),
+        }
+    };
+    let standalone = AgentExecutor::new(context.clone());
     let prepared = flow.prepared().executor(context);
-    report_fetch_dispatch("fetch_executor/new_dispatch", &standalone, &fetch).await?;
-    report_fetch_dispatch("fetch_executor/prepared_dispatch", &prepared, &fetch).await
+    report_agent_dispatch("agent_executor/new_dispatch", &standalone, &fetch).await?;
+    report_agent_dispatch("agent_executor/prepared_dispatch", &prepared, &fetch).await
 }
 
 /// Measures one preconstructed executor repeatedly executing the same Rath request.
-async fn report_fetch_dispatch(
+async fn report_agent_dispatch(
     name: &str,
-    executor: &FetchExecutor,
-    fetch: &Fetch,
+    executor: &AgentExecutor,
+    fetch: &AgentRequest,
 ) -> Result<(), GraphError> {
-    black_box(executor.execute(fetch).await?);
+    black_box(executor.execute(fetch).await);
     let mut samples = Vec::with_capacity(VM_SAMPLES);
     for _ in 0..VM_SAMPLES {
         let start = Instant::now();
         for _ in 0..VM_ITERATIONS {
-            black_box(executor.execute(fetch).await?);
+            black_box(executor.execute(fetch).await);
         }
         samples.push(ns_per_iteration(start.elapsed(), VM_ITERATIONS));
     }
@@ -349,8 +353,8 @@ async fn run_agent_once(
     )?;
     loop {
         match runtime.next()? {
-            Step::Fetch(fetch) => {
-                runtime.resume_fetch(fetch.id(), Ok(executor.execute(&fetch).await?))?;
+            Step::Agent(fetch) => {
+                runtime.resume_agent(executor.execute(&fetch).await)?;
             }
             Step::Continue => {}
             Step::Done(output) => {
@@ -659,7 +663,7 @@ async fn report_vm(
                         black_box(output);
                         break;
                     }
-                    Step::Fetch(_) | Step::Suspend(_) => {
+                    Step::Agent(_) | Step::Suspend(_) => {
                         return Err(GraphError::Invalid(
                             "benchmark unexpectedly suspended".into(),
                         ));

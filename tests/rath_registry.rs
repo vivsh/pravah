@@ -61,7 +61,7 @@ async fn cancelled_construction_preserves_dispatch_snapshot() -> Result<(), Test
         .executor(Context::default().with_providers(registry));
     let mut runtime = flow.start("question".into(), uuid::Uuid::nil())?;
     for _ in 0..20 {
-        let pravah::Step::Fetch(fetch) = runtime.next()? else {
+        let pravah::Step::Agent(fetch) = runtime.next()? else {
             continue;
         };
         let before = serde_json::to_value(runtime.snapshot()?)?;
@@ -71,7 +71,7 @@ async fn cancelled_construction_preserves_dispatch_snapshot() -> Result<(), Test
             futures::poll!(future)
         };
         match poll {
-            std::task::Poll::Ready(result) => runtime.resume_fetch(fetch.id(), Ok(result?))?,
+            std::task::Poll::Ready(result) => runtime.resume_agent(result)?,
             std::task::Poll::Pending => {
                 assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
                 assert_eq!(runtime.snapshot()?.history().entries().len(), 1);

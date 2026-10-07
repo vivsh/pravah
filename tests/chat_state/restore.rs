@@ -20,7 +20,7 @@ async fn failed_turn_roundtrips_keep_fresh_services_idle() -> Result<(), TestErr
     )?;
     assert!(matches!(
         chat.send("question").await,
-        Err(GraphError::AgentClient { .. })
+        Err(GraphError::AgentFailed { .. })
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     for snapshot in roundtrips(&chat.snapshot()?)? {

@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use super::HistoryEntry;
 use crate::clients::{Message, Role};
 
-pub(super) const SUMMARY_AGENT_ID: &str = "__summary__";
+pub(crate) const SUMMARY_AGENT_ID: &str = "__summary__";
 pub(super) const SUMMARY_PREFIX: &str = "<pravah_working_memory>\n";
 pub(super) const SUMMARY_SUFFIX: &str = "\n</pravah_working_memory>";
 

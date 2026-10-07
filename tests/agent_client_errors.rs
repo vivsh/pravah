@@ -8,7 +8,7 @@ use pravah::{AgentClientOperation, Chat, Context, GraphError};
 mod fixtures;
 use fixtures::{TestError, client_context, keyed_error};
 
-/// Async sends retain the local source and durably accept its portable failure exactly once.
+/// Async sends retain portable diagnostics and durably accept its portable failure exactly once.
 #[tokio::test]
 async fn local_error_and_portable_restore_share_one_completed_request() -> Result<(), TestError> {
     let script = ScriptedFactory::new().then_err(ClientError::new(ErrorKind::Transport, "offline"));
@@ -20,23 +20,21 @@ async fn local_error_and_portable_restore_share_one_completed_request() -> Resul
         .await
         .err()
         .ok_or(TestError::Missing("client failure"))?;
-    assert_eq!(
-        error.client_error().map(ClientError::kind),
-        Some(ErrorKind::Transport)
-    );
-    assert!(chat.pending_fetch().is_none());
+    assert!(matches!(&error, GraphError::AgentFailed { source } if
+        source.details().and_then(|value| value.get("rath")).and_then(|value| value.get("kind")).and_then(pravah::graph::Value::as_str) == Some("transport")));
+    assert!(chat.pending_agent().is_none());
     let snapshot = chat.snapshot()?;
     let before = serde_json::to_value(&snapshot)?;
     let mut restored = definition().restore::<()>(snapshot, Context::default())?;
     assert!(
-        matches!(restored.next(), Err(GraphError::FetchFailed { source }) if source.code() == "rath")
+        matches!(restored.next(), Err(GraphError::AgentFailed { source }) if source.code() == "rath")
     );
     assert_eq!(before, serde_json::to_value(restored.snapshot()?)?);
     assert_eq!(script.calls().len(), 1);
     Ok(())
 }
 
-/// Keyed Chat submissions expose the same typed source at both client boundaries.
+/// Both durable client boundaries preserve classification and normalized cause chains.
 #[tokio::test]
 async fn keyed_chat_preserves_creation_and_execution_errors() -> Result<(), GraphError> {
     for operation in [AgentClientOperation::Create, AgentClientOperation::Execute] {
@@ -44,90 +42,94 @@ async fn keyed_chat_preserves_creation_and_execution_errors() -> Result<(), Grap
             .with_context(Provider::OpenAi, "provider operation")
             .with_source(ClientError::new(ErrorKind::Timeout, "private prompt"));
         let error = keyed_error(client_context(operation, source)?).await?;
+        let GraphError::AgentFailed { source } = &error else {
+            return Err(GraphError::Invalid("missing portable failure".into()));
+        };
+        let details = source
+            .details()
+            .ok_or_else(|| GraphError::Invalid("missing diagnostics".into()))?;
+        assert_eq!(
+            details
+                .get("operation")
+                .and_then(pravah::graph::Value::as_str),
+            Some(operation.to_string().as_str())
+        );
+        let rath = details
+            .get("rath")
+            .ok_or_else(|| GraphError::Invalid("missing Rath fields".into()))?;
+        assert_eq!(
+            rath.get("kind").and_then(pravah::graph::Value::as_str),
+            Some("transport")
+        );
+        let diagnostic = if operation == AgentClientOperation::Create {
+            rath.get("cause").unwrap()
+        } else {
+            rath
+        };
+        assert_eq!(
+            diagnostic
+                .get("cause")
+                .and_then(|v| v.get("kind"))
+                .and_then(pravah::graph::Value::as_str),
+            Some("timeout")
+        );
         assert!(
-            matches!(&error, GraphError::AgentClient { operation: actual, .. } if *actual == operation)
+            Error::source(&error)
+                .and_then(|v| v.downcast_ref::<pravah::AgentError>())
+                .is_some()
         );
-        let source = error
-            .client_error()
-            .ok_or_else(|| GraphError::Invalid("missing client source".into()))?;
-        assert_eq!(source.kind(), ErrorKind::Transport);
-        let (provider, stage) = match operation {
-            AgentClientOperation::Create => {
-                (Provider::External("test".into()), "client construction")
-            }
-            AgentClientOperation::Execute => (Provider::OpenAi, "provider operation"),
-        };
-        assert_eq!(source.provider(), Some(&provider));
-        assert_eq!(source.operation(), Some(stage));
-        let diagnostic = match operation {
-            AgentClientOperation::Create => source
-                .source()
-                .ok_or_else(|| GraphError::Invalid("missing original cause".into()))?,
-            AgentClientOperation::Execute => source,
-        };
-        assert_eq!(diagnostic.provider(), Some(&Provider::OpenAi));
-        assert_eq!(diagnostic.operation(), Some("provider operation"));
-        assert_eq!(
-            diagnostic.source().map(ClientError::kind),
-            Some(ErrorKind::Timeout)
-        );
-        let chained = Error::source(&error).and_then(|source| source.downcast_ref::<ClientError>());
-        assert!(chained.is_some_and(|chained| std::ptr::eq(chained, source)));
-        assert_eq!(
-            error.to_string(),
-            format!("agent client {operation} failed")
-        );
+        assert!(!format!("{error} {error:?}").contains("private"));
+        assert!(error.client_error().is_none());
     }
     Ok(())
 }
 
-/// Every supplied HTTP diagnostic and nested source survives keyed Chat propagation.
+/// Portable diagnostics explicitly retain HTTP metadata and bodies without displaying them.
 #[tokio::test]
 async fn keyed_chat_retains_http_diagnostics() -> Result<(), TestError> {
     let diagnostic = fixtures::http_diagnostic().await?;
     for operation in [AgentClientOperation::Create, AgentClientOperation::Execute] {
         let error = keyed_error(client_context(operation, diagnostic.clone())?).await?;
-        let retained = error
-            .client_error()
-            .ok_or(TestError::Missing("client error"))?;
-        assert_eq!(retained.kind(), ErrorKind::Http);
-        let (provider, stage) = match operation {
-            AgentClientOperation::Create => {
-                (Provider::External("test".into()), "client construction")
-            }
-            AgentClientOperation::Execute => (Provider::Ollama, "generation"),
+        let GraphError::AgentFailed { source } = &error else {
+            return Err(TestError::Missing("portable error"));
         };
-        assert_eq!(retained.provider(), Some(&provider));
-        assert_eq!(retained.operation(), Some(stage));
-        let retained = match operation {
-            AgentClientOperation::Create => retained
-                .source()
-                .ok_or(TestError::Missing("original HTTP cause"))?,
-            AgentClientOperation::Execute => retained,
+        let rath = source
+            .details()
+            .and_then(|v| v.get("rath"))
+            .ok_or(TestError::Missing("Rath diagnostic"))?;
+        let rath = if operation == AgentClientOperation::Create {
+            rath.get("cause").unwrap()
+        } else {
+            rath
         };
-        assert_eq!(retained.provider(), Some(&Provider::Ollama));
-        assert_eq!(retained.operation(), Some("generation"));
-        assert_eq!(retained.http_status(), Some(400));
-        assert_eq!(retained.provider_code(), Some("test_code"));
-        assert_eq!(retained.request_id(), Some("request-42"));
-        assert_eq!(retained.retry_after(), Some("17"));
-        let body = retained
-            .response_body()
-            .ok_or(TestError::Missing("response body"))?;
-        assert!(body.is_complete());
-        assert_eq!(body.bytes(), fixtures::PRIVATE_BODY.as_bytes());
-        let cause = Error::source(retained)
-            .and_then(|cause| cause.downcast_ref::<ClientError>())
-            .ok_or(TestError::Missing("nested cause"))?;
-        assert_eq!(cause.kind(), ErrorKind::Transport);
         assert_eq!(
-            cause.source().map(ClientError::kind),
-            Some(ErrorKind::Timeout)
+            rath.get("http_status")
+                .and_then(pravah::graph::Value::as_u64),
+            Some(400)
         );
+        for (key, expected) in [
+            ("provider_code", "test_code"),
+            ("request_id", "request-42"),
+            ("retry_after", "17"),
+        ] {
+            assert_eq!(
+                rath.get(key).and_then(pravah::graph::Value::as_str),
+                Some(expected)
+            );
+        }
+        let bytes: Vec<u8> = serde_json::from_value(serde_json::to_value(
+            rath.get("response_body")
+                .and_then(|v| v.get("bytes"))
+                .unwrap(),
+        )?)?;
+        assert_eq!(bytes, fixtures::PRIVATE_BODY.as_bytes());
         assert_eq!(
-            error.to_string(),
-            format!("agent client {operation} failed")
+            rath.get("cause")
+                .and_then(|v| v.get("kind"))
+                .and_then(pravah::graph::Value::as_str),
+            Some("transport")
         );
+        assert!(!format!("{error} {error:?}").contains(fixtures::PRIVATE_BODY));
     }
     Ok(())
 }
@@ -191,26 +193,25 @@ async fn graph_client_failure_preserves_checkpoint_and_history() -> Result<(), T
         let mut runtime = flow.start("question".into(), uuid::Uuid::nil())?;
         let mut failed = false;
         for _ in 0..20 {
-            let pravah::Step::Fetch(fetch) = runtime.next()? else {
+            let pravah::Step::Agent(fetch) = runtime.next()? else {
                 continue;
             };
             let before = serde_json::to_value(runtime.snapshot()?)?;
-            match executor.execute(&fetch).await {
-                Err(error) => {
-                    assert!(
-                        matches!(error, GraphError::AgentClient { operation: actual, .. } if actual == operation)
-                    );
-                    assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
-                    assert!(matches!(
-                        executor.execute(&fetch).await,
-                        Err(GraphError::AgentClient { .. })
-                    ));
-                    assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
-                    failed = true;
-                    break;
-                }
-                Ok(response) => runtime.resume_fetch(fetch.id(), Ok(response))?,
+            let response = executor.execute(&fetch).await;
+            if response.outcome().is_err() {
+                assert_eq!(response.outcome().unwrap_err().code(), "rath");
+                assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
+                runtime.resume_agent(response)?;
+                let accepted = serde_json::to_value(runtime.snapshot()?)?;
+                assert!(matches!(
+                    runtime.next(),
+                    Err(GraphError::AgentFailed { .. })
+                ));
+                assert_eq!(accepted, serde_json::to_value(runtime.snapshot()?)?);
+                failed = true;
+                break;
             }
+            runtime.resume_agent(response)?;
         }
         assert!(failed, "client boundary was not reached");
     }

@@ -1,6 +1,12 @@
 use super::*;
 
 impl Runtime {
+    /// Opts Chat into installed worker services; the VM remains the sole policy owner.
+    pub(crate) fn enable_chat_history(&mut self, store: bool, compactor: bool) {
+        self.state.history_policy.persist |= store;
+        self.state.history_policy.load |= store;
+        self.state.history_policy.compact |= compactor;
+    }
     /// Locates the Chat agent through the bootstrap edge's authored consumer relationship.
     fn chat_agent_node(
         &self,
@@ -125,14 +131,9 @@ impl Runtime {
 /// Borrows invocation data through explicit effect phases without retaining a decoded copy.
 fn checkpoint_input(checkpoint: &Value) -> Result<Option<&Value>, GraphError> {
     match checkpoint.get("effect").and_then(Value::as_str) {
-        Some("record") => checkpoint
-            .get("next")
-            .and_then(|next| next.get("checkpoint"))
-            .filter(|value| !value.is_null())
-            .map(checkpoint_input)
-            .transpose()
-            .map(Option::flatten),
-        Some("control" | "prepare" | "generate") => checkpoint
+        // A flush retains only an already completed transition; graph input remains validated above.
+        Some("flush") => Ok(None),
+        Some("control" | "generate") => checkpoint
             .get("checkpoint")
             .ok_or_else(|| GraphError::SnapshotValidation("missing effect checkpoint".into()))
             .and_then(checkpoint_input),

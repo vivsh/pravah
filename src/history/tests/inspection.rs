@@ -117,6 +117,9 @@ fn request_helpers_are_scoped_to_committed_history() -> Result<(), serde_json::E
         }],
         committed,
         protected,
+        last_usage: history.last_usage(),
+        total_input: history.total_input(),
+        total_output: history.total_output(),
     };
     assert_eq!(
         request.enum_messages(0).map(|(i, _)| i).collect::<Vec<_>>(),

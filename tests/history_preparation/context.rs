@@ -146,16 +146,12 @@ async fn restore_uses_fresh_context_for_preparation() -> Result<(), TestError> {
 #[tokio::test]
 async fn missing_dependency_preserves_history_and_checkpoint() -> Result<(), TestError> {
     let client = factory();
-    let (mut runtime, executor, mut manager) =
-        failures::before_dispatch(ReadContext, &client).await?;
-    let before = serde_json::to_value(runtime.snapshot()?)?;
-    let result = host::step_with_manager(&mut runtime, &executor, &mut manager).await;
-    assert!(
-        matches!(result, Err(GraphError::HistoryCompaction { source, .. })
-        if source.is::<DepsError>())
-    );
+    let (mut runtime, executor) = failures::before_dispatch(ReadContext, &client).await?;
+    let before = serde_json::to_value(runtime.snapshot()?.history())?;
+    let result = host::finish(&mut runtime, &executor).await;
+    assert!(matches!(result, Err(GraphError::AgentFailed { .. })));
     assert!(client.calls().is_empty());
-    assert_eq!(serde_json::to_value(runtime.snapshot()?)?, before);
+    assert_eq!(serde_json::to_value(runtime.snapshot()?.history())?, before);
     Ok(())
 }
 
@@ -163,7 +159,7 @@ async fn missing_dependency_preserves_history_and_checkpoint() -> Result<(), Tes
 #[tokio::test]
 async fn unfinished_dispatch_uses_restored_context() -> Result<(), TestError> {
     let old_client = factory();
-    let (runtime, _, _) = failures::before_dispatch(ReadContext, &old_client).await?;
+    let (runtime, _) = failures::before_dispatch(ReadContext, &old_client).await?;
     let snapshot = runtime.snapshot()?;
     let flow = pravah::compile(|root: pravah::Flow<Question>| root.agent(tutor))?;
     for copy in copies(&snapshot)? {
@@ -173,13 +169,13 @@ async fn unfinished_dispatch_uses_restored_context() -> Result<(), TestError> {
         let executor = flow
             .prepared()
             .executor(context(service.clone(), client.clone())?);
-        let mut manager = pravah::HistoryManager::new().with_compactor(ReadContext);
+        let executor = executor.with_compactor(ReadContext);
         assert_eq!(
             serde_json::to_value(restored.snapshot()?)?,
             serde_json::to_value(&snapshot)?
         );
         assert_eq!(service.calls.load(Ordering::SeqCst), 0);
-        host::finish_with_manager(&mut restored, &executor, &mut manager).await?;
+        host::finish(&mut restored, &executor).await?;
         assert_eq!(service.calls.load(Ordering::SeqCst), 1);
         assert_eq!(client.calls().len(), 1);
     }

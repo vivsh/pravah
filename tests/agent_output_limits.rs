@@ -1,6 +1,6 @@
 #[path = "support/host.rs"]
 mod host;
-use pravah::graph::FetchExecutor;
+use pravah::graph::AgentExecutor;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -163,7 +163,7 @@ fn setting_a_cap_allocates_nothing() {
 }
 
 /// Captures committed activation before a model dispatch, without relying on exact step counts.
-async fn activated(runtime: &mut Runtime, executor: &FetchExecutor) -> Result<Snapshot, TestError> {
+async fn activated(runtime: &mut Runtime, executor: &AgentExecutor) -> Result<Snapshot, TestError> {
     for _ in 0..20 {
         let snapshot = runtime.snapshot()?;
         if checkpoint_mut(&mut serde_json::to_value(&snapshot)?).is_ok() {
@@ -185,18 +185,23 @@ async fn request_cap_is_optional_and_visible_to_preparation() -> Result<(), Test
         let script = ScriptedFactory::new().then_output(json!("answer"));
         let calls = Arc::new(AtomicUsize::new(0));
         let executor = flow.prepared().executor(context(script.clone(), cap)?);
-        let mut manager = pravah::HistoryManager::new().with_compactor(ObserveCap {
+        let executor = executor.with_compactor(ObserveCap {
             calls: calls.clone(),
             cap,
         });
-        let mut runtime = flow.start(
-            Request {
-                cap,
-                ..Request::capped()
-            },
-            uuid::Uuid::nil(),
-        )?;
-        host::finish_with_manager(&mut runtime, &executor, &mut manager).await?;
+        let mut runtime = flow
+            .start(
+                Request {
+                    cap,
+                    ..Request::capped()
+                },
+                uuid::Uuid::nil(),
+            )?
+            .with_history(pravah::HistoryPolicy {
+                compact: true,
+                ..Default::default()
+            })?;
+        host::finish(&mut runtime, &executor).await?;
         assert_eq!(script.calls().len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -219,18 +224,23 @@ async fn tool_loops_and_forced_conclusion_keep_the_cap() -> Result<(), TestError
         let executor = flow
             .prepared()
             .executor(context(script.clone(), Some(2048))?);
-        let mut manager = pravah::HistoryManager::new().with_compactor(ObserveCap {
+        let executor = executor.with_compactor(ObserveCap {
             calls: calls.clone(),
             cap: Some(2048),
         });
-        let mut runtime = flow.start(
-            Request {
-                turns,
-                ..Request::capped()
-            },
-            uuid::Uuid::nil(),
-        )?;
-        host::finish_with_manager(&mut runtime, &executor, &mut manager).await?;
+        let mut runtime = flow
+            .start(
+                Request {
+                    turns,
+                    ..Request::capped()
+                },
+                uuid::Uuid::nil(),
+            )?
+            .with_history(pravah::HistoryPolicy {
+                compact: true,
+                ..Default::default()
+            })?;
+        host::finish(&mut runtime, &executor).await?;
         assert_eq!(script.calls().len(), 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }

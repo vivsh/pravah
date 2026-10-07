@@ -26,6 +26,13 @@ pub(super) async fn resolve_agent_config(
         .collect::<Vec<_>>();
     let budget = AgentBudgetState::resolve(&config, &tools);
     let resources = resolve_resources(ctx, &config.resources).await?;
+    let message = crate::clients::materialize_owned_messages(vec![config.message], ctx)
+        .await
+        .map_err(|error| {
+            GraphError::AgentConfigValidation(format!("message materialization failed: {error}"))
+        })?
+        .pop()
+        .ok_or_else(|| GraphError::Invalid("activation message disappeared".into()))?;
     let resolved = ResolvedAgentConfig {
         model: config.model,
         instructions: config.instructions,
@@ -38,7 +45,7 @@ pub(super) async fn resolve_agent_config(
     Ok(super::effects::Configured {
         key: config.key,
         resolved,
-        message: config.message,
+        message,
         budget,
     })
 }
@@ -116,6 +123,7 @@ pub(super) fn error_tool_spec(err: String) -> AgentToolSpec {
         graph: empty_error_graph(),
         registry: HandlerRegistry::new(),
         runtime: Arc::new(EdgeAgentToolRuntime {
+            json_contract: None,
             decode_args: Arc::new(|_| Err(ToolError::Fatal("invalid tool".into()))),
             render_result: Arc::new(|_| {
                 Err(EdgeToolMessageError::Fatal {
@@ -631,4 +639,27 @@ pub(super) fn empty_error_graph() -> UntypedGraph {
             entry: crate::graph::EdgeId(0),
             exit: crate::graph::EdgeId(0),
         })
+}
+
+/// Collects valid, uniquely named child graphs into their existing construction owner.
+pub(super) fn append_tool_graphs(tools: Vec<AgentToolSpec>, build: &mut AgentBuild) {
+    let mut names = BTreeSet::new();
+    for tool in tools {
+        if tool.payload.name == "__invalid_tool__" && tool.runtime.json_contract.is_none() {
+            build.errors.push(tool.payload.description);
+            continue;
+        }
+        if !names.insert(tool.payload.name.clone()) {
+            build
+                .errors
+                .push(format!("duplicate agent tool name '{}'", tool.payload.name));
+            continue;
+        }
+        let mut payload = tool.payload;
+        payload.child_index = build.children.len();
+        build.payload.tools.push(payload);
+        build.children.push(tool.graph);
+        build.registries.push(tool.registry);
+        build.handler.tools.push(tool.runtime);
+    }
 }

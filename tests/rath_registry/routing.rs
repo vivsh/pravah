@@ -1,8 +1,8 @@
 use super::*;
+use pravah::ChatBuilder;
 use pravah::clients::{
     CacheControl, ErrorBody, ErrorKind, Provider, ResponseFormat, ThinkingLevel,
 };
-use pravah::{AgentClientOperation, ChatBuilder};
 use serde_json::json;
 use std::sync::{
     Arc,
@@ -102,8 +102,13 @@ async fn last_registry_wins_in_both_orders() -> Result<(), TestError> {
             Err(error) => {
                 assert!(!inject_last);
                 assert_eq!(
-                    error.client_error().map(ClientError::kind),
-                    Some(ErrorKind::UnsupportedCapability)
+                    error
+                        .agent_error()
+                        .and_then(|error| error.details())
+                        .and_then(|v| v.get("rath"))
+                        .and_then(|v| v.get("kind"))
+                        .and_then(pravah::graph::Value::as_str),
+                    Some("unsupported_capability")
                 );
             }
         }
@@ -188,24 +193,27 @@ async fn creation_failure_has_no_fallback_and_redacts_credentials() -> Result<()
         .await
         .err()
         .ok_or(TestError::Missing("creation failure"))?;
-    assert!(matches!(
-        &error,
-        GraphError::AgentClient {
-            operation: AgentClientOperation::Create,
-            ..
-        }
-    ));
+    assert!(matches!(&error, GraphError::AgentFailed { .. }));
     let source = error
-        .client_error()
-        .ok_or(TestError::Missing("typed cause"))?;
-    assert_eq!(source.kind(), ErrorKind::UnsupportedCapability);
-    assert_eq!(source.provider(), Some(&Provider::OpenAi));
+        .agent_error()
+        .ok_or(TestError::Missing("portable cause"))?;
+    let retained = source
+        .details()
+        .and_then(|v| v.get("rath"))
+        .ok_or(TestError::Missing("Rath details"))?;
+    assert_eq!(
+        retained.get("kind").and_then(pravah::graph::Value::as_str),
+        Some("unsupported_capability")
+    );
     assert!(source.message().contains("recorded-only failure"));
     assert!(!format!("{error} {error:?} {source}").contains(&secret));
-    let body = source
-        .response_body()
-        .ok_or(TestError::Missing("redacted body"))?;
-    assert!(!String::from_utf8_lossy(body.bytes()).contains(&secret));
+    let bytes: Vec<u8> = serde_json::from_value(serde_json::to_value(
+        retained
+            .get("response_body")
+            .and_then(|v| v.get("bytes"))
+            .ok_or(TestError::Missing("body"))?,
+    )?)?;
+    assert!(!String::from_utf8_lossy(&bytes).contains(&secret));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let snapshot = chat.snapshot()?;
     let before = serde_json::to_value(&snapshot)?;
@@ -274,16 +282,15 @@ async fn execution_failure_does_not_retry() -> Result<(), TestError> {
         .await
         .err()
         .ok_or(TestError::Missing("execution error"))?;
-    assert!(matches!(
-        &error,
-        GraphError::AgentClient {
-            operation: AgentClientOperation::Execute,
-            ..
-        }
-    ));
+    assert!(matches!(&error, GraphError::AgentFailed { .. }));
     assert_eq!(
-        error.client_error().map(ClientError::kind),
-        Some(ErrorKind::Timeout)
+        error
+            .agent_error()
+            .and_then(|error| error.details())
+            .and_then(|v| v.get("rath"))
+            .and_then(|v| v.get("kind"))
+            .and_then(pravah::graph::Value::as_str),
+        Some("timeout")
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(script.calls().len(), 1);
@@ -318,16 +325,15 @@ async fn invalid_settings_never_reach_injected_factory() -> Result<(), TestError
             .await
             .err()
             .ok_or(TestError::Missing("validation error"))?;
+        assert!(matches!(&error, GraphError::AgentFailed { .. }));
         assert!(matches!(
-            &error,
-            GraphError::AgentClient {
-                operation: AgentClientOperation::Create,
-                ..
-            }
-        ));
-        assert!(matches!(
-            error.client_error().map(ClientError::kind),
-            Some(ErrorKind::Validation | ErrorKind::InvalidUrl)
+            error
+                .agent_error()
+                .and_then(|error| error.details())
+                .and_then(|v| v.get("rath"))
+                .and_then(|v| v.get("kind"))
+                .and_then(pravah::graph::Value::as_str),
+            Some("validation" | "invalid_url")
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }

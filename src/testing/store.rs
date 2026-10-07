@@ -49,6 +49,17 @@ impl Default for CapturingHistoryStore {
 impl HistoryStore for CapturingHistoryStore {
     type Error = Infallible;
 
+    async fn load(&self, key: &str) -> Result<Vec<HistoryEntry>, Infallible> {
+        let mut seen = std::collections::BTreeSet::new();
+        Ok(self
+            .all_entries()
+            .into_iter()
+            .filter(|entry| {
+                entry.session_id.strip_prefix("key:") == Some(key) && seen.insert(entry.id)
+            })
+            .collect())
+    }
+
     async fn record(&self, entry: &HistoryEntry) -> Result<(), Infallible> {
         self.entries
             .lock()

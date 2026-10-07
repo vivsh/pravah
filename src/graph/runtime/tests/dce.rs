@@ -45,9 +45,8 @@ async fn runtime_executes_only_surviving_instructions() {
         .start(Value::from(7_i64), uuid::Uuid::nil())
         .expect("runtime should start");
 
-    assert_eq!(
-        runtime.next().expect("runtime step"),
-        Step::Done(Value::from(7_i64))
+    assert!(
+        matches!(runtime.next().expect("runtime step"), Step::Done(value) if value == Value::from(7_i64))
     );
     assert_eq!(prepared.graph().nodes.len(), authored_nodes);
 }

@@ -5,17 +5,15 @@ use pravah::clients::Provider;
 /// Stops at generation and inspects the local typed failure before durable delivery.
 async fn execution_error(
     runtime: &mut Runtime,
-    executor: &FetchExecutor,
-) -> Result<GraphError, TestError> {
+    executor: &AgentExecutor,
+) -> Result<pravah::AgentResponse, TestError> {
     for _ in 0..100 {
-        if let Some(fetch) = runtime.pending_fetch()
-            && fetch.request().url() == "rath://generate"
+        if let Some(fetch) = runtime.pending_agent()
+            && fetch.kind() == "generate"
         {
-            return executor
-                .execute(fetch)
-                .await
-                .err()
-                .ok_or(TestError::Missing("execution failure"));
+            let response = executor.execute(fetch).await;
+            assert!(response.outcome().is_err());
+            return Ok(response);
         }
         host::step(runtime, executor).await?;
     }
@@ -23,14 +21,11 @@ async fn execution_error(
 }
 
 /// Records a portable failure once; later VM errors must retain this exact accepted input.
-fn accept_failure(runtime: &mut Runtime, error: &GraphError) -> Result<Value, TestError> {
-    let id = runtime
-        .pending_fetch()
-        .ok_or(TestError::Missing("pending request"))?
-        .id();
-    let failure = pravah::graph::FetchError::from_execution_error(error)
-        .map_err(|error| GraphError::FetchValidation(error.to_string()))?;
-    runtime.resume_fetch(id, Err(failure))?;
+fn accept_failure(
+    runtime: &mut Runtime,
+    response: pravah::AgentResponse,
+) -> Result<Value, TestError> {
+    runtime.resume_agent(response)?;
     Ok(serde_json::to_value(runtime.snapshot()?)?)
 }
 
@@ -48,7 +43,7 @@ async fn output_limit_provider_uses_metadata_or_client() -> Result<(), TestError
         let executor = flow.prepared().executor(context(script, Some(2048))?);
         let mut runtime = flow.start(Request::capped(), uuid::Uuid::nil())?;
         let error = execution_error(&mut runtime, &executor).await?;
-        let before = accept_failure(&mut runtime, &error)?;
+        let before = accept_failure(&mut runtime, error)?;
         assert!(matches!(
             runtime.next(),
             Err(GraphError::AgentOutputLimit { provider, .. }) if provider == expected
@@ -77,10 +72,10 @@ async fn invalid_caps_are_atomic_activation_errors() -> Result<(), TestError> {
         let mut runtime = flow.start(request, uuid::Uuid::nil())?;
         let mut rejected = false;
         for _ in 0..20 {
-            let before = serde_json::to_value(runtime.snapshot()?)?;
+            let before = serde_json::to_value(runtime.snapshot()?.history())?;
             match host::step(&mut runtime, &executor).await {
-                Err(GraphError::AgentConfigValidation(_)) => {
-                    assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
+                Err(GraphError::AgentFailed { .. }) => {
+                    assert_eq!(before, serde_json::to_value(runtime.snapshot()?.history())?);
                     rejected = true;
                     break;
                 }
@@ -111,7 +106,7 @@ async fn exhausted_output_never_becomes_a_partial_answer() -> Result<(), TestErr
         .executor(context(script.clone(), Some(2048))?);
     let mut runtime = flow.start(Request::capped(), uuid::Uuid::nil())?;
     let local = execution_error(&mut runtime, &executor).await?;
-    let before = accept_failure(&mut runtime, &local)?;
+    let before = accept_failure(&mut runtime, local)?;
     let error = runtime
         .next()
         .err()
@@ -145,13 +140,7 @@ async fn other_client_errors_remain_client_errors() -> Result<(), TestError> {
     let executor = flow.prepared().executor(context(script, Some(2048))?);
     let mut runtime = flow.start(Request::capped(), uuid::Uuid::nil())?;
     let error = execution_error(&mut runtime, &executor).await?;
-    assert!(matches!(
-        error,
-        GraphError::AgentClient {
-            operation: pravah::AgentClientOperation::Execute,
-            ..
-        }
-    ));
+    assert_eq!(error.outcome().unwrap_err().code(), "rath");
     Ok(())
 }
 
@@ -179,20 +168,19 @@ async fn conclusion_output_exhaustion_remains_distinct() -> Result<(), TestError
     let mut runtime = flow.start(request, uuid::Uuid::nil())?;
     // The first generation succeeds; continue until the later conclusion request fails.
     loop {
-        if let Some(fetch) = runtime.pending_fetch() {
-            match executor.execute(fetch).await {
-                Ok(response) => runtime.resume_fetch(fetch.id(), Ok(response))?,
-                Err(error) => {
-                    let before = accept_failure(&mut runtime, &error)?;
-                    assert!(matches!(
-                        runtime.next(),
-                        Err(GraphError::AgentOutputLimit { .. })
-                    ));
-                    assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
-                    assert_eq!(script.calls().len(), 2);
-                    return Ok(());
-                }
+        if let Some(fetch) = runtime.pending_agent() {
+            let response = executor.execute(fetch).await;
+            if response.outcome().is_err() {
+                let before = accept_failure(&mut runtime, response)?;
+                assert!(matches!(
+                    runtime.next(),
+                    Err(GraphError::AgentOutputLimit { .. })
+                ));
+                assert_eq!(before, serde_json::to_value(runtime.snapshot()?)?);
+                assert_eq!(script.calls().len(), 2);
+                return Ok(());
             }
+            runtime.resume_agent(response)?;
         } else {
             runtime.next()?;
         }

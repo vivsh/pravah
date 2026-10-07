@@ -21,6 +21,7 @@ impl Runtime {
     /// Validates sequential changes against borrowed previews before any VM mutation.
     pub(super) fn prepare_history_changes(
         &self,
+        frame_index: usize,
         changes: Vec<HistoryChange>,
     ) -> Result<Vec<ValidatedHistoryChange>, GraphError> {
         let mut prepared = Vec::with_capacity(changes.len());
@@ -28,6 +29,7 @@ impl Runtime {
         for change in changes {
             let change = match change {
                 HistoryChange::Append(entries) => {
+                    self.validate_conversation_append(frame_index, &entries)?;
                     position = validate_append(&entries, position, self.state.execution_id)?;
                     ValidatedHistoryChange::Append(entries)
                 }
@@ -58,10 +60,15 @@ impl Runtime {
     }
 
     /// Applies already validated deltas after the full continuation transition is accepted.
-    pub(super) fn commit_history_changes(&mut self, changes: Vec<ValidatedHistoryChange>) {
+    pub(super) fn commit_history_changes(
+        &mut self,
+        frame_index: usize,
+        changes: Vec<ValidatedHistoryChange>,
+    ) -> Result<(), GraphError> {
         for change in changes {
             match change {
                 ValidatedHistoryChange::Append(entries) => {
+                    self.register_frame_conversations(frame_index, &entries)?;
                     for entry in entries {
                         self.history.commit_entry(entry);
                     }
@@ -74,6 +81,7 @@ impl Runtime {
                 }
             }
         }
+        Ok(())
     }
 }
 

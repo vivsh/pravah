@@ -1,5 +1,5 @@
 use crate::clients::ErrorKind;
-use crate::graph::FetchExecutor;
+use crate::graph::AgentExecutor;
 use crate::graph::tests::host;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -323,6 +323,10 @@ struct FailOnceStore {
 impl crate::history::HistoryStore for FailOnceStore {
     type Error = RecordFailure;
 
+    async fn load(&self, _key: &str) -> Result<Vec<crate::history::HistoryEntry>, Self::Error> {
+        Err(RecordFailure)
+    }
+
     async fn record(&self, _entry: &crate::history::HistoryEntry) -> Result<(), Self::Error> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == self.fail_at {
@@ -410,13 +414,13 @@ fn test_context(
 async fn run_to_output(
     flow: &CompiledFlow<BudgetRequest, BudgetAnswer>,
     runtime: &mut Runtime,
-    executor: &FetchExecutor,
+    executor: &AgentExecutor,
 ) -> Result<BudgetAnswer, GraphError> {
     loop {
         match host::step(runtime, executor).await? {
             Step::Continue => {}
             Step::Done(value) => return flow.decode_output(value),
-            Step::Fetch(_) => panic!("host must deliver fetch"),
+            Step::Agent(_) => panic!("host must deliver fetch"),
             Step::Suspend(_) => {
                 return Err(GraphError::Invalid(
                     "budget test agent suspended unexpectedly".into(),
@@ -441,7 +445,7 @@ async fn budgets_share_tool_visibility_and_conclusion_control() -> Result<(), cr
     let factory = RecordedFactory::new(responses);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(Arc::clone(&trace)))?;
-    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
+    let executor = AgentExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -514,7 +518,7 @@ async fn agent_only_budget_forces_one_tool_disabled_conclusion() -> Result<(), c
         output_response("turn ceiling"),
     ]);
     let ctx = test_context(factory.clone(), None)?;
-    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
+    let executor = AgentExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -536,7 +540,7 @@ async fn tool_only_budget_leaves_model_turns_unrestricted() -> Result<(), crate:
         output_response("tool ceiling"),
     ]);
     let ctx = test_context(factory.clone(), None)?;
-    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
+    let executor = AgentExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -561,7 +565,7 @@ async fn last_budgeted_turn_may_complete_naturally() -> Result<(), crate::GraphE
     let factory = RecordedFactory::new([output_response("natural")]);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(trace))?;
-    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
+    let executor = AgentExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -588,7 +592,7 @@ async fn budget_conclusion_preserves_normalized_structured_output() -> Result<()
     ]);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(trace))?;
-    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
+    let executor = AgentExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(
             BudgetRequest {
@@ -623,7 +627,7 @@ async fn rejected_proposal_does_not_consume_tool_budget() -> Result<(), crate::G
         output_response("done"),
     ]);
     let ctx = test_context(factory.clone(), None)?;
-    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
+    let executor = AgentExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -693,7 +697,7 @@ async fn activation_validates_only_effective_budget_errors() -> Result<(), crate
     let factory = RecordedFactory::new([output_response("filtered")]);
     let ctx = test_context(factory.clone(), None)?;
     let executor =
-        FetchExecutor::new(ctx.clone()).with_registry(Arc::new(filtered.registry().clone()));
+        AgentExecutor::new(ctx.clone()).with_registry(Arc::new(filtered.registry().clone()));
     let mut runtime = filtered
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -711,14 +715,17 @@ async fn activation_validates_only_effective_budget_errors() -> Result<(), crate
 async fn assert_invalid_budget_configuration() {
     let invalid = compile(invalid_budget_flow).expect("invalid config is runtime data");
     let executor =
-        FetchExecutor::new(Context::default()).with_registry(Arc::new(invalid.registry().clone()));
+        AgentExecutor::new(Context::default()).with_registry(Arc::new(invalid.registry().clone()));
     let mut runtime = invalid
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
     let error = host::step(&mut runtime, &executor)
         .await
         .expect_err("invalid budget configuration should fail");
-    let message = error.to_string();
+    let GraphError::AgentFailed { source } = error else {
+        panic!("expected portable failure")
+    };
+    let message = source.message();
     assert!(message.contains("positive"));
     assert!(message.contains("only be declared once"));
     assert!(message.contains("unknown agent tool 'unknown_request'"));
@@ -735,7 +742,7 @@ async fn budget_state_restores_without_reconfiguration() -> Result<(), crate::Gr
     ]);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory.clone(), Some(Arc::clone(&trace)))?;
-    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
+    let executor = AgentExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -764,7 +771,7 @@ async fn restore_rejects_malformed_budget_state() -> Result<(), crate::GraphErro
     let factory = RecordedFactory::new([output_response("unused")]);
     let trace = Arc::new(BudgetTrace::default());
     let ctx = test_context(factory, Some(trace))?;
-    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
+    let executor = AgentExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
     let mut runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
@@ -798,14 +805,16 @@ async fn history_failure_leaves_budget_admission_retryable() -> Result<(), crate
         calls: Arc::new(AtomicUsize::new(0)),
         fail_at: 2,
     };
-    let executor = FetchExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
-    let mut runtime = flow
+    let executor = AgentExecutor::new(ctx.clone()).with_registry(Arc::new(flow.registry().clone()));
+    let runtime = flow
         .start(BudgetRequest { text: "run".into() }, uuid::Uuid::nil())
         .unwrap();
-    let mut manager = crate::HistoryManager::new().with_store(store);
-
-    await_history_failure(&mut runtime, &executor, &mut manager).await;
-    manager.maintain(&mut runtime, ctx).await?;
+    let mut runtime = runtime.with_history(crate::HistoryPolicy {
+        persist: true,
+        ..Default::default()
+    })?;
+    let executor = executor.with_store(store);
+    await_history_failure(&mut runtime, &executor).await;
     let output = run_to_output(&flow, &mut runtime, &executor).await.unwrap();
     assert_eq!(output.text, "retried");
     let unavailable = factory.messages()[1]
@@ -817,17 +826,22 @@ async fn history_failure_leaves_budget_admission_retryable() -> Result<(), crate
 }
 
 /// Advances until the injected persistence error reaches the caller.
-async fn await_history_failure(
-    runtime: &mut Runtime,
-    executor: &FetchExecutor,
-    manager: &mut crate::HistoryManager,
-) {
+async fn await_history_failure(runtime: &mut Runtime, executor: &AgentExecutor) {
     loop {
-        match host::step_with_manager(runtime, executor, manager).await {
-            Ok(Step::Continue) => {}
-            Err(GraphError::HistoryPersistence(_)) => return,
-            Ok(other) => panic!("expected retryable history failure, got {other:?}"),
-            Err(error) => panic!("expected history failure, got {error}"),
+        match runtime.next().unwrap() {
+            Step::Continue => {}
+            Step::Agent(request) => {
+                let response = executor.execute(&request).await;
+                if response.outcome().is_err() {
+                    // The host explicitly retries delivery before accepting a failure.
+                    let retried = executor.execute(&request).await;
+                    assert!(retried.outcome().is_ok());
+                    runtime.resume_agent(retried).unwrap();
+                    return;
+                }
+                runtime.resume_agent(response).unwrap();
+            }
+            other => panic!("expected persistence failure, got {other:?}"),
         }
     }
 }
@@ -836,7 +850,7 @@ async fn await_history_failure(
 async fn advance_through_after_tools(
     runtime: &mut Runtime,
     trace: &BudgetTrace,
-    executor: &FetchExecutor,
+    executor: &AgentExecutor,
 ) {
     loop {
         host::step(runtime, executor).await.unwrap();

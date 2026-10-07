@@ -125,7 +125,8 @@ impl<T> Agent<T> {
     }
 
     /// Declares every tool graph this agent may expose at runtime.
-    pub fn tools(mut self, build: fn(Toolset) -> Toolset) -> Self {
+    /// The builder runs immediately and may consume captured catalogue definitions.
+    pub fn tools(mut self, build: impl FnOnce(Toolset) -> Toolset) -> Self {
         if self.definition.configure.is_some() {
             self.definition
                 .errors

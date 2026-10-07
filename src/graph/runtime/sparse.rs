@@ -8,10 +8,45 @@ use crate::graph::model::TypeSpec;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SparseState {
     pub(crate) execution_id: Uuid,
-    pub(crate) next_fetch_sequence: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) next_agent_sequence: u64,
+    #[serde(default, skip_serializing_if = "no_history_policy")]
+    pub(crate) history_policy: crate::history::HistoryPolicy,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) persisted_history_position: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeSet::is_empty",
+        deserialize_with = "deserialize_loaded_keys"
+    )]
+    pub(crate) loaded_conversation_keys: std::collections::BTreeSet<String>,
     pub(crate) frames: Arc<[SparseFrame]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) waiting: Option<SparseWaiting>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+fn no_history_policy(policy: &crate::history::HistoryPolicy) -> bool {
+    *policy == Default::default()
+}
+
+/// Rejects duplicate or reordered durable load acknowledgements instead of normalizing them.
+fn deserialize_loaded_keys<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::BTreeSet<String>, D::Error> {
+    let keys = Vec::<String>::deserialize(deserializer)?;
+    if keys
+        .iter()
+        .zip(keys.iter().skip(1))
+        .any(|(left, right)| left >= right)
+    {
+        return Err(serde::de::Error::custom(
+            "loaded conversation keys must be strictly ordered and unique",
+        ));
+    }
+    Ok(keys.into_iter().collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,10 +55,10 @@ pub(crate) enum SparseWaiting {
     Suspend {
         suspension: SparseSuspension,
     },
-    Fetch {
+    Agent {
         frame_depth: usize,
         node: NodeId,
-        fetch: Fetch,
+        request: AgentRequest,
     },
 }
 
@@ -38,6 +73,8 @@ impl SparseState {
 pub(crate) struct SparseFrame {
     pub(crate) graph_path: GraphPath,
     pub(crate) write_epoch: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unkeyed_conversations: Vec<String>,
     #[serde(default, skip_serializing_if = "arc_is_empty")]
     pub(crate) edges: Arc<[SparseEdge]>,
     #[serde(default, skip_serializing_if = "arc_is_empty")]
@@ -119,20 +156,23 @@ pub(super) fn sparse_state(
         Some(Waiting::Suspend(value)) => Some(SparseWaiting::Suspend {
             suspension: sparse_suspension(callables, value)?,
         }),
-        Some(Waiting::Fetch {
+        Some(Waiting::Agent {
             frame_depth,
             node,
-            fetch,
-        }) => Some(SparseWaiting::Fetch {
+            request,
+        }) => Some(SparseWaiting::Agent {
             frame_depth: *frame_depth,
             node: *node,
-            fetch: fetch.clone(),
+            request: request.clone(),
         }),
         None => None,
     };
     Ok(SparseState {
         execution_id: state.execution_id,
-        next_fetch_sequence: state.next_fetch_sequence,
+        next_agent_sequence: state.next_agent_sequence,
+        history_policy: state.history_policy,
+        persisted_history_position: state.persisted_history_position,
+        loaded_conversation_keys: state.loaded_conversation_keys.clone(),
         frames,
         waiting,
     })
@@ -152,20 +192,23 @@ pub(super) fn expand_state(
         Some(SparseWaiting::Suspend { suspension }) => {
             Some(Waiting::Suspend(expand_suspension(callables, suspension)?))
         }
-        Some(SparseWaiting::Fetch {
+        Some(SparseWaiting::Agent {
             frame_depth,
             node,
-            fetch,
-        }) => Some(Waiting::Fetch {
+            request,
+        }) => Some(Waiting::Agent {
             frame_depth,
             node,
-            fetch,
+            request,
         }),
         None => None,
     };
     Ok(State {
         execution_id: sparse.execution_id,
-        next_fetch_sequence: sparse.next_fetch_sequence,
+        next_agent_sequence: sparse.next_agent_sequence,
+        history_policy: sparse.history_policy,
+        persisted_history_position: sparse.persisted_history_position,
+        loaded_conversation_keys: sparse.loaded_conversation_keys,
         frames,
         waiting,
     })
@@ -181,6 +224,7 @@ fn sparse_frame(
     Ok(SparseFrame {
         graph_path: graph.path.clone(),
         write_epoch: frame.write_epoch,
+        unkeyed_conversations: frame.unkeyed_conversations.clone(),
         edges: sparse_edges(frame, frame_index)?,
         variables: sparse_variables(frame, frame_index)?,
         node_epochs: sparse_node_epochs(frame),
@@ -221,6 +265,7 @@ fn expand_frame(
     )?;
     expand_node_inboxes(&mut frame, &sparse.continuation_inboxes, frame_index)?;
     expand_node_queues(&mut frame, &sparse.continuation_child_queues, frame_index)?;
+    frame.unkeyed_conversations = sparse.unkeyed_conversations.clone();
     Ok(frame)
 }
 
@@ -243,6 +288,7 @@ fn empty_frame(
         continuation_child_queues: vec![Vec::new(); graph.graph.nodes.len()],
         node_epochs: vec![0; graph.graph.nodes.len()],
         reader_counts: Vec::new(),
+        unkeyed_conversations: Vec::new(),
         return_target,
     }
 }

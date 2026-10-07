@@ -21,6 +21,9 @@ fn request<'a>(
         framework_messages: &[],
         committed,
         protected: &[],
+        last_usage: None,
+        total_input: None,
+        total_output: None,
     }
 }
 

@@ -3,10 +3,12 @@
 //! This module exposes the serializable untyped graph, typed builder, VM
 //! runtime, and continuation registry used by production graph workflows.
 
-pub use crate::history::HistoryManager;
+pub use crate::history::HistoryPolicy;
 
 /// Agent facade built on continuation nodes.
 mod agent;
+/// Direct serializable agent operations and borrowed worker routing information.
+pub mod agent_request;
 /// Imperative untyped graph builder.
 pub mod builder;
 /// Chat helper built from mark/goto, a keyed agent, and suspend.
@@ -15,8 +17,6 @@ pub mod chat;
 pub mod diagram;
 /// Error types for graph and VM failures.
 pub mod error;
-/// Buffered requests and outcomes for externally executed operations.
-pub mod fetch;
 /// Dense graph identifier types.
 pub mod ids;
 /// Trusted transport-neutral JSON invocation facade.
@@ -51,13 +51,11 @@ pub use agent::{
     AgentLoopMetrics, AgentResume, AgentSuspension, AgentToolProposal, AgentToolResult,
     McpResourceRef, ToolFilter, ToolInfo, Toolset,
 };
+pub use agent_request::{AgentError, AgentExecutor, AgentRequest, AgentResponse, DynAgentHandler};
 pub use builder::UntypedGraphBuilder;
 pub use chat::{Chat, ChatBuilder, ChatRequest, ChatStep, ChatTurn};
 pub use diagram::GraphDiagram;
 pub use error::{AgentClientOperation, GraphError};
-pub use fetch::{
-    DynFetchHandler, Fetch, FetchBody, FetchError, FetchExecutor, FetchRequest, FetchResponse,
-};
 pub use ids::{EdgeId, HandlerKey, MarkId, NodeId, VarId};
 pub use json::{JSON_WIRE_VERSION, JsonInvoker, JsonRequest, JsonResponse};
 #[cfg(feature = "mcp")]

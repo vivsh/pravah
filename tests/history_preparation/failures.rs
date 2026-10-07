@@ -46,21 +46,29 @@ fn workflow(root: Flow<Question>) -> Flow<Answer> {
 pub(super) async fn before_dispatch(
     policy: impl Compactor + 'static,
     factory: &ScriptedFactory,
-) -> Result<(Runtime, FetchExecutor, pravah::HistoryManager), GraphError> {
+) -> Result<(Runtime, AgentExecutor), GraphError> {
     let flow = compile(workflow)?;
     let executor = flow
         .prepared()
         .executor(Context::default().with_providers(pravah::testing::providers(factory.clone())?));
-    let manager = pravah::HistoryManager::new().with_compactor(policy);
-    let mut execution = flow.start(
-        Question {
-            text: "protected".into(),
-        },
-        uuid::Uuid::nil(),
-    )?;
+    let executor = executor.with_compactor(policy);
+    let mut execution = flow
+        .start(
+            Question {
+                text: "protected".into(),
+            },
+            uuid::Uuid::nil(),
+        )?
+        .with_history(pravah::HistoryPolicy {
+            compact: true,
+            ..Default::default()
+        })?;
     for _ in 0..10 {
-        if !execution.snapshot()?.history().is_empty() {
-            return Ok((execution, executor, manager));
+        if execution
+            .pending_agent()
+            .is_some_and(|request| request.kind() == "generate")
+        {
+            return Ok((execution, executor));
         }
         host::step(&mut execution, &executor).await?;
     }
@@ -71,27 +79,27 @@ pub(super) async fn before_dispatch(
 #[tokio::test]
 async fn policy_failure_makes_zero_calls_and_preserves_snapshot() -> Result<(), GraphError> {
     let factory = ScriptedFactory::new().then_output(serde_json::json!({"text":"ok"}));
-    let (mut execution, executor, mut manager) = before_dispatch(Failing, &factory).await?;
+    let (mut execution, executor) = before_dispatch(Failing, &factory).await?;
     let before = execution.snapshot()?;
-    match host::step_with_manager(&mut execution, &executor, &mut manager).await {
-        Err(GraphError::HistoryCompaction { source, .. }) => {
-            assert!(source.is::<PreparationFailure>())
+    match host::finish(&mut execution, &executor).await {
+        Err(GraphError::AgentFailed { source }) => {
+            assert!(source.message().contains("memory service unavailable"))
         }
         other => panic!("unexpected preparation outcome: {other:?}"),
     }
     assert!(factory.calls().is_empty());
     assert_eq!(
-        serde_json::to_value(&before).expect("snapshot"),
-        serde_json::to_value(execution.snapshot()?).expect("snapshot")
+        serde_json::to_value(before.history()).expect("snapshot"),
+        serde_json::to_value(execution.snapshot()?.history()).expect("snapshot")
     );
     let flow = compile(workflow)?;
     let mut restored = flow.restore(before)?;
     let executor = flow
         .prepared()
         .executor(Context::default().with_providers(pravah::testing::providers(factory.clone())?));
-    let mut manager = pravah::HistoryManager::new().with_compactor(Summarize);
+    let executor = executor.with_compactor(Summarize);
     assert!(matches!(
-        host::finish_with_manager(&mut restored, &executor, &mut manager).await?,
+        host::finish(&mut restored, &executor).await?,
         Step::Done(_)
     ));
     assert_eq!(factory.calls().len(), 1);
@@ -103,15 +111,14 @@ async fn policy_failure_makes_zero_calls_and_preserves_snapshot() -> Result<(), 
 async fn runtime_rejects_protected_and_out_of_range_eviction() -> Result<(), GraphError> {
     for indices in [vec![0], vec![99], vec![0, 0]] {
         let factory = ScriptedFactory::new();
-        let (mut execution, executor, mut manager) =
-            before_dispatch(Invalid { indices }, &factory).await?;
-        let before = serde_json::to_value(execution.snapshot()?).expect("snapshot");
+        let (mut execution, executor) = before_dispatch(Invalid { indices }, &factory).await?;
+        let before = serde_json::to_value(execution.snapshot()?.history()).expect("history");
         assert!(matches!(
-            host::step_with_manager(&mut execution, &executor, &mut manager).await,
-            Err(GraphError::HistoryCompactionValidation { .. })
+            host::finish(&mut execution, &executor).await,
+            Err(GraphError::AgentFailed { .. })
         ));
         assert_eq!(
-            serde_json::to_value(execution.snapshot()?).expect("snapshot"),
+            serde_json::to_value(execution.snapshot()?.history()).expect("history"),
             before
         );
         assert!(factory.calls().is_empty());

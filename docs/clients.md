@@ -133,50 +133,44 @@ retry-after metadata and the source chain. `ErrorBody` is also re-exported under
 `pravah::clients`; accessing `response_body()` is explicit because it may contain
 private content. Do not log raw response bodies by default.
 
-Graph workflows and Chat retain the original Rath error in
-`GraphError::AgentClient { operation, source }`. `AgentClientOperation::Create`
-means the client factory failed; `Execute` means a model request failed. This
-discriminator is separate from Rath's provider-specific `source.operation()`.
-Rath's registry annotates construction failures with the selected provider and
-`client construction` operation; distinct original context and HTTP diagnostics
-remain in its typed cause chain. Pravah preserves the error returned by Rath.
+Graph workflows and Chat cross a serializable worker boundary. Creation and
+execution failures become `GraphError::AgentFailed { source: AgentError }`.
+Use the borrowed `agent_error()` accessor; diagnostics are portable values,
+not the original Rath Rust error or source chain:
 
 ```rust
-use pravah::{AgentClientOperation, GraphError};
-use pravah::clients::ErrorKind;
+use pravah::GraphError;
 
 fn inspect_failure(error: &GraphError) {
-    if let Some(client) = error.client_error() {
-        let kind: ErrorKind = client.kind();
-        let status: Option<u16> = client.http_status();
-        let retry_after: Option<&str> = client.retry_after();
-        // Apply application policy to this metadata; no text parsing is needed.
-    }
-    if let GraphError::AgentClient {
-        operation: AgentClientOperation::Create, source,
-    } = error {
-        // Inspect source.kind() and source.provider() to diagnose client setup.
+    if let Some(failure) = error.agent_error() {
+        let code = failure.code();
+        if code == "rath" {
+            let details = failure.details();
+            let operation = details.and_then(|value| value.get("operation"));
+            let rath = details.and_then(|value| value.get("rath"));
+            let status = rath.and_then(|value| value.get("http_status"));
+            // Apply application policy; inspecting private diagnostics is explicit.
+        }
     }
 }
 ```
 
-The same error propagates from `Chat::send` and `Chat::send_with_key`.
-`client_error()` borrows the original error without copying it, and standard
-`std::error::Error::source()` also exposes it, preserving nested causes.
-`Display` says only `agent client creation failed` or `agent client execution failed`;
-it does not include provider messages, bodies, prompts, or generated output.
-Treat explicit source inspection, error-chain reporting and Debug output as
-diagnostic access, not automatically safe user-facing logging.
+Rath diagnostics retain kind, provider, operation, HTTP status, provider code,
+request ID, retry metadata, response-body bytes and normalized nested causes
+when supplied. `AgentError::message()` and `details()` may expose private content;
+default Display and Debug do not. Both `Chat::send` and `send_with_key` use this
+same portable failure contract, including after restoration.
 
-Migrate tuple matches `GraphError::AgentClient(_)` to the struct variant above.
-Runtime rejection of an empty tool-call batch is instead
-`GraphError::AgentResponseValidation`; it has no Rath source. Provider-reported
-output exhaustion during execution still becomes `GraphError::AgentOutputLimit`,
-discards partial output, and returns None from `client_error()`.
+Direct local integrations can still return `GraphError::AgentClient { operation,
+source }`, and `client_error()` borrows that original Rath error. The executor
+normalizes it before returning a durable response; no nonserialized error source
+travels alongside that response.
 
-Pravah adds no automatic retry. The compatibility-only legacy retry layer retains
-its broad provider/transport retry policy; it is not a provider-specific HTTP retry
-policy. Chat's unfinished-turn restrictions are unchanged.
+An empty tool-call batch remains `GraphError::AgentResponseValidation`, distinct
+from a provider failure. Provider-reported output exhaustion still becomes
+`GraphError::AgentOutputLimit`, discarding partial output. Pravah adds no automatic
+retry, and an accepted failure does not redispatch after restoration. Chat's
+unfinished-turn restrictions remain in effect.
 
 ## Declare and Filter Tools
 
@@ -318,7 +312,7 @@ example including suspension and typed resume.
 Enable the `mcp` feature to use Streamable HTTP resource servers:
 
 ```toml
-pravah = { version = "0.4.20", features = ["mcp"] }
+pravah = { version = "0.4.21", features = ["mcp"] }
 ```
 
 Register credentials and headers on the runtime `Context`, not in the graph or

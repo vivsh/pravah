@@ -1,8 +1,8 @@
 use super::Chat;
 use super::request::validate_resources;
-use crate::HistoryManager;
 use crate::clients::Message;
 use crate::graph::agent::{RequestedToolBudget, agent_tool_identity};
+use crate::history::{DynCompactor, DynHistoryStore};
 use crate::{
     Agent, AgentConfig, AgentDecision, AgentLoop, Compactor, Context, GraphError, HistoryStore,
     McpResourceRef, Snapshot, Toolset,
@@ -10,6 +10,7 @@ use crate::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
+use std::sync::Arc;
 use std::{error::Error, future::Future, marker::PhantomData};
 
 /// Builds a graph-backed Chat retaining one keyed conversation without a configure callback.
@@ -21,7 +22,8 @@ pub struct ChatBuilder<I, O, S = ()> {
     agent: Agent<I>,
     errors: Vec<String>,
     state: S,
-    services: Option<HistoryManager>,
+    store: Option<Arc<dyn DynHistoryStore>>,
+    compactor: Option<Arc<dyn DynCompactor>>,
     _marker: PhantomData<fn() -> O>,
 }
 
@@ -46,19 +48,14 @@ impl Chat<(), ()> {
             agent: Agent::root(),
             errors: Vec::new(),
             state: (),
-            services: None,
+            store: None,
+            compactor: None,
             _marker: PhantomData,
         }
     }
 }
 
 impl<I, O, S> ChatBuilder<I, O, S> {
-    /// Installs caller-owned history maintenance, replacing earlier store/policy settings.
-    /// The manager is runtime-only and must be supplied again after restoration.
-    pub fn history_manager(mut self, manager: HistoryManager) -> Self {
-        self.services = Some(manager);
-        self
-    }
     /// Selects this Chat's conversation key, replacing any earlier value.
     /// Empty keys fail at build/restore; omission derives an isolated key from the execution UUID.
     pub fn key(mut self, key: impl Into<String>) -> Self {
@@ -74,20 +71,21 @@ impl<I, O, S> ChatBuilder<I, O, S> {
             agent: self.agent,
             errors: self.errors,
             state,
-            services: self.services,
+            store: self.store,
+            compactor: self.compactor,
             _marker: PhantomData,
         }
     }
 
     /// Installs the pre-request compactor, replacing any previous one; never serialized.
     pub fn compactor(mut self, compactor: impl Compactor + 'static) -> Self {
-        self.services = Some(self.services.unwrap_or_default().with_compactor(compactor));
+        self.compactor = Some(Arc::new(compactor));
         self
     }
 
     /// Installs the message history store, replacing any previous one; never serialized.
     pub fn store(mut self, store: impl HistoryStore + 'static) -> Self {
-        self.services = Some(self.services.unwrap_or_default().with_store(store));
+        self.store = Some(Arc::new(store));
         self
     }
 
@@ -108,7 +106,8 @@ impl<I, O, S> ChatBuilder<I, O, S> {
         self
     }
     /// Declares candidate tools; duplicate identities fail at build or restore.
-    pub fn tools(mut self, build: fn(Toolset) -> Toolset) -> Self {
+    /// The builder runs immediately and may consume captured catalogue definitions.
+    pub fn tools(mut self, build: impl FnOnce(Toolset) -> Toolset) -> Self {
         self.agent = self.agent.tools(build);
         self
     }
@@ -144,6 +143,27 @@ impl<I, O, S> ChatBuilder<I, O, S> {
         );
         self
     }
+    /// Caps accepted calls for an explicit tool name, including a JSON alias.
+    /// Invalid, duplicate or unknown budgets fail build or restore.
+    pub fn tool_budget_named(mut self, name: impl Into<String>, calls: u32) -> Self {
+        let name = name.into();
+        if calls == 0
+            || self
+                .settings
+                .tool_budgets
+                .iter()
+                .any(|budget| budget.name == name)
+        {
+            self.errors
+                .push(format!("invalid or repeated tool budget for '{name}'"));
+        } else {
+            self.settings
+                .tool_budgets
+                .push(RequestedToolBudget { name, limit: calls });
+        }
+        self
+    }
+
     /// Caps accepted calls for the canonical tool input identity; errors accumulate until build.
     pub fn tool_budget<T: JsonSchema>(mut self, calls: u32) -> Self {
         match agent_tool_identity::<T>() {
@@ -172,7 +192,7 @@ where
     pub fn build(self, ctx: Context) -> Result<Chat<I, O, S>, GraphError> {
         let agent = finish(self.settings, self.instructions, self.agent, self.errors)?;
         let chat = Chat::from_definition(agent, self.state, ctx)?;
-        Ok(attach_services(chat, self.services))
+        Ok(attach_services(chat, self.store, self.compactor))
     }
 }
 
@@ -191,7 +211,7 @@ where
     {
         let agent = finish(self.settings, self.instructions, self.agent, self.errors)?;
         let chat = Chat::restore_definition(agent, snapshot, ctx)?;
-        Ok(attach_services(chat, self.services))
+        Ok(attach_services(chat, self.store, self.compactor))
     }
 }
 
@@ -235,11 +255,13 @@ where
 
 fn attach_services<I, O, S>(
     mut chat: Chat<I, O, S>,
-    services: Option<HistoryManager>,
+    store: Option<Arc<dyn DynHistoryStore>>,
+    compactor: Option<Arc<dyn DynCompactor>>,
 ) -> Chat<I, O, S> {
-    if let Some(services) = services {
-        chat.history_manager = Some(services);
-    }
+    chat.runtime
+        .enable_chat_history(store.is_some(), compactor.is_some());
+    chat.executor.store = store;
+    chat.executor.compactor = compactor;
     chat
 }
 

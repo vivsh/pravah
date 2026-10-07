@@ -1,13 +1,14 @@
 use async_trait::async_trait;
 
 use crate::Context;
-use crate::clients::{ClientOptions, Message};
+use crate::clients::{ClientOptions, Message, TokenUsage};
 use crate::graph::GraphError;
 
 use super::HistoryEntry;
 
 /// Borrowed context for one upcoming model request, before attachment materialization.
 /// Provider wire transformations and exact token counts are not represented here.
+/// Entries belong only to the selected session; reported usage covers the entire execution.
 pub struct CompactionRequest<'a> {
     pub(crate) session_id: &'a str,
     pub(crate) model: &'a str,
@@ -15,9 +16,29 @@ pub struct CompactionRequest<'a> {
     pub(crate) framework_messages: &'a [Message],
     pub(crate) committed: &'a [&'a HistoryEntry],
     pub(crate) protected: &'a [&'a HistoryEntry],
+    pub(crate) last_usage: Option<TokenUsage>,
+    pub(crate) total_input: Option<u32>,
+    pub(crate) total_output: Option<u32>,
 }
 
 impl CompactionRequest<'_> {
+    /// Returns the last reported usage across all sessions in the execution.
+    /// This is provider-reported usage, not a count of the upcoming request.
+    pub fn last_usage(&self) -> Option<TokenUsage> {
+        self.last_usage
+    }
+
+    /// Returns cumulative reported input usage across all execution sessions.
+    /// Includes exchanges subsequently compacted; None means no input count was reported.
+    pub fn total_input(&self) -> Option<u32> {
+        self.total_input
+    }
+
+    /// Returns cumulative reported output usage across all execution sessions.
+    /// Includes exchanges subsequently compacted; None means no output count was reported.
+    pub fn total_output(&self) -> Option<u32> {
+        self.total_output
+    }
     /// Borrows the first committed entry's summary text without its framework wrapper.
     /// Preserves whitespace; returns None when absent or malformed, without modifying history.
     pub fn summary(&self) -> Option<&str> {
@@ -55,7 +76,8 @@ impl CompactionRequest<'_> {
         self.model
     }
 
-    /// Borrows effective client options, including preamble, schemas and active tools.
+    /// Borrows client options, including preamble, schemas and active tools.
+    /// The trigger sees configured options; compact sees provider-effective options.
     pub fn options(&self) -> &ClientOptions {
         self.options
     }
@@ -86,18 +108,17 @@ pub struct CompactionResult {
     pub summary: Option<String>,
 }
 
-/// Fallible application policy invoked by caller-owned history maintenance.
-/// Chat invokes it once before each eligible model dispatch; explicit repeated
-/// maintenance at the same dispatch may invoke it again.
+/// Fallible application policy invoked by an agent worker before an eligible dispatch.
+/// Chat uses that same worker path. Host redelivery of pending work can rerun the policy.
 /// Errors prevent execution and leave history unchanged. External work should be idempotent.
 /// The supplied context belongs to the execution, including fresh dependencies after restore.
 pub trait Compactor: Send + Sync {
-    /// Application error preserved as the source of `GraphError::HistoryCompaction`.
+    /// Application error becomes portable diagnostics when delivered through an agent response.
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Returns whether an upcoming dispatch needs maintenance. Defaults to every dispatch.
     /// Use session turns or reported usage for heuristics, not exact request token accounting.
-    fn needs_compaction(&self, _history: &super::MessageHistory, _session_id: &str) -> bool {
+    fn needs_compaction(&self, _request: &CompactionRequest<'_>) -> bool {
         true
     }
 
@@ -112,7 +133,7 @@ pub trait Compactor: Send + Sync {
 
 #[async_trait]
 pub(crate) trait DynCompactor: Send + Sync {
-    fn needs_compaction_dyn(&self, history: &super::MessageHistory, session_id: &str) -> bool;
+    fn needs_compaction_dyn(&self, request: &CompactionRequest<'_>) -> bool;
     async fn compact_dyn(
         &self,
         request: CompactionRequest<'_>,
@@ -122,8 +143,8 @@ pub(crate) trait DynCompactor: Send + Sync {
 
 #[async_trait]
 impl<T: Compactor> DynCompactor for T {
-    fn needs_compaction_dyn(&self, history: &super::MessageHistory, session_id: &str) -> bool {
-        self.needs_compaction(history, session_id)
+    fn needs_compaction_dyn(&self, request: &CompactionRequest<'_>) -> bool {
+        self.needs_compaction(request)
     }
     /// Forwards request dependencies and retains the application's error as its source.
     async fn compact_dyn(

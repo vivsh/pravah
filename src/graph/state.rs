@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use super::fetch::{Fetch, FetchError, FetchResponse};
+use super::agent_request::{AgentRequest, AgentResponse};
 use super::ids::{EdgeId, NodeId};
 use super::model::TypeSpec;
 use super::registry::ContinuationChildCall;
 use super::value::Value;
+use crate::history::HistoryPolicy;
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +32,10 @@ pub(crate) enum ReturnTarget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 /// Accepted input retained until its complete continuation transition succeeds.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the existing inbox owns accepted completions directly, without another allocation"
+)]
 pub(crate) enum ContinuationInput {
     Child {
         call_id: String,
@@ -38,9 +44,9 @@ pub(crate) enum ContinuationInput {
     Resume {
         input: Value,
     },
-    Fetch {
-        fetch: Fetch,
-        outcome: Result<FetchResponse, FetchError>,
+    Agent {
+        request: AgentRequest,
+        response: AgentResponse,
     },
 }
 
@@ -74,6 +80,8 @@ pub(crate) struct Frame {
     pub(crate) node_epochs: Vec<u64>,
     /// Runtime-only reader counts for reclaimable multi-reader values.
     pub(crate) reader_counts: Vec<u32>,
+    /// Sorted unkeyed sessions retained by this exact frame until it exits.
+    pub(crate) unkeyed_conversations: Vec<String>,
     /// Parent delivery target when this frame exits.
     pub(crate) return_target: Option<ReturnTarget>,
 }
@@ -128,7 +136,10 @@ impl Suspension {
 /// execution state.
 pub struct State {
     pub(crate) execution_id: Uuid,
-    pub(crate) next_fetch_sequence: u64,
+    pub(crate) next_agent_sequence: u64,
+    pub(crate) history_policy: HistoryPolicy,
+    pub(crate) persisted_history_position: u64,
+    pub(crate) loaded_conversation_keys: BTreeSet<String>,
     /// Active VM frame stack.
     pub(crate) frames: Vec<Frame>,
     /// Active node- or continuation-owned state when the VM is externally paused.
@@ -138,10 +149,10 @@ pub struct State {
 #[derive(Debug, Clone)]
 pub(crate) enum Waiting {
     Suspend(Suspension),
-    Fetch {
+    Agent {
         frame_depth: usize,
         node: NodeId,
-        fetch: Fetch,
+        request: AgentRequest,
     },
 }
 
@@ -177,11 +188,11 @@ impl State {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Result of advancing the edge VM by one public step.
 pub enum Step {
     /// The VM is waiting for the host to execute this exact request.
-    Fetch(Fetch),
+    Agent(AgentRequest),
     /// A node ran or a frame exited; call `next()` again.
     Continue,
     /// The root frame exited with this final output value.

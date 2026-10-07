@@ -1,50 +1,19 @@
-//! Durable agent boundaries; resolved state stays in the continuation checkpoint.
+//! Durable agent boundaries and atomic history transitions.
 
 use super::execution::normal_dispatch_phase;
 use super::intervention::checkpoint_point;
 use super::*;
+use crate::graph::agent_request::AgentOperation;
 use crate::graph::registry::HistoryChange;
-use crate::graph::{FetchBody, FetchError, FetchRequest, FetchResponse};
-
-pub(super) const AGENT_HOOK_VERSION: u32 = 2;
-
-/// Rejects configure hooks lacking the execution identity required for Chat defaults.
-pub(super) fn check_agent_hook_version(got: u32) -> Result<(), GraphError> {
-    if got == AGENT_HOOK_VERSION {
-        return Ok(());
-    }
-    Err(GraphError::UnsupportedVersion {
-        format: "agent hook",
-        got,
-        expected: AGENT_HOOK_VERSION,
-    })
-}
+use crate::graph::{AgentError, AgentRequest, AgentResponse};
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "effect", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum AgentEffectCheckpoint {
     Configure { version: u32, input: Value },
     Control { version: u32, checkpoint: Value },
-    Prepare { version: u32, checkpoint: Value },
     Generate { version: u32, checkpoint: Value },
-}
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct AgentHook {
-    pub version: u32,
-    pub handler: String,
-    pub payload: Value,
-    pub operation: AgentHookOperation,
-}
-
-#[derive(Serialize, Deserialize)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "operation-local observations avoid another heap allocation"
-)]
-pub(super) enum AgentHookOperation {
-    Configure { input: Value, execution_id: Uuid },
-    Control { observation: AgentLoopData },
+    Flush { version: u32, transition: Value },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -53,20 +22,6 @@ pub(super) struct Configured {
     pub resolved: ResolvedAgentConfig,
     pub message: Message,
     pub budget: Option<AgentBudgetState>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct PreparationRequest {
-    pub version: u32,
-    pub request: crate::graph::fetch::rath::RathRequest,
-    pub guidance: Vec<Message>,
-    pub budget_conclusion: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct Prepared {
-    pub version: u32,
-    pub generation: Value,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -87,20 +42,16 @@ pub(super) enum DecisionKind {
     Abort(String),
 }
 
-/// Encodes an explicit boundary; the checkpoint and request have separate durable ownership.
+/// Retains the checkpoint and immutable operation under separate durable owners.
 pub(super) fn effect(
     checkpoint: AgentEffectCheckpoint,
-    request: FetchRequest,
+    operation: AgentOperation,
 ) -> Result<ContinuationTransition, GraphError> {
     Ok(ContinuationTransition {
         checkpoint: Some(checkpoint.into_value()?),
-        fetch: Some(request),
+        agent: Some(AgentRequest::new(Uuid::nil(), operation)),
         ..Default::default()
     })
-}
-
-pub(super) fn response(data: impl Serialize) -> Result<FetchResponse, GraphError> {
-    Ok(FetchResponse::new(200).body(FetchBody::Value(encode(data)?)))
 }
 
 pub(super) fn encode(data: impl Serialize) -> Result<Value, GraphError> {
@@ -110,29 +61,18 @@ pub(super) fn encode(data: impl Serialize) -> Result<Value, GraphError> {
     })
 }
 
-pub(super) fn decode<T: DeserializeOwned>(body: Option<&FetchBody>) -> Result<T, GraphError> {
-    let Some(FetchBody::Value(value)) = body else {
-        return Err(GraphError::FetchValidation(
-            "expected structured hook payload".into(),
-        ));
-    };
+pub(super) fn decode<T: DeserializeOwned>(value: &Value) -> Result<T, GraphError> {
     from_value(value.clone())
-        .map_err(|_| GraphError::FetchValidation("invalid hook payload".into()))
+        .map_err(|_| GraphError::AgentRequestValidation("invalid agent outcome".into()))
 }
 
-pub(super) fn success(
-    outcome: Result<FetchResponse, FetchError>,
-) -> Result<FetchResponse, GraphError> {
-    let response = outcome.map_err(|source| GraphError::FetchFailed { source })?;
-    if response.status() != 200 {
-        return Err(GraphError::FetchValidation(
-            "invalid hook acknowledgement".into(),
-        ));
-    }
-    Ok(response)
+pub(super) fn success(response: AgentResponse) -> Result<Value, GraphError> {
+    response
+        .outcome
+        .map_err(|source| GraphError::AgentFailed { source })
 }
 
-/// Stages a synchronous append; the caller persists committed rows outside the VM.
+/// Appends accepted messages once; final output waits for required persistence acknowledgement.
 pub(super) fn record(
     ctx: ContinuationContext<'_>,
     session: &str,
@@ -143,12 +83,26 @@ pub(super) fn record(
     let entries = ctx
         .history()
         .stage_entries(ctx.execution_id(), session, agent, messages)?;
+    if ctx.history_policy().persist && !next.outputs.is_empty() {
+        let mut flushed = effect(
+            AgentEffectCheckpoint::Flush {
+                version: CHECKPOINT_VERSION,
+                transition: encode(next)?,
+            },
+            AgentOperation::PersistHistory,
+        )?;
+        if let Some(request) = &mut flushed.agent {
+            request.persist = Some(entries.clone().into());
+        }
+        flushed.history.push(HistoryChange::Append(entries));
+        return Ok(flushed);
+    }
     next.history.push(HistoryChange::Append(entries));
     Ok(next)
 }
 
 impl AgentHandler {
-    /// Consumes an already recorded external outcome; failures leave the inbox untouched.
+    /// Interprets only the recorded completion; failure never redispatches the completed operation.
     pub(super) fn advance_effect(
         &self,
         payload_value: &Value,
@@ -156,63 +110,24 @@ impl AgentHandler {
         event: ContinuationEvent,
         ctx: ContinuationContext<'_>,
     ) -> Result<ContinuationTransition, GraphError> {
-        let ContinuationEvent::Fetch { fetch, outcome } = event else {
+        let ContinuationEvent::Agent { request, response } = event else {
             return Err(GraphError::Invalid(
-                "agent effect has no accepted outcome".into(),
+                "agent effect has no accepted completion".into(),
             ));
         };
-        let response = match outcome {
-            Err(error)
-                if error.code() == "rath"
-                    && error
-                        .details()
-                        .and_then(|v| v.get("rath"))
-                        .and_then(|v| v.get("kind"))
-                        .and_then(Value::as_str)
-                        == Some("output_limit_reached") =>
-            {
-                let provider = error
-                    .details()
-                    .and_then(|v| v.get("rath"))
-                    .and_then(|v| v.get("provider"))
-                    .cloned()
-                    .ok_or_else(|| {
-                        GraphError::FetchValidation("missing output-limit provider".into())
-                    })?;
-                return Err(GraphError::AgentOutputLimit {
-                    agent: super::payload::validate_identity(payload_value)?.into(),
-                    provider: from_value(provider).map_err(|_| {
-                        GraphError::FetchValidation("invalid output-limit provider".into())
-                    })?,
-                });
-            }
-            outcome => success(outcome)?,
-        };
+        if let Err(error) = response.outcome() {
+            return Err(delivered_error(payload_value, error)?);
+        }
+        let value = success(response)?;
         match state {
             AgentEffectCheckpoint::Configure { version, input } => {
                 check_version(version)?;
                 self.accept_configuration(
                     &AgentPayloadView::read(payload_value)?,
                     input,
-                    fetch.id(),
-                    &response,
+                    request.id(),
+                    &value,
                     ctx,
-                )
-            }
-            AgentEffectCheckpoint::Prepare {
-                version,
-                checkpoint,
-            } => {
-                check_version(version)?;
-                let prepared = Prepared::from_response(&response)?;
-                check_protocol(prepared.version)?;
-                let generation = FetchRequest::from_value(&prepared.generation)?;
-                effect(
-                    AgentEffectCheckpoint::Generate {
-                        version,
-                        checkpoint,
-                    },
-                    generation,
                 )
             }
             AgentEffectCheckpoint::Control {
@@ -228,7 +143,7 @@ impl AgentHandler {
                     &AgentPayloadView::read(payload_value)?,
                     checkpoint,
                     point,
-                    decode::<ResolvedDecision>(response.body_ref())?.into_decision(),
+                    decode::<ResolvedDecision>(&value)?.into_decision(),
                 )
             }
             AgentEffectCheckpoint::Generate {
@@ -237,9 +152,8 @@ impl AgentHandler {
             } => {
                 check_version(version)?;
                 let checkpoint = EdgeAgentCheckpoint::from_value(&checkpoint)?;
-                let response =
-                    crate::graph::fetch::rath::RathResponse::from_fetch_response(&response)?
-                        .into_response();
+                let response = crate::graph::agent_request::client_response::Response::<JsonValue>::deserialize(&value)
+                    .map_err(|_| GraphError::AgentRequestValidation("invalid generation outcome".into()))?.into_response();
                 self.accept_generation(
                     &AgentPayloadView::read(payload_value)?,
                     checkpoint,
@@ -247,16 +161,23 @@ impl AgentHandler {
                     ctx,
                 )
             }
+            AgentEffectCheckpoint::Flush {
+                version,
+                transition,
+            } => {
+                check_version(version)?;
+                decode(&transition)
+            }
         }
     }
 
-    /// Commits invocation state and its initial message in one synchronous transition.
+    /// Commits resolved configuration and the initial user message at one VM boundary.
     fn accept_configuration(
         &self,
         payload: &AgentPayloadView<'_>,
         input: Value,
         id: Uuid,
-        response: &FetchResponse,
+        value: &Value,
         ctx: ContinuationContext<'_>,
     ) -> Result<ContinuationTransition, GraphError> {
         let Configured {
@@ -264,7 +185,7 @@ impl AgentHandler {
             resolved,
             message,
             budget,
-        } = decode(response.body_ref())?;
+        } = decode(value)?;
         if !matches!(message.role, Role::User) {
             return Err(GraphError::AgentConfigValidation(
                 "initial message must be user-role".into(),
@@ -278,7 +199,12 @@ impl AgentHandler {
             session_id: session_id.clone(),
             input,
             selected_tools: resolved.tools.clone(),
-            resolved: super::effect_values::body_field(response.body_ref(), "resolved")?.clone(),
+            resolved: value
+                .get("resolved")
+                .ok_or_else(|| {
+                    GraphError::AgentRequestValidation("missing resolved configuration".into())
+                })?
+                .clone(),
             budget,
             guidance: None,
             metrics: AgentLoopMetrics::default(),
@@ -298,6 +224,33 @@ impl AgentHandler {
     }
 }
 
+/// Classifies portable output-limit failures without fabricating a local Rath source.
+fn delivered_error(payload: &Value, error: &AgentError) -> Result<GraphError, GraphError> {
+    if error.code() == "rath"
+        && error
+            .details()
+            .and_then(|value| value.get("rath"))
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            == Some("output_limit_reached")
+    {
+        let provider = error
+            .details()
+            .and_then(|value| value.get("rath"))
+            .and_then(|value| value.get("provider"))
+            .ok_or_else(|| {
+                GraphError::AgentRequestValidation("missing output-limit provider".into())
+            })?;
+        return Ok(GraphError::AgentOutputLimit {
+            agent: super::payload::validate_identity(payload)?.into(),
+            provider: decode(provider)?,
+        });
+    }
+    Ok(GraphError::AgentFailed {
+        source: error.clone(),
+    })
+}
+
 impl ResolvedDecision {
     fn into_decision(self) -> AgentDecision {
         let mut decision = match self.kind {
@@ -312,17 +265,6 @@ impl ResolvedDecision {
         decision.state = self.state;
         decision
     }
-}
-
-pub(super) fn check_protocol(got: u32) -> Result<(), GraphError> {
-    if got == 1 {
-        return Ok(());
-    }
-    Err(GraphError::UnsupportedVersion {
-        format: "Pravah hook",
-        got,
-        expected: 1,
-    })
 }
 
 fn check_version(got: u32) -> Result<(), GraphError> {
@@ -343,14 +285,11 @@ pub(super) fn validate_effect_checkpoint(
 ) -> Result<(), GraphError> {
     let checkpoint = AgentEffectCheckpoint::from_value(value)?;
     match checkpoint {
-        AgentEffectCheckpoint::Configure { version, .. } => {
+        AgentEffectCheckpoint::Flush { version, .. }
+        | AgentEffectCheckpoint::Configure { version, .. } => {
             check_version(version)?;
         }
         AgentEffectCheckpoint::Control {
-            version,
-            checkpoint,
-        }
-        | AgentEffectCheckpoint::Prepare {
             version,
             checkpoint,
         }

@@ -5,10 +5,7 @@
 
 use pravah::clients::Role;
 use pravah::testing::ScriptedFactory;
-use pravah::{
-    Chat, CompactionRequest, CompactionResult, Compactor, Context, GraphError, HistoryManager,
-    MessageHistory,
-};
+use pravah::{Chat, CompactionRequest, CompactionResult, Compactor, Context, GraphError};
 
 #[derive(Debug, thiserror::Error)]
 #[error("completed history contains no user question")]
@@ -20,8 +17,8 @@ impl Compactor for WorkingMemory {
     type Error = MissingQuestion;
 
     /// Skip preparation until there is a completed exchange to consolidate.
-    fn needs_compaction(&self, history: &MessageHistory, session_id: &str) -> bool {
-        history.turn_count(session_id) > 0
+    fn needs_compaction(&self, request: &CompactionRequest<'_>) -> bool {
+        request.turn_count() > 0
     }
 
     /// Keeps existing memory or extracts it from the first completed user message.
@@ -65,7 +62,7 @@ async fn main() -> Result<(), GraphError> {
     let mut chat = Chat::builder::<String, String>()
         .model("test:///scripted")
         .instructions("Help plan the trip.")
-        .history_manager(HistoryManager::new().with_compactor(WorkingMemory))
+        .compactor(WorkingMemory)
         .build(ctx)?;
 
     for question in [

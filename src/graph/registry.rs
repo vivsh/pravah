@@ -16,6 +16,8 @@ pub struct ContinuationContext<'a> {
     execution_id: uuid::Uuid,
     history: &'a MessageHistory,
     output_validator: Option<&'a jsonschema::Validator>,
+    history_policy: &'a crate::history::HistoryPolicy,
+    loaded_keys: &'a std::collections::BTreeSet<String>,
 }
 
 impl<'a> ContinuationContext<'a> {
@@ -23,11 +25,15 @@ impl<'a> ContinuationContext<'a> {
         execution_id: uuid::Uuid,
         history: &'a MessageHistory,
         output_validator: Option<&'a jsonschema::Validator>,
+        history_policy: &'a crate::history::HistoryPolicy,
+        loaded_keys: &'a std::collections::BTreeSet<String>,
     ) -> Self {
         Self {
             execution_id,
             history,
             output_validator,
+            history_policy,
+            loaded_keys,
         }
     }
     /// Returns the execution namespace used for deterministic identities.
@@ -41,6 +47,12 @@ impl<'a> ContinuationContext<'a> {
 
     pub(crate) fn output_validator(&self) -> Option<&'a jsonschema::Validator> {
         self.output_validator
+    }
+    pub(crate) fn history_policy(&self) -> &crate::history::HistoryPolicy {
+        self.history_policy
+    }
+    pub(crate) fn loaded_keys(&self) -> &std::collections::BTreeSet<String> {
+        self.loaded_keys
     }
 }
 
@@ -67,11 +79,15 @@ pub struct EdgeWrite {
 
 /// Event delivered to an active continuation checkpoint.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "accepted completions stay inline without an extra allocation or ownership wrapper"
+)]
 pub enum ContinuationEvent {
     /// An external outcome already accepted durably by the runtime.
-    Fetch {
-        fetch: super::fetch::Fetch,
-        outcome: Result<super::fetch::FetchResponse, super::fetch::FetchError>,
+    Agent {
+        request: super::agent_request::AgentRequest,
+        response: super::agent_request::AgentResponse,
     },
     /// A child graph completed and produced an output for this call id.
     ChildResult { call_id: String, output: Value },
@@ -105,7 +121,7 @@ pub struct ContinuationChildCall {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContinuationTransition {
     /// External operation to emit with this checkpoint, mutually exclusive with suspension and child calls.
-    pub fetch: Option<super::fetch::FetchRequest>,
+    pub agent: Option<super::agent_request::AgentRequest>,
     /// History edits validated and committed together with the VM transition.
     pub history: Vec<HistoryChange>,
     /// Serialized checkpoint to keep the continuation active.
@@ -176,7 +192,7 @@ pub trait ContinuationHandler: Send + Sync {
 /// before building an `Runtime`.
 pub struct HandlerRegistry {
     value_handlers: HashMap<String, Arc<dyn ValueHandler>>,
-    fetch_handlers: HashMap<String, Arc<dyn super::fetch::DynFetchHandler>>,
+    agent_handlers: HashMap<String, Arc<dyn super::agent_request::DynAgentHandler>>,
     continuation_handlers: HashMap<String, Arc<dyn ContinuationHandler>>,
 }
 
@@ -188,9 +204,9 @@ impl HandlerRegistry {
         handler: H,
     ) -> Result<&mut Self, GraphError>
     where
-        H: ContinuationHandler + super::fetch::DynFetchHandler + 'static,
+        H: ContinuationHandler + super::agent_request::DynAgentHandler + 'static,
     {
-        if self.continuation_handlers.contains_key(key) || self.fetch_handlers.contains_key(key) {
+        if self.continuation_handlers.contains_key(key) || self.agent_handlers.contains_key(key) {
             return Err(GraphError::GraphValidation(
                 "duplicate effect handler key".into(),
             ));
@@ -198,7 +214,7 @@ impl HandlerRegistry {
         let handler = Arc::new(handler);
         self.continuation_handlers
             .insert(key.into(), handler.clone());
-        self.fetch_handlers.insert(key.into(), handler);
+        self.agent_handlers.insert(key.into(), handler);
         Ok(self)
     }
     /// Creates an empty handler registry.
@@ -226,18 +242,18 @@ impl HandlerRegistry {
     }
 
     /// Registers an external callback; it is never called by synchronous stepping.
-    pub fn insert_fetch<H: super::fetch::DynFetchHandler + 'static>(
+    pub fn insert_agent<H: super::agent_request::DynAgentHandler + 'static>(
         &mut self,
         key: impl Into<String>,
         handler: H,
     ) -> Result<&mut Self, GraphError> {
         let key = key.into();
-        if self.fetch_handlers.contains_key(&key) {
+        if self.agent_handlers.contains_key(&key) {
             return Err(GraphError::GraphValidation(
-                "duplicate Fetch handler key".into(),
+                "duplicate agent worker handler key".into(),
             ));
         }
-        self.fetch_handlers.insert(key, Arc::new(handler));
+        self.agent_handlers.insert(key, Arc::new(handler));
         Ok(self)
     }
 
@@ -266,8 +282,11 @@ impl HandlerRegistry {
     }
 
     /// Resolves an external callback for the executor.
-    pub fn fetch(&self, key: &HandlerKey) -> Option<Arc<dyn super::fetch::DynFetchHandler>> {
-        self.fetch_handlers.get(key.as_str()).cloned()
+    pub fn agent(
+        &self,
+        key: &HandlerKey,
+    ) -> Option<Arc<dyn super::agent_request::DynAgentHandler>> {
+        self.agent_handlers.get(key.as_str()).cloned()
     }
 
     /// Resolves a continuation handler by graph key.
@@ -280,9 +299,9 @@ impl HandlerRegistry {
         self.value_handlers.contains_key(key)
     }
 
-    /// Returns whether a Fetch handler key is registered.
-    pub fn has_fetch(&self, key: &str) -> bool {
-        self.fetch_handlers.contains_key(key)
+    /// Returns whether a agent worker handler key is registered.
+    pub fn has_agent(&self, key: &str) -> bool {
+        self.agent_handlers.contains_key(key)
     }
 
     /// Returns whether a continuation handler key is registered.
@@ -299,10 +318,10 @@ impl HandlerRegistry {
                 )));
             }
         }
-        for key in other.fetch_handlers.keys() {
-            if self.fetch_handlers.contains_key(key) {
+        for key in other.agent_handlers.keys() {
+            if self.agent_handlers.contains_key(key) {
                 return Err(GraphError::Invalid(format!(
-                    "duplicate Fetch handler key '{key}'"
+                    "duplicate agent worker handler key '{key}'"
                 )));
             }
         }
@@ -320,9 +339,9 @@ impl HandlerRegistry {
                 .iter()
                 .map(|(key, handler)| (key.clone(), Arc::clone(handler))),
         );
-        self.fetch_handlers.extend(
+        self.agent_handlers.extend(
             other
-                .fetch_handlers
+                .agent_handlers
                 .iter()
                 .map(|(key, handler)| (key.clone(), Arc::clone(handler))),
         );
@@ -342,9 +361,9 @@ impl HandlerRegistry {
                 .iter()
                 .map(|(key, handler)| (namespaced_handler_key(prefix, key), Arc::clone(handler))),
         );
-        self.fetch_handlers.extend(
+        self.agent_handlers.extend(
             other
-                .fetch_handlers
+                .agent_handlers
                 .iter()
                 .map(|(key, handler)| (namespaced_handler_key(prefix, key), Arc::clone(handler))),
         );

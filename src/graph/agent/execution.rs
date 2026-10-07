@@ -18,21 +18,28 @@ impl ContinuationHandler for AgentHandler {
         super::conversation::validate_empty_state(state.as_ref())?;
         let metadata = AgentPayloadView::read(payload)?;
         let input = single_input(inputs, "agent")?;
-        let hook = AgentHook {
-            version: super::effects::AGENT_HOOK_VERSION,
-            handler: metadata.agent_id.into(),
-            payload: payload.clone(),
-            operation: AgentHookOperation::Configure {
+        let operation =
+            crate::graph::agent_request::AgentOperation::Configure {
+                handler: crate::graph::HandlerKey::new(metadata.agent_id),
+                definition: payload.clone(),
                 input: input.clone(),
                 execution_id: ctx.execution_id(),
-            },
-        };
+                load_history: ctx.history_policy().load,
+                loaded_keys: ctx
+                    .loaded_keys()
+                    .iter()
+                    .cloned()
+                    .chain(ctx.history().entries().iter().filter_map(|entry| {
+                        entry.session_id.strip_prefix("key:").map(str::to_owned)
+                    }))
+                    .collect(),
+            };
         effect(
             AgentEffectCheckpoint::Configure {
                 version: CHECKPOINT_VERSION,
                 input,
             },
-            hook.into_request()?,
+            operation,
         )
     }
 
@@ -71,8 +78,8 @@ impl AgentHandler {
         }
         validate_checkpoint_progress(&payload.tools, &checkpoint)?;
         match event {
-            ContinuationEvent::Fetch { .. } => {
-                Err(GraphError::Invalid("unexpected agent Fetch outcome".into()))
+            ContinuationEvent::Agent { .. } => {
+                Err(GraphError::Invalid("unexpected agent work outcome".into()))
             }
             ContinuationEvent::Poll => self.poll(&payload, checkpoint, ctx),
             ContinuationEvent::ChildResult { call_id, output } => {
@@ -131,18 +138,17 @@ impl AgentHandler {
             return self.apply_decision(payload, checkpoint, point, AgentDecision::continue_());
         }
         let observation = self.loop_data(payload, &checkpoint, point, &ctx)?;
-        let hook = AgentHook {
-            version: super::effects::AGENT_HOOK_VERSION,
-            handler: payload.agent_id.into(),
-            payload: payload.raw.clone(),
-            operation: AgentHookOperation::Control { observation },
+        let operation = crate::graph::agent_request::AgentOperation::Control {
+            handler: crate::graph::HandlerKey::new(payload.agent_id),
+            definition: payload.raw.clone(),
+            observation: super::effect_values::observation_value(observation)?,
         };
         effect(
             AgentEffectCheckpoint::Control {
                 version: CHECKPOINT_VERSION,
                 checkpoint: checkpoint.into_value()?,
             },
-            hook.into_request()?,
+            operation,
         )
     }
 
@@ -273,34 +279,39 @@ impl AgentHandler {
         conclusion: Option<ConclusionCause>,
         ctx: ContinuationContext<'_>,
     ) -> Result<ContinuationTransition, GraphError> {
-        let request = super::request::generation(payload, &checkpoint, conclusion.is_some())?;
+        let fields = super::request::generation(payload, &checkpoint, conclusion.is_some())?;
         let mut guidance = Vec::new();
         append_guidance(&mut guidance, checkpoint.guidance.as_deref());
-        if !matches!(conclusion, Some(ConclusionCause::TurnBudget))
-            && let Some(generation) =
-                inline_generation(ctx.history(), &checkpoint.session_id, &request, &guidance)?
-        {
-            return effect(
-                AgentEffectCheckpoint::Generate {
-                    version: CHECKPOINT_VERSION,
-                    checkpoint: checkpoint.into_value()?,
-                },
-                generation,
-            );
-        }
-        let preparation = super::effect_values::preparation_request(
-            &checkpoint,
-            request,
+        let operation = crate::graph::agent_request::AgentOperation::Generate {
+            session_id: checkpoint.session_id.clone(),
+            model: fields
+                .get("model")
+                .and_then(Value::as_str)
+                .ok_or_else(|| GraphError::AgentRequestValidation("missing model".into()))?
+                .to_owned(),
+            options: fields
+                .get("options")
+                .ok_or_else(|| GraphError::AgentRequestValidation("missing options".into()))?
+                .clone(),
+            entries: ctx
+                .history()
+                .session_entries(&checkpoint.session_id)
+                .into_iter()
+                .cloned()
+                .collect(),
             guidance,
-            matches!(conclusion, Some(ConclusionCause::TurnBudget)),
-            ctx,
-        )?;
+            budget_conclusion: matches!(conclusion, Some(ConclusionCause::TurnBudget)),
+            compact: ctx.history_policy().compact,
+            last_usage: ctx.history().last_usage(),
+            total_input: ctx.history().total_input(),
+            total_output: ctx.history().total_output(),
+        };
         effect(
-            AgentEffectCheckpoint::Prepare {
+            AgentEffectCheckpoint::Generate {
                 version: CHECKPOINT_VERSION,
                 checkpoint: checkpoint.into_value()?,
             },
-            preparation,
+            operation,
         )
     }
 
@@ -650,33 +661,6 @@ impl AgentHandler {
             .map(Arc::as_ref)
             .ok_or_else(|| GraphError::Invalid(format!("tool runtime {index} is missing")))
     }
-}
-
-/// Encodes retained messages once; file inputs require external materialization before freezing.
-fn inline_generation(
-    history: &crate::history::MessageHistory,
-    session: &str,
-    request: &Value,
-    guidance: &[Message],
-) -> Result<Option<crate::graph::FetchRequest>, GraphError> {
-    let entries = history.session_entries(session);
-    if entries.iter().any(|entry| {
-        entry.message.attachments.iter().any(|attachment| {
-            !matches!(
-                attachment,
-                crate::clients::Attachment::Inline { .. } | crate::clients::Attachment::Url { .. }
-            )
-        })
-    }) {
-        return Ok(None);
-    }
-    let messages = entries
-        .iter()
-        .map(|entry| encode(&entry.message))
-        .chain(guidance.iter().map(encode))
-        .collect::<Result<Vec<_>, _>>()?;
-    crate::graph::fetch::rath::RathRequest::replace_messages(request, Value::array(messages))
-        .map(Some)
 }
 
 /// Selects the one shared dispatch phase for normal and budget conclusion paths.

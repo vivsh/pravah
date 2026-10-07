@@ -1,7 +1,6 @@
 //! Provider request construction from the checkpoint's authoritative shared values.
 
 use super::{AgentPayloadView, EdgeAgentCheckpoint, GraphError, Value, effective_tools};
-use crate::graph::fetch::rath::RathRequest;
 
 /// Freezes the active tool surface and options without rebuilding immutable JSON trees.
 pub(super) fn generation(
@@ -33,8 +32,7 @@ pub(super) fn generation(
         }
     }
     let resolved = &checkpoint.resolved;
-    RathRequest::agent_value(
-        field(resolved, "model")?.clone(),
+    let options = crate::graph::agent_request::options::agent_value(
         payload.agent_id,
         preamble(resolved)?,
         tools,
@@ -47,7 +45,11 @@ pub(super) fn generation(
             .get("max_output_tokens")
             .cloned()
             .unwrap_or(Value::NULL),
-    )
+    )?;
+    crate::graph::agent_request::object([
+        ("model", field(resolved, "model")?.clone()),
+        ("options", options),
+    ])
 }
 
 /// Renders exactly the existing section order and separators into one operation-local string.

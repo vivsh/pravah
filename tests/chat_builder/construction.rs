@@ -71,7 +71,7 @@ async fn check_restored(snapshot: Snapshot) -> Result<(), TestError> {
     assert!(factory.calls().is_empty());
     chat.send("next").await?;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(store.record_count(), 4);
+    assert_eq!(store.record_count(), 2);
     Ok(())
 }
 
@@ -97,7 +97,7 @@ async fn service_setters_replace_previous_values() -> Result<(), TestError> {
     Ok(())
 }
 
-/// Construction-only services do not change graph identity or serialized execution state.
+/// Services remain external while their execution intent is explicitly checkpointed.
 #[tokio::test]
 async fn services_do_not_change_initial_snapshot() -> Result<(), TestError> {
     let factory = ScriptedFactory::new();
@@ -122,6 +122,15 @@ async fn services_do_not_change_initial_snapshot() -> Result<(), TestError> {
         .as_object_mut()
         .ok_or(TestError::Missing("state"))?
         .remove("execution_id");
+    assert_eq!(plain["graph_fingerprint"], configured["graph_fingerprint"]);
+    assert_eq!(
+        configured["state"]["history_policy"],
+        serde_json::json!({"persist":true,"load":true,"compact":true})
+    );
+    configured["state"]
+        .as_object_mut()
+        .expect("state")
+        .remove("history_policy");
     assert_eq!(plain, configured);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(factory.calls().is_empty());

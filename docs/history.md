@@ -39,12 +39,49 @@ tool rounds, standalone assistant messages, system summaries and pending user in
 do not add completed turns. It does not validate malformed histories and does not
 alter cumulative usage or agent-budget metrics.
 
+## Conversation lifetime and release
+
+An unkeyed conversation stays available until its owning flow frame exits,
+including child flows and each individual `each` invocation. It is then removed
+from runtime history automatically, without a store call or persistence check.
+Unpersisted messages may be lost; archive retention is your store's responsibility.
+Imported unkeyed histories belong to the new execution's root frame.
+
+An explicit agent conversation key retains history across frame exits. Inspect
+activity and release a completed conversation using its exact history session ID:
+
+```rust
+if !execution.conversation_is_active("key:customer/42") {
+    execution.drop_conversation("key:customer/42")?;
+}
+```
+
+The same methods are available on `Chat`. A keyed conversation is inactive
+between completed turns; an unkeyed conversation remains active for its entire
+frame lifetime. Frozen worker requests and accepted-but-unprocessed responses
+also keep their referenced conversations active. Dropping an active conversation
+returns `GraphError::AgentConversationBusy` without changing the snapshot.
+Dropping an absent ID is a no-op. Pass `HistoryEntry::session_id`, not the bare
+application key or a user-message key.
+
+Release removes only working rows and clears that key's load acknowledgement.
+It does not delete archived messages, rewind history positions, or reset usage
+totals. A later invocation with the same key can load history again when loading
+and a store are enabled; without a store it starts fresh. Loading messages is not
+continuation recovery: unfinished work still requires its exact snapshot.
+
+Automatic store loads retain archived message usage but do not add it to this
+runtime's cumulative counters. Only new accepted model responses increase those
+counters, so release and reload cannot count historical calls again. Explicit
+`start_with_history` imports retain the supplied history's aggregate usage.
+
 ## Start a new workflow with completed history
 
 Exact restoration uses the original workflow and its snapshot. To start new
 work instead, supply completed working history to a freshly compiled workflow:
 
 ```rust
+let stored_entries = store.load("customer/42").await?;
 let history = MessageHistory::from_entries(stored_entries);
 let mut execution = workflow.start_with_history(input, execution_id, history)?;
 ```
@@ -60,62 +97,83 @@ Different session histories may be interleaved by their global append positions.
 
 `from_entries` reconstructs usage only from supplied messages. To retain cumulative
 usage after compaction, supply a complete serialized `MessageHistory` instead.
-This is not a database loader: the application retrieves rows, selects conversations
-and manages external archival retention.
+`HistoryStore::load(key)` retrieves ordered accepted entries for a conversation.
+An empty result means no stored conversation. This explicit import does not restore
+execution. Alternatively enable `HistoryPolicy::load`: the activation worker loads
+an absent `.key(...)` conversation once, and the runtime validates and accepts it.
+Restoration never reloads a completed load. Store implementations own database
+querying and archival retention.
+
+Return rows in durable conversation order, not by VM position alone: positions
+belong to individual executions and may overlap across them. Automatic loading
+preserves row UUIDs and order but assigns new local positions; archived rows are
+not rewritten. Direct `start_with_history` import still requires valid ordered
+positions in the supplied working history.
 
 ## Compactors
 
+`Compactor::needs_compaction(&CompactionRequest)` is a synchronous application
+heuristic. It sees only the selected session's completed and protected exchanges,
+plus configured model options. Returning false skips asynchronous compaction and
+its client construction, without skipping persistence or generation.
+
+`request.last_usage()`, `total_input()` and `total_output()` expose reported usage
+across **all sessions in the execution**, including history already compacted.
+They are not the token size of the upcoming request. The asynchronous `compact`
+method receives provider-effective options and provider-aware framework guidance;
+the trigger runs before client construction and sees configured options/guidance.
+Both methods borrow history; neither can mutate it. No extra trigger runs after
+the final response.
+
 `MessageHistory` remains part of runtime and its snapshot. A runtime-only
-`HistoryManager` owns store acknowledgements and policy dependencies—not another
-history. It saves original user, assistant, tool-call and tool-result entries;
+`AgentExecutor` owns only store and compactor dependencies—not another history or
+acknowledgement ledger. Runtime snapshots retain acknowledgement progress.
+Workers save original user, assistant, tool-call and tool-result entries;
 generated summaries belong to working history, not the append-only audit store.
-After restoration, attach a fresh manager. Retained entries may be redelivered,
+After restoration, reinstall required executor services. Unacknowledged entries may be redelivered,
 so the store must deduplicate by entry UUID. Rows already pruned cannot be
 recovered from a checkpoint; persist them before pruning.
 
 For manual graph execution:
 
 ```rust
-let mut manager = HistoryManager::new()
+let executor = workflow.prepared().executor(ctx)
     .with_store(store)
     .with_compactor(policy);
+let mut execution = workflow.start(input, execution_id)?
+    .with_history(HistoryPolicy { persist: true, load: true, compact: true })?;
 loop {
-    manager.maintain(&mut execution, ctx.clone()).await?;
-    if let Some(fetch) = execution.pending_fetch() {
-        let id = fetch.id();
-        let response = executor.execute(fetch).await?;
-        execution.resume_fetch(id, Ok(response))?;
-    }
     match execution.next()? {
-        Step::Continue | Step::Fetch(_) => {}
-        Step::Suspend(_) | Step::Done(_) => {
-            manager.maintain(&mut execution, ctx.clone()).await?;
-            break;
+        Step::Continue => {}
+        Step::Agent(request) => {
+            let response = executor.execute(&request).await;
+            execution.resume_agent(response)?;
         }
+        Step::Suspend(_) | Step::Done(_) => break,
     }
 }
 ```
 
-Retry a failed maintenance call without advancing execution. The manager retains
-successful partial acknowledgements; a new manager may replay writes. Compaction
-only runs before an unfrozen model request, not against a pending Fetch.
+The default is all false. Services alone do not change a manual Runtime's policy.
+Persist pending snapshots and recorded responses when scheduling work externally;
+see [durable worker delivery](agent_execution.md).
 
 Policies may implement the synchronous trigger method:
 
 ```rust
-fn needs_compaction(&self, history: &MessageHistory, session_id: &str) -> bool {
-    history.turn_count(session_id) >= 8
+fn needs_compaction(&self, request: &CompactionRequest<'_>) -> bool {
+    request.turn_count() >= 8
 }
 ```
 
-The default triggers at each eligible dispatch. `manager.needs_compaction(&execution)`
-checks this predicate without constructing a client. It does not check persistence.
+The default triggers at each eligible dispatch. A false trigger skips compaction
+client construction but does not skip persistence.
 Reported usage can inform a heuristic; this does not enforce exact token budgets.
 
 Configure builder chats with `.compactor(policy).store(history_store)` before
 the final `.build(ctx)?`, or before synchronous snapshot restoration.
 For function-defined chats use `chat.with_compactor(policy)`. For explicit workflows use
-`HistoryManager::new().with_compactor(policy)`.
+`workflow.prepared().executor(ctx).with_compactor(policy)` and enable runtime history intent.
 The trait method is:
 
 ```rust
@@ -168,11 +226,11 @@ Ok(CompactionResult {
 
 A non-empty summary requires replaced entries. Invalid prefixes, incomplete tool
 groups and attempts to alter protected input fail atomically. The compactor runs
-once per eligible dispatch in async Chat, never after final output. Explicit
-repeated maintenance at the same boundary can run it again; external writes must
-be idempotent. Application
-errors propagate as `GraphError::HistoryCompaction`; unsafe decisions use
-`GraphError::HistoryCompactionValidation`.
+once per eligible worker dispatch, never after final output. Host redelivery of
+pending work can run it again; external writes must be idempotent. Worker errors
+are delivered as portable `AgentError` diagnostics and processed as
+`GraphError::AgentFailed`. Invalid delivery is rejected before runtime mutation.
+Successful preparation acknowledgements are applied even if subsequent generation fails.
 
 For Evimora or another external memory store, make ingestion idempotent using stable
 source identities. External writes and Pravah history replacement are not one

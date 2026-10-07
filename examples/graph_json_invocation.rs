@@ -40,7 +40,7 @@ fn main() -> Result<(), ExampleError> {
                 println!("Approved: {output}");
                 return Ok(());
             }
-            JsonResponse::Fetch { .. } => {
+            JsonResponse::Agent { .. } => {
                 return Err(ExampleError::from("approval requested an external effect"));
             }
         };

@@ -6,7 +6,12 @@ use pravah::graph::{JSON_WIRE_VERSION, JsonInvoker, JsonRequest, SNAPSHOT_VERSIO
 async fn snapshots_preserve_caps_with_fresh_dependencies() -> Result<(), TestError> {
     let flow = compile(workflow)?;
     let executor = flow.prepared().executor(Context::default());
-    let mut original = flow.start(Request::capped(), uuid::Uuid::nil())?;
+    let mut original = flow
+        .start(Request::capped(), uuid::Uuid::nil())?
+        .with_history(pravah::HistoryPolicy {
+            compact: true,
+            ..Default::default()
+        })?;
     let snapshot = activated(&mut original, &executor).await?;
     let json = serde_json::to_vec(&snapshot)?;
     let mut cbor = Vec::new();
@@ -22,11 +27,11 @@ async fn snapshots_preserve_caps_with_fresh_dependencies() -> Result<(), TestErr
         let executor = flow
             .prepared()
             .executor(context(script.clone(), Some(2048))?);
-        let mut manager = pravah::HistoryManager::new().with_compactor(ObserveCap {
+        let executor = executor.with_compactor(ObserveCap {
             calls: calls.clone(),
             cap: Some(2048),
         });
-        host::finish_with_manager(&mut restored, &executor, &mut manager).await?;
+        host::finish(&mut restored, &executor).await?;
         assert_eq!(script.calls().len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -75,8 +80,8 @@ async fn malformed_resolved_caps_and_old_checkpoints_are_rejected() -> Result<()
 /// Snapshot and wire version gates prevent older continuations from silently losing cap semantics.
 #[tokio::test]
 async fn old_snapshot_and_wire_formats_are_rejected() -> Result<(), TestError> {
-    assert_eq!(SNAPSHOT_VERSION, 12);
-    assert_eq!(JSON_WIRE_VERSION, 10);
+    assert_eq!(SNAPSHOT_VERSION, 15);
+    assert_eq!(JSON_WIRE_VERSION, 11);
     let flow = compile(workflow)?;
     let runtime = flow.start(Request::capped(), uuid::Uuid::nil())?;
     let mut snapshot = serde_json::to_value(runtime.snapshot()?)?;

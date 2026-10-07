@@ -1,48 +1,57 @@
-//! Asynchronous agent hooks, exclusively invoked by FetchExecutor outside the VM.
+//! Asynchronous callbacks executed by the agent worker, never by the VM.
 
 use super::effects::*;
 use super::*;
-use crate::graph::{DynFetchHandler, Fetch, FetchResponse};
+use crate::graph::agent_request::AgentOperation;
+use crate::graph::{AgentRequest, DynAgentHandler};
 
-impl DynFetchHandler for AgentHandler {
+impl DynAgentHandler for AgentHandler {
     fn execute<'a>(
         &'a self,
-        fetch: &'a Fetch,
+        request: &'a AgentRequest,
         context: Context,
-    ) -> BoxFuture<'a, Result<FetchResponse, GraphError>> {
+    ) -> BoxFuture<'a, Result<Value, GraphError>> {
         async move {
-            let hook = AgentHook::from_request(fetch.request())?;
-            check_agent_hook_version(hook.version)?;
-            let payload = self.validated_payload(&hook.payload)?;
-            if hook.handler != payload.agent_id {
-                return Err(GraphError::FetchValidation(
-                    "agent hook identity mismatch".into(),
-                ));
-            }
-            match hook.operation {
-                AgentHookOperation::Configure {
+            match request.operation.as_ref() {
+                AgentOperation::Configure {
+                    definition,
                     input,
                     execution_id,
+                    ..
                 } => {
+                    let payload = self.validated_payload(definition)?;
                     let config = self
                         .configure
-                        .configure(input, payload.configuration, execution_id, context.clone())
+                        .configure(
+                            input.clone(),
+                            payload.configuration,
+                            *execution_id,
+                            context.clone(),
+                        )
                         .await?;
-                    response(resolve_agent_config(&payload, config, &context).await?)
+                    encode(resolve_agent_config(&payload, config, &context).await?)
                 }
-                AgentHookOperation::Control { observation } => {
+                AgentOperation::Control {
+                    definition,
+                    observation,
+                    ..
+                } => {
+                    let payload = self.validated_payload(definition)?;
+                    let observation = super::effect_values::read_observation(observation)?;
                     let configured = observation
                         .configured_tools
                         .iter()
                         .map(|tool| tool.name().to_owned())
                         .collect::<Vec<_>>();
-                    let controller = self
-                        .controller
-                        .as_ref()
-                        .ok_or_else(|| GraphError::FetchValidation("missing controller".into()))?;
+                    let controller = self.controller.as_ref().ok_or_else(|| {
+                        GraphError::AgentRequestValidation("missing controller".into())
+                    })?;
                     let decision = controller.control(observation, context).await?;
-                    response(resolve_decision(decision, &payload, &configured)?)
+                    encode(resolve_decision(decision, &payload, &configured)?)
                 }
+                _ => Err(GraphError::AgentRequestValidation(
+                    "wrong callback operation".into(),
+                )),
             }
         }
         .boxed()
@@ -87,92 +96,4 @@ fn resolve_decision(
         kind,
         state: decision.state,
     })
-}
-
-/// Routes explicit framework operations without invoking a VM or retaining execution state.
-pub(crate) async fn execute_hook(
-    fetch: &Fetch,
-    context: &Context,
-    registry: &HandlerRegistry,
-) -> Result<FetchResponse, GraphError> {
-    if fetch.request().method() != "POST" || !fetch.request().headers().is_empty() {
-        return Err(GraphError::FetchValidation(
-            "invalid framework hook envelope".into(),
-        ));
-    }
-    match fetch.request().url() {
-        "pravah://tool" | "pravah://agent" => {
-            let key = hook_handler(fetch)?;
-            let handler = registry
-                .fetch(&crate::graph::HandlerKey::new(key))
-                .ok_or_else(|| {
-                    GraphError::FetchValidation("missing external hook handler".into())
-                })?;
-            handler.execute(fetch, context.clone()).await
-        }
-        "pravah://agent-prepare" => prepare(fetch, context).await,
-        _ => Err(GraphError::FetchValidation("unknown framework hook".into())),
-    }
-}
-
-/// Borrows only routing fields; the selected handler validates and decodes its complete input.
-fn hook_handler(fetch: &Fetch) -> Result<&str, GraphError> {
-    let Some(crate::graph::FetchBody::Value(body)) = fetch.request().body_ref() else {
-        return Err(GraphError::FetchValidation(
-            "expected structured hook payload".into(),
-        ));
-    };
-    let version = body
-        .get("version")
-        .and_then(Value::as_u64)
-        .and_then(|version| u32::try_from(version).ok())
-        .ok_or_else(|| GraphError::FetchValidation("missing hook version".into()))?;
-    if fetch.request().url() == "pravah://agent" {
-        check_agent_hook_version(version)?;
-    } else {
-        check_protocol(version)?;
-    }
-    body.get("handler")
-        .and_then(Value::as_str)
-        .ok_or_else(|| GraphError::FetchValidation("missing hook handler".into()))
-}
-
-/// Computes one candidate and materializes its attachments without mutating committed history.
-async fn prepare(fetch: &Fetch, context: &Context) -> Result<FetchResponse, GraphError> {
-    let mut preparation: PreparationRequest = decode(fetch.request().body_ref())?;
-    check_protocol(preparation.version)?;
-    let mut guidance = std::mem::take(&mut preparation.guidance);
-    if preparation.budget_conclusion {
-        let client = preparation_client(&preparation, context).await?;
-        guidance.push(Message::user(crate::clients::conclusion_message(
-            &client.provider(),
-        )));
-    }
-    let messages =
-        super::preparation::messages(&preparation, fetch.request(), guidance, context).await?;
-    let source = super::effect_values::body_field(fetch.request().body_ref(), "request")?;
-    let generation = crate::graph::fetch::rath::RathRequest::replace_messages(source, messages)?;
-    Prepared {
-        version: 1,
-        generation: generation.into_value()?,
-    }
-    .into_response()
-}
-
-/// Constructs a client only when preparation needs provider-effective configuration or guidance.
-async fn preparation_client(
-    preparation: &PreparationRequest,
-    context: &Context,
-) -> Result<crate::clients::Client, GraphError> {
-    context
-        .providers()
-        .llm(
-            preparation.request.model(),
-            preparation.request.options().clone(),
-        )
-        .await
-        .map_err(|source| GraphError::AgentClient {
-            operation: crate::graph::AgentClientOperation::Create,
-            source,
-        })
 }

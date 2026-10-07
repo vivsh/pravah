@@ -1,5 +1,8 @@
 use super::definition::ConfigurationData;
-use super::{AgentHandler, AgentToolPayload, GraphError, PAYLOAD_VERSION, Value, from_value};
+use super::{
+    AgentHandler, AgentToolPayload, GraphError, JSON_PAYLOAD_VERSION, PAYLOAD_VERSION, Value,
+    from_value,
+};
 
 /// Operation-local execution metadata, never retained in a handler or checkpoint.
 /// Names and configure data borrow the immutable graph; provider metadata is decoded locally.
@@ -49,6 +52,7 @@ impl AgentHandler {
             GraphError::GraphValidation(format!("invalid registered agent payload: {error}"))
         })?;
         field(payload, "input_schema")?;
+        super::json_tool::validate_runtime_contracts(&view.tools, &self.tools, payload)?;
         let data = configuration_data(payload)?;
         self.configure.validate_data(data.as_ref())?;
         let control = payload
@@ -92,7 +96,7 @@ fn configuration_data(payload: &Value) -> Result<Option<ConfigurationData>, Grap
 /// Keeps version and handler-identity rejection explicit even for direct handler invocations.
 pub(super) fn validate_identity(payload: &Value) -> Result<&str, GraphError> {
     let version = decode_field::<u32>(payload, "version")?;
-    if version != PAYLOAD_VERSION {
+    if version != PAYLOAD_VERSION && version != JSON_PAYLOAD_VERSION {
         return Err(GraphError::UnsupportedVersion {
             format: "agent payload",
             got: version,

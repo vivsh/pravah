@@ -70,6 +70,10 @@ struct ObserveKey(Arc<AtomicUsize>);
 impl HistoryStore for ObserveKey {
     type Error = Infallible;
 
+    async fn load(&self, _key: &str) -> Result<Vec<HistoryEntry>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     async fn record(&self, entry: &HistoryEntry) -> Result<(), Self::Error> {
         assert_message(&entry.message);
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -132,29 +136,29 @@ async fn chat_preserves_message_keys() -> Result<(), TestError> {
 #[tokio::test]
 async fn graph_preserves_message_keys() -> Result<(), TestError> {
     let flow = compile(workflow)?;
-    let runtime = flow.start(input(), uuid::Uuid::nil())?;
+    let runtime = flow
+        .start(input(), uuid::Uuid::nil())?
+        .with_history(pravah::HistoryPolicy {
+            persist: true,
+            compact: true,
+            load: false,
+        })?;
     for snapshot in copies(&runtime.snapshot()?)? {
         let observer = ObserveKey::default();
-        let executor = pravah::graph::FetchExecutor::new(context()?)
+        let executor = pravah::graph::AgentExecutor::new(context()?)
             .with_registry(Arc::new(flow.registry().clone()));
-        let mut manager = pravah::HistoryManager::new()
+        let executor = executor
             .with_store(observer.clone())
             .with_compactor(observer.clone());
         let mut runtime = flow.restore(snapshot)?;
         loop {
-            manager
-                .maintain(&mut runtime, executor.context().clone())
-                .await?;
             match runtime.next()? {
                 Step::Continue => {}
-                Step::Fetch(fetch) => {
-                    runtime.resume_fetch(fetch.id(), Ok(executor.execute(&fetch).await?))?;
+                Step::Agent(fetch) => {
+                    runtime.resume_agent(executor.execute(&fetch).await)?;
                 }
                 Step::Suspend(_) => return Err(GraphError::ChatSuspended.into()),
                 Step::Done(output) => {
-                    manager
-                        .maintain(&mut runtime, executor.context().clone())
-                        .await?;
                     assert_eq!(flow.decode_output(output)?, "answer");
                     break;
                 }

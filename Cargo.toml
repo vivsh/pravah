@@ -1,6 +1,6 @@
 [package]
 name = "pravah"
-version = "0.4.20"
+version = "0.4.21"
 edition = "2024"
 description = "Typed, stepwise agentic information flows for Rust"
 license = "MIT OR Apache-2.0"
@@ -69,6 +69,10 @@ required-features = ["testing"]
 
 [[example]]
 name = "graph_chat_working_memory"
+required-features = ["testing"]
+
+[[example]]
+name = "graph_json_tools"
 required-features = ["testing"]
 
 [[example]]

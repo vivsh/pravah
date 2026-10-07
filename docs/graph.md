@@ -35,10 +35,10 @@ let mut runtime = flow.start(input, execution_id)?;
 loop {
     match runtime.next()? {
         Step::Continue => {}
-        Step::Fetch(fetch) => {
+        Step::Agent(request) => {
             save(runtime.snapshot()?);
-            let response = executor.execute(&fetch).await?;
-            runtime.resume_fetch(fetch.id(), Ok(response))?;
+            let response = executor.execute(&request).await;
+            runtime.resume_agent(response)?;
         }
         Step::Suspend(payload) => {
             save(runtime.snapshot()?);
@@ -72,7 +72,7 @@ let executor = flow.prepared().executor(ctx);
 ```
 
 Install runtime-only client and MCP registrations on `Context` again during
-restoration. Reattach a fresh `HistoryManager` for stores and compactors when used.
+restoration. Reinstall stores and compactors on the executor when the saved history policy requires them.
 Live clients and service handles are absent from snapshots, but supplied request
 data can contain credentials or other sensitive content; secure its storage.
 Resolved agent configuration, memory, selected tools,
@@ -100,8 +100,8 @@ typed `Runtime::resume` entry point as an ordinary suspend node, with
 `AgentResume` as its fixed resume value. Dynamic graph callers use
 `Runtime::resume_value` with an existing Pravah `Value`.
 
-Every serialized format has an explicit version. Synchronous execution with Fetch
-uses snapshot format 10 and JSON wire format 8; older snapshots and wire
+Every serialized format has an explicit version. Synchronous execution with agent workers
+uses snapshot format 15 and JSON wire format 11; older snapshots and wire
 requests are rejected rather than interpreted with different semantics. During the `0.4.x`
 line, incompatible versions are rejected and are not migrated automatically. Drain
 in-flight workflows or keep the matching Pravah runtime when upgrading across
@@ -115,11 +115,11 @@ External callers can submit only these versioned operations:
 - `start` with an input value and execution UUID;
 - `next` with the latest snapshot;
 - `resume` with a suspended snapshot and resume value;
-- `resume_fetch` with a snapshot, pending request UUID and response or failure.
+- `resume_agent` with a snapshot and recorded `AgentResponse`.
 
 `start` and `next` advance at most one instruction. Resume operations only accept
 delivery; call `next` afterward. Every operation returns a fresh snapshot, and
-`fetch` responses expose requests for external execution. Start and resume values receive schema validation. A
+`agent` responses expose requests for external execution. Start and resume values receive schema validation. A
 snapshot with a different graph fingerprint is rejected.
 
 Pravah does not provide HTTP routes, authentication, snapshot storage, or
@@ -149,20 +149,22 @@ History entries have stable positions. `HistoryStore` implementations must
 deduplicate repeated entry IDs so a partially persisted
 batch can be retried safely.
 
-Import `HistoryManager`, `HistoryStore`, `Compactor`, `CompactionRequest`, `HistoryEntry`, and
+Import `HistoryPolicy`, `HistoryStore`, `Compactor`, `CompactionRequest`, `HistoryEntry`, and
 `CompactionResult` directly from `pravah`. The same types are available under
 `pravah::history` for applications that prefer an explicit module path.
 
-Use `HistoryManager::new().with_store(store).with_compactor(policy)` outside the
-VM. Call `manager.maintain(&mut execution, ctx.clone()).await?` before stepping
-and after completion. It persists original messages before any compaction.
-Without a manager, history accumulates in runtime and snapshots without trimming.
+Enable history intent with `runtime.with_history(HistoryPolicy { persist: true,
+load: true, compact: true })?` before stepping. Install matching dependencies with
+`executor.with_store(store).with_compactor(policy)`. The emitted agent requests
+carry accepted originals for persistence before any compaction. Without enabled
+policy, history accumulates in runtime and snapshots without trimming.
 
 The policy receives effective request options, framework guidance, and separate
 committed/protected history views at an upcoming agent dispatch. Current input
 and tool groups are protected. Invalid replacements leave history unchanged.
-After a maintenance failure, retry maintenance without redispatching a completed
-Fetch. See the [history guide](history.md) for the explicit execution loop.
+Worker responses retain successful partial acknowledgements even after failure.
+Do not redispatch a completion already accepted by the VM. See the
+[history guide](history.md) and [worker delivery guide](agent_execution.md).
 
 ## Legacy API
 

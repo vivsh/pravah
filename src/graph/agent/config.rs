@@ -277,6 +277,20 @@ impl AgentConfig {
         self
     }
 
+    /// Limits accepted calls for an explicit declared tool name, including JSON aliases.
+    /// Zero, duplicate or unknown names fail activation; counters remain checkpoint-owned.
+    pub fn tool_budget_named(mut self, name: impl Into<String>, calls: u32) -> Self {
+        let name = name.into();
+        if calls == 0 || self.tool_budgets.iter().any(|budget| budget.name == name) {
+            self.budget_errors
+                .push(format!("invalid or repeated tool budget for '{name}'"));
+        } else {
+            self.tool_budgets
+                .push(RequestedToolBudget { name, limit: calls });
+        }
+        self
+    }
+
     /// Limits accepted calls for the tool identified by input type `I`.
     pub fn tool_budget<I: JsonSchema>(mut self, calls: u32) -> Self {
         let name = match agent_tool_identity::<I>() {

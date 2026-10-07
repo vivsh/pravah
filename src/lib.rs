@@ -12,17 +12,17 @@ pub mod tools;
 pub mod utils;
 
 pub use context::{Context, FlowConf};
+pub use graph::agent_request::AgentRequest;
 pub use graph::{
-    Agent, AgentClientOperation, AgentConfig, AgentDecision, AgentDirective,
-    AgentInterventionPoint, AgentLoop, AgentLoopMetrics, AgentResume, AgentSuspension,
-    AgentToolProposal, AgentToolResult, Chat, ChatBuilder, ChatRequest, ChatStep, ChatTurn,
-    CompiledFlow, EitherFlow, Fetch, FetchBody, FetchError, FetchExecutor, FetchRequest,
-    FetchResponse, Flow, GraphError, McpResourceRef, Runtime, Snapshot, Step, Suspension,
-    ToolFilter, ToolInfo, Toolset, TypedMark, TypedVar, compile,
+    Agent, AgentClientOperation, AgentConfig, AgentDecision, AgentDirective, AgentError,
+    AgentExecutor, AgentInterventionPoint, AgentLoop, AgentLoopMetrics, AgentResponse, AgentResume,
+    AgentSuspension, AgentToolProposal, AgentToolResult, Chat, ChatBuilder, ChatRequest, ChatStep,
+    ChatTurn, CompiledFlow, EitherFlow, Flow, GraphError, McpResourceRef, Runtime, Snapshot, Step,
+    Suspension, ToolFilter, ToolInfo, Toolset, TypedMark, TypedVar, compile,
 };
 #[cfg(feature = "mcp")]
 pub use graph::{McpError, McpResourceInfo, McpServer};
 pub use history::{
-    CompactionRequest, CompactionResult, Compactor, HistoryEntry, HistoryManager, HistoryStore,
+    CompactionRequest, CompactionResult, Compactor, HistoryEntry, HistoryPolicy, HistoryStore,
     MessageHistory, NoopHistoryStore,
 };

@@ -177,7 +177,7 @@ fn validate_node_references(graph: &UntypedGraph, problems: &mut Vec<String>) {
                     problems,
                 );
             }
-            NodeKind::PureHandler { .. } | NodeKind::Fetch => {
+            NodeKind::PureHandler { .. } => {
                 if node.outputs.is_empty() {
                     problems.push(format!(
                         "handler node '{}' must declare at least one output edge",
@@ -185,12 +185,19 @@ fn validate_node_references(graph: &UntypedGraph, problems: &mut Vec<String>) {
                     ));
                 }
             }
-            NodeKind::Continuation { key, payload, .. } => {
+            NodeKind::Continuation {
+                key,
+                payload,
+                children,
+            } => {
                 if node.outputs.is_empty() {
                     problems.push(format!(
                         "handler node '{}' must declare at least one output edge",
                         node.name
                     ));
+                }
+                if let Err(err) = super::agent::validate_json_children(payload, children) {
+                    problems.push(err.to_string());
                 }
                 if let Err(err) = super::agent::validate_payload_handler(payload, key.as_str()) {
                     problems.push(err.to_string());
@@ -491,7 +498,6 @@ pub fn validate_registry_keys(
                     ));
                 }
             }
-            NodeKind::Fetch => {}
             NodeKind::Continuation { key, .. } => {
                 if !has_continuation(key.as_str()) {
                     missing.push(format!(
@@ -550,7 +556,6 @@ fn child_graphs(kind: &NodeKind) -> Vec<(&'static str, &UntypedGraph)> {
             .collect(),
         NodeKind::Builtin { .. }
         | NodeKind::PureHandler { .. }
-        | NodeKind::Fetch
         | NodeKind::Suspend { .. }
         | NodeKind::Load { .. }
         | NodeKind::Store { .. } => Vec::new(),
