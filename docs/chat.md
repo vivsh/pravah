@@ -127,6 +127,21 @@ keyed messages, state, and JSON restoration.
 A chat begins with an ordinary function-defined agent:
 
 ```rust
+fn tutor(root: Agent<Question>) -> Agent<Answer> {
+    root
+        .model("openai:///gpt-5")
+        .instructions("You are a concise Rust tutor.")
+        .build()
+}
+
+let mut chat = Chat::new(tutor, Context::default())?;
+```
+
+This uses the same declaration settings as ChatBuilder, with JSON-rendered input.
+For plain-text messages, attachments or invocation-dependent settings, use custom
+configuration instead:
+
+```rust
 use pravah::clients::Message;
 use pravah::{Agent, AgentConfig, Chat, Context, GraphError};
 
@@ -158,6 +173,10 @@ These conversation keys are separate from per-message keys.
 The configuration function runs for each new chat input. It may select the
 model, instructions, initial user message, memory, tools, resources, and
 budgets from the input and `Context`.
+
+The shared declaration settings schema changed with declarative Agent support.
+Builder-created Chat snapshots from before that change have incompatible graph
+fingerprints and are rejected without migration. Snapshot formats are unchanged.
 
 Construction is synchronous and fallible: it validates the chat and leaves it
 waiting for input. It does not configure the agent, call a model, resolve MCP

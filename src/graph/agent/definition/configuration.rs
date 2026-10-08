@@ -2,6 +2,40 @@ use super::*;
 use crate::graph::value::to_value;
 use serde::{Deserialize, Serialize};
 
+/// Keeps custom configure's direct input path independent of declarative settings.
+pub(super) fn input_configurator<T, O, Fut, E>(
+    configure: fn(T, Context) -> Fut,
+) -> AgentConfigurator
+where
+    T: 'static + DeserializeOwned + JsonSchema + Send + Sync,
+    O: JsonSchema,
+    Fut: Future<Output = Result<AgentConfig, E>> + Send + 'static,
+    E: Error + Send + Sync + 'static,
+{
+    let agent = O::schema_name().into_owned();
+    AgentConfigurator {
+        data: None,
+        call: Arc::new(move |value, _, _, ctx| {
+            let agent = agent.clone();
+            async move {
+                let input = from_value::<T>(value).map_err(|err| {
+                    GraphError::AgentConfigValidation(format!(
+                        "failed to decode agent input '{}': {err}",
+                        T::schema_name()
+                    ))
+                })?;
+                configure(input, ctx)
+                    .await
+                    .map_err(|err| GraphError::AgentConfiguration {
+                        agent,
+                        reason: err.to_string(),
+                    })
+            }
+            .boxed()
+        }),
+    }
+}
+
 /// Immutable, schema-described configure input owned by the authored graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ConfigurationData {

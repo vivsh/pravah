@@ -68,7 +68,7 @@ application state have fixed Rust types; model responses are decoded into
 For a text-only conversation, use `Chat::builder::<String, String>()` and
 `chat.send("Hello").await?`.
 
-In composed workflows, give an agent an `AgentConfig::key(...)` to share one
+In composed workflows, give an agent `.key(...)` to share one
 conversation across steps and child flows. Chat supplies its own stable key by
 default; conversation history remains part of its checkpoint.
 
@@ -145,6 +145,24 @@ control over suspended or unfinished work, use a workflow execution loop.
 Use `Flow<Input>` to coordinate application work and `Agent<Input>` to define
 reusable agents. Both are ordinary Rust functions with typed outputs. Agents
 can participate in a workflow, and workflows can become agent tools.
+
+Fixed agent settings need no configuration callback:
+
+```rust
+use pravah::Agent;
+
+fn reviewer(root: Agent<PreparedRequest>) -> Agent<Review> {
+    root
+        .model("openai:///gpt-5")
+        .instructions("Review the evidence and give a clear recommendation.")
+        .turn_budget(4)
+        .build()
+}
+```
+
+The return type selects the structured output. Declarative agents render input
+as JSON text, just like ChatBuilder. Use `.configure(...)` instead when the
+model, memory or user message needs to depend on the input or runtime context.
 
 An approval process, for example, can collect evidence, ask an agent for a
 recommendation, and pause for a human decision:
@@ -231,7 +249,7 @@ should be idempotent or deduplicated as appropriate.
 
 ```toml
 [dependencies]
-pravah = "0.4.21"
+pravah = "0.4.22"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 ```

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 
 mod selection;
-pub(crate) use selection::validate_tool_names;
+pub(crate) use selection::{validate_resources, validate_tool_names};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 

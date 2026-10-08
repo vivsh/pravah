@@ -53,7 +53,9 @@ use budget::*;
 use checkpoint::*;
 pub(crate) use config::ResolvedResource;
 pub use config::{AgentConfig, McpResourceRef, ToolFilter, ToolInfo};
-pub(crate) use config::{RequestedToolBudget, agent_tool_identity, validate_tool_names};
+pub(crate) use config::{
+    RequestedToolBudget, agent_tool_identity, validate_resources, validate_tool_names,
+};
 use config::{ResolvedAgentConfig, agent_tool_definition};
 pub use control::{
     AgentDecision, AgentDirective, AgentInterventionPoint, AgentLoop, AgentLoopMetrics,
@@ -369,7 +371,7 @@ where
     if missing_configure {
         build
             .errors
-            .push("agent configure function is required".into());
+            .push("agent must finish with build or configure".into());
     }
     build
 }

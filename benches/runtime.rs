@@ -298,7 +298,55 @@ async fn report_agent_benchmarks() -> Result<(), GraphError> {
         VM_ITERATIONS,
         &controlled_budgeted,
     )
-    .await
+    .await?;
+    report_declarative_agents().await
+}
+
+fn declarative_benchmark_agent(root: Agent<AgentFixture>) -> Agent<AgentAnswer> {
+    root.model("test:///benchmark")
+        .instructions("Return the structured answer.")
+        .build()
+}
+
+fn declarative_benchmark_flow(root: Flow<AgentFixture>) -> Flow<AgentAnswer> {
+    root.agent(declarative_benchmark_agent)
+}
+
+/// Matches declarative input rendering to isolate settings costs from JSON rendering costs.
+async fn configure_json_agent(input: AgentFixture, _: Context) -> Result<AgentConfig, GraphError> {
+    let content = serde_json::to_string(&input).map_err(|error| GraphError::JsonEncode {
+        target: "benchmark input".into(),
+        reason: error.to_string(),
+    })?;
+    Ok(AgentConfig::new(
+        "test:///benchmark",
+        "Return the structured answer.",
+        Message::user(content),
+    ))
+}
+
+fn custom_json_agent(root: Agent<AgentFixture>) -> Agent<AgentAnswer> {
+    root.configure(configure_json_agent)
+}
+
+fn custom_json_flow(root: Flow<AgentFixture>) -> Flow<AgentAnswer> {
+    root.agent(custom_json_agent)
+}
+
+/// Reports new declarative construction and activation beside equivalent custom JSON configuration.
+async fn report_declarative_agents() -> Result<(), GraphError> {
+    let declared = compile(declarative_benchmark_flow)?;
+    let custom = compile(custom_json_flow)?;
+    report_agent_allocations("agent/declarative_output", &declared)?;
+    report_agent_allocations("agent/custom_json_output", &custom)?;
+    report_sync("agent/declarative_preparation", 100, || {
+        compile(declarative_benchmark_flow)
+    });
+    report_sync("agent/custom_json_preparation", 100, || {
+        compile(custom_json_flow)
+    });
+    report_agent("agent/declarative_output", VM_ITERATIONS, &declared).await?;
+    report_agent("agent/custom_json_output", VM_ITERATIONS, &custom).await
 }
 
 /// Measures allocations for one complete agent invocation on this thread.

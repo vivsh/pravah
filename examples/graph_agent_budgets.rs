@@ -4,7 +4,7 @@
 
 use pravah::testing::{ScriptedFactory, mock_tool_call};
 use pravah::tools::ToolError;
-use pravah::{Chat, Context, GraphError, Toolset};
+use pravah::{Agent, Chat, Context, GraphError, Toolset};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -23,6 +23,15 @@ async fn search(request: Search, _ctx: Context) -> Result<String, ToolError> {
     Ok("Pravah supports durable, stepwise workflows.".into())
 }
 
+fn assistant(root: Agent<String>) -> Agent<String> {
+    root.model("test:///scripted")
+        .instructions("Research the question, then give a brief answer.")
+        .tools(tools)
+        .turn_budget(1)
+        .tool_budget::<Search>(1)
+        .build()
+}
+
 /// The second proposed search is unavailable; the next model request must conclude.
 #[tokio::main]
 async fn main() -> Result<(), GraphError> {
@@ -34,13 +43,7 @@ async fn main() -> Result<(), GraphError> {
         .then_output(json!("One search ran before the agent concluded."));
     let ctx = Context::default().with_providers(pravah::testing::providers(client)?);
 
-    let mut chat = Chat::builder::<String, String>()
-        .model("test:///scripted")
-        .instructions("Research the question, then give a brief answer.")
-        .tools(tools)
-        .turn_budget(1)
-        .tool_budget::<Search>(1)
-        .build(ctx)?;
+    let mut chat = Chat::new(assistant, ctx)?;
 
     println!("{}", chat.send("What is Pravah?").await?.output);
     Ok(())

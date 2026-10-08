@@ -10,6 +10,44 @@ Pravah workflow. For execution and persistence, start with
 Agent definitions mirror flow definitions:
 
 ```rust
+use pravah::{Agent, Flow};
+
+fn researcher(root: Agent<Question>) -> Agent<ResearchNotes> {
+    root
+        .model("openai:///gpt-5-mini")
+        .instructions("Research carefully. Cite sources and uncertainties.")
+        .tools(research_tools)
+        .turn_budget(6)
+        .tool_budget::<SearchRequest>(3)
+        .build()
+}
+
+fn research(root: Flow<Question>) -> Flow<ResearchNotes> {
+    root.agent(researcher)
+}
+```
+
+`Question`, `ResearchNotes` and tool input/output types are application types.
+The function's return type infers the structured output of `.build()`.
+Declarative agents render input directly as JSON text; strings include JSON
+quoting. The original typed input remains available to controllers.
+
+Use `.model`, `.instructions`, `.key`, `.provider_config`, `.max_output_tokens`,
+`.resources`, `.turn_budget`, `.tool_budget::<I>` and `.tool_budget_named` before
+terminal `.build()`. Scalar setters replace earlier values. Invalid/repeated
+budgets, malformed resources, duplicate tools and repeated controllers fail
+compilation. Missing or whitespace-only models and keys are rejected.
+
+Instructions alone may change on restore; already-configured invocations keep
+their saved instructions. Other settings must match the graph fingerprint.
+Without `.key`, graph agents remain frame-local, unlike Chat's default keyed
+conversation. The [budget example](../examples/graph_agent_budgets.rs) uses a
+declarative function-defined agent with a deterministic provider.
+
+For dynamic configuration, custom message rendering, memory retrieval or
+attachments, keep `.configure(...)`:
+
+```rust
 use pravah::clients::Message;
 use pravah::{Agent, AgentConfig, Context, Flow};
 
@@ -37,6 +75,10 @@ async fn configure_reviewer(
     .memory(memory))
 }
 ```
+
+Do not mix declarative settings with custom `.configure(...)`, or add operations
+after either terminal method. These errors surface during compilation. Tools
+and controllers may precede either `.build()` or `.configure(...)`.
 
 The definition function declares structure. The asynchronous `configure`
 function resolves one invocation's behavior from its owned input and `Context`.
@@ -312,7 +354,7 @@ example including suspension and typed resume.
 Enable the `mcp` feature to use Streamable HTTP resource servers:
 
 ```toml
-pravah = { version = "0.4.21", features = ["mcp"] }
+pravah = { version = "0.4.22", features = ["mcp"] }
 ```
 
 Register credentials and headers on the runtime `Context`, not in the graph or

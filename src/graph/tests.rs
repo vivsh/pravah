@@ -2503,7 +2503,7 @@ fn symmetric_agent_function_infers_output_type() {
 #[test]
 fn agent_definition_errors_accumulate_until_compile() {
     let missing = match compile(missing_configure_flow) {
-        Ok(_) => panic!("configure should be required"),
+        Ok(_) => panic!("build or configure should be required"),
         Err(err) => err,
     };
     let repeated = match compile(repeated_configure_flow) {
@@ -2518,7 +2518,7 @@ fn agent_definition_errors_accumulate_until_compile() {
     assert!(
         missing
             .to_string()
-            .contains("configure function is required")
+            .contains("agent must finish with build or configure")
     );
     assert!(repeated.to_string().contains("only be declared once"));
     assert!(late_tools.to_string().contains("before configure"));

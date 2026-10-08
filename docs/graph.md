@@ -100,8 +100,12 @@ or reread MCP resources.
 
 ## Agent Activation
 
-Agent structure and candidate tools are prepared with the graph. Its
-`configure` function runs once when that agent invocation begins and may choose
+Agent structure and candidate tools are prepared with the graph. Fixed settings
+can use `.model(...).instructions(...).build()` in the agent definition; input
+is rendered as JSON text. Custom `.configure(...)` remains available for dynamic
+behavior and message rendering. See [agent declarations](clients.md).
+
+The configuration function runs once when that agent invocation begins and may choose
 the model, instructions, initial user message, memory, provider options, tool
 subset, and MCP resources from the input and `Context`.
 

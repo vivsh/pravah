@@ -17,6 +17,7 @@ use crate::graph::value::{Value, from_value};
 
 mod chat;
 mod configuration;
+mod declaration;
 #[cfg(test)]
 mod tests;
 pub(crate) use configuration::ConfigurationData;
@@ -91,12 +92,15 @@ struct AgentDefinition {
     configure: Option<AgentConfigurator>,
     configuration: Option<ConfigurationData>,
     errors: Vec<String>,
+    settings: Option<declaration::AgentSettings>,
+    instructions: Option<String>,
 }
 
 /// Typed root used to define one agent as `Agent<Input> -> Agent<Output>`.
 ///
 /// Candidate tools are structural and prepared with the graph. The terminal
-/// configuration function resolves all invocation-specific behavior once.
+/// `.build()` finalizes declarative settings, or `.configure()` resolves
+/// invocation-specific behavior once. Both use the same durable execution path.
 pub struct Agent<T> {
     definition: AgentDefinition,
     _marker: PhantomData<fn() -> T>,
@@ -119,6 +123,8 @@ impl<T> Agent<T> {
                 configure: None,
                 configuration: None,
                 errors: Vec::new(),
+                settings: None,
+                instructions: None,
             },
             _marker: PhantomData,
         }
@@ -126,11 +132,12 @@ impl<T> Agent<T> {
 
     /// Declares every tool graph this agent may expose at runtime.
     /// The builder runs immediately and may consume captured catalogue definitions.
+    /// Declare tools before terminal build or configure; late declarations fail compilation.
     pub fn tools(mut self, build: impl FnOnce(Toolset) -> Toolset) -> Self {
         if self.definition.configure.is_some() {
             self.definition
                 .errors
-                .push("agent tools must be declared before configure".into());
+                .push("agent tools must be declared before configure or build".into());
             return self;
         }
         self.definition.tools = build(self.definition.tools);
@@ -141,7 +148,7 @@ impl<T> Agent<T> {
     ///
     /// The controller receives typed invocation input and checkpointed loop
     /// observations at explicit boundaries. It must be declared before the
-    /// terminal configuration function.
+    /// terminal build or configure method.
     pub fn control<Fut, E>(mut self, control: fn(AgentLoop<T>, Context) -> Fut) -> Self
     where
         T: 'static + DeserializeOwned + JsonSchema + Send + Sync,
@@ -151,7 +158,7 @@ impl<T> Agent<T> {
         if self.definition.configure.is_some() {
             self.definition
                 .errors
-                .push("agent control must be declared before configure".into());
+                .push("agent control must be declared before configure or build".into());
         } else if self.definition.controller.is_some() {
             self.definition
                 .errors
@@ -188,7 +195,8 @@ impl<T> Agent<T> {
     ///
     /// The function receives owned input and a cheap clone of the runtime
     /// context. Its resolved configuration is checkpointed and is not rerun
-    /// after restoration.
+    /// after restoration. Declarative setters cannot be combined with this method;
+    /// conflicting declarations accumulate errors reported during compilation.
     pub fn configure<O, Fut, E>(mut self, configure: fn(T, Context) -> Fut) -> Agent<O>
     where
         T: 'static + DeserializeOwned + JsonSchema + Send + Sync,
@@ -196,33 +204,18 @@ impl<T> Agent<T> {
         Fut: Future<Output = Result<AgentConfig, E>> + Send + 'static,
         E: Error + Send + Sync + 'static,
     {
+        if self.definition.settings.is_some() || self.definition.instructions.is_some() {
+            self.definition
+                .errors
+                .push("declarative agent settings cannot be combined with configure".into());
+        }
         if self.definition.configure.is_some() {
             self.definition
                 .errors
                 .push("agent configure may only be declared once".into());
         } else {
-            let agent = O::schema_name().into_owned();
-            self.definition.configure = Some(AgentConfigurator {
-                data: None,
-                call: Arc::new(move |value, _, _, ctx| {
-                    let agent = agent.clone();
-                    async move {
-                        let input = from_value::<T>(value).map_err(|err| {
-                            GraphError::AgentConfigValidation(format!(
-                                "failed to decode agent input '{}': {err}",
-                                T::schema_name()
-                            ))
-                        })?;
-                        configure(input, ctx)
-                            .await
-                            .map_err(|err| GraphError::AgentConfiguration {
-                                agent,
-                                reason: err.to_string(),
-                            })
-                    }
-                    .boxed()
-                }),
-            });
+            self.definition.configure =
+                Some(configuration::input_configurator::<T, O, Fut, E>(configure));
         }
         Agent {
             definition: self.definition,

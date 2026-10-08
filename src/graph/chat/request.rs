@@ -1,3 +1,4 @@
+pub(super) use crate::graph::agent::validate_resources;
 use crate::graph::agent::validate_tool_names;
 use crate::graph::{GraphError, McpResourceRef, Value, ValueError, from_value};
 use schemars::JsonSchema;
@@ -113,28 +114,4 @@ impl ChatRequest<Value> {
             resources: from_value(value.get("resources").cloned().unwrap_or(Value::NULL))?,
         })
     }
-}
-
-/// Validates references and the simple named-template vocabulary supported by Pravah MCP.
-pub(super) fn validate_resources(refs: &[McpResourceRef]) -> Result<(), String> {
-    for (index, resource) in refs.iter().enumerate() {
-        if refs[..index].contains(resource) {
-            return Err("duplicate MCP resource reference".into());
-        }
-        if resource.server().trim().is_empty() || resource.uri().trim().is_empty() {
-            return Err("MCP server and URI must not be empty".into());
-        }
-        let mut uri = resource.uri().to_owned();
-        for name in resource.arguments().keys() {
-            let pattern = format!("{{{name}}}");
-            if name.is_empty() || !uri.contains(&pattern) {
-                return Err("unused or empty MCP template argument".into());
-            }
-            uri = uri.replace(&pattern, "argument");
-        }
-        if uri.contains(['{', '}']) || uri.chars().any(char::is_whitespace) || !uri.contains(':') {
-            return Err("invalid or unresolved MCP resource URI".into());
-        }
-    }
-    Ok(())
 }

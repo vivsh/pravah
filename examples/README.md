@@ -18,7 +18,7 @@ cargo run --example graph_typed
 | [graph_typed](graph_typed.rs) | Maps, branches, reused subflows and `each` | — |
 | [graph_snapshot_resume](graph_snapshot_resume.rs) | Explicit suspension, snapshot and typed resumption | — |
 | [graph_external_task](graph_external_task.rs) | External task suspension, snapshot restoration and explicit result delivery | — |
-| [graph_agent_budgets](graph_agent_budgets.rs) | Agent-turn and per-tool budgets with a deterministic provider | `--features testing` |
+| [graph_agent_budgets](graph_agent_budgets.rs) | Declarative agent construction, agent-turn and per-tool budgets with a deterministic provider | `--features testing` |
 | [graph_agent_control](graph_agent_control.rs) | Controller-requested approval, explicit resume and forced conclusion | `--features testing` |
 | [graph_diagram](graph_diagram.rs) | Mermaid and DOT output for a split/join workflow | — |
 | [graph_untyped](graph_untyped.rs) | Direct graph construction and handler registration | — |
