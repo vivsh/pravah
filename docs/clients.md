@@ -354,7 +354,7 @@ example including suspension and typed resume.
 Enable the `mcp` feature to use Streamable HTTP resource servers:
 
 ```toml
-pravah = { version = "0.4.22", features = ["mcp"] }
+pravah = { version = "0.4.23", features = ["mcp"] }
 ```
 
 Register credentials and headers on the runtime `Context`, not in the graph or
