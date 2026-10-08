@@ -5,6 +5,9 @@
 
 mod builder;
 mod chat;
+#[cfg(test)]
+#[path = "tests/client_factory.rs"]
+mod client_factory;
 pub mod compactor;
 pub mod diagram;
 mod errors;

@@ -12,7 +12,7 @@ pub struct RetryConfig {
     pub max_retries: u32,
     /// Delay before the first retry.
     pub initial_delay: Duration,
-    /// Multiplier applied after each retry.
+    /// Finite, nonnegative multiplier applied after each retry.
     pub backoff_factor: f64,
     /// Maximum retry delay.
     pub max_delay: Duration,
@@ -41,6 +41,7 @@ impl RetryConfig {
     }
 
     /// Sets the exponential backoff multiplier applied after each failed attempt.
+    /// Client creation rejects negative or non-finite values with a validation error.
     pub fn with_backoff_factor(mut self, factor: f64) -> Self {
         self.backoff_factor = factor;
         self
@@ -50,6 +51,17 @@ impl RetryConfig {
     pub fn with_max_delay(mut self, delay: Duration) -> Self {
         self.max_delay = delay;
         self
+    }
+
+    /// Rejects unsupported multipliers before constructing the underlying client.
+    fn validate(&self) -> Result<(), ClientError> {
+        if !self.backoff_factor.is_finite() || self.backoff_factor < 0.0 {
+            return Err(ClientError::new(
+                ErrorKind::Validation,
+                "retry backoff_factor must be finite and nonnegative",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -66,9 +78,17 @@ fn is_retryable(err: &ClientError) -> bool {
     )
 }
 
-fn backoff_delay(config: &RetryConfig, attempt: u32) -> Duration {
+/// Computes a checked delay, preserving exact caps when exponential growth overflows.
+fn backoff_delay(config: &RetryConfig, attempt: u32) -> Result<Duration, ClientError> {
+    if config.initial_delay.is_zero() || config.max_delay.is_zero() {
+        return Ok(Duration::ZERO);
+    }
     let secs = config.initial_delay.as_secs_f64() * config.backoff_factor.powi(attempt as i32);
-    Duration::from_secs_f64(secs.min(config.max_delay.as_secs_f64()))
+    if secs >= config.max_delay.as_secs_f64() {
+        return Ok(config.max_delay);
+    }
+    Duration::try_from_secs_f64(secs)
+        .map_err(|_| ClientError::new(ErrorKind::Validation, "retry delay cannot be represented"))
 }
 
 struct RetryingClient {
@@ -91,7 +111,7 @@ impl LlmBackend for RetryingClient {
             match self.inner.execute(messages).await {
                 Ok(response) => return Ok(response),
                 Err(err) if attempt < self.config.max_retries && is_retryable(&err) => {
-                    let delay = backoff_delay(&self.config, attempt);
+                    let delay = backoff_delay(&self.config, attempt)?;
                     tracing::warn!(
                         attempt = attempt + 1,
                         max = self.config.max_retries,
@@ -110,6 +130,7 @@ impl LlmBackend for RetryingClient {
 
 /// Client-factory wrapper that retries transient LLM failures with exponential backoff.
 /// Retries apply only to `execute()`.
+/// Client creation rejects invalid retry configuration before calling the inner factory.
 pub struct RetryingFactory<F: ProviderFactory> {
     inner: F,
     config: RetryConfig,
@@ -137,7 +158,7 @@ impl<F: ProviderFactory> RetryingFactory<F> {
         }
     }
 
-    /// Replaces the retry policy.
+    /// Replaces the retry policy, which is validated during client creation.
     pub fn with_config(mut self, config: RetryConfig) -> Self {
         self.config = config;
         self
@@ -150,6 +171,7 @@ impl<F: ProviderFactory> ProviderFactory for RetryingFactory<F> {
         model_url: &ModelUrl,
         options: ClientOptions,
     ) -> Result<Client, ClientError> {
+        self.config.validate()?;
         let inner = self.inner.llm(model_url, options).await?;
         Ok(Client::from_backend(RetryingClient {
             inner,
@@ -166,4 +188,5 @@ impl RetryLayer {
 }
 
 #[cfg(test)]
+#[path = "tests/retry.rs"]
 mod tests;

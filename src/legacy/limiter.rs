@@ -5,26 +5,24 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
 use crate::clients::{
-    Client, ClientError, ClientOptions, ClientResponse, LlmBackend, Message, ModelUrl, Provider,
-    ProviderFactory,
+    Client, ClientError, ClientOptions, ClientResponse, ErrorKind, LlmBackend, Message, ModelUrl,
+    Provider, ProviderFactory,
 };
 
 /// Per-provider rate-limit settings.
 /// `rpm` sets the sustained rate and `burst` sets the immediate bucket depth.
 #[derive(Debug, Clone, Copy)]
 pub struct RateLimit {
-    /// Sustained requests per minute.
+    /// Sustained requests per minute; must be non-zero when creating a client.
     pub rpm: u32,
-    /// Maximum number of immediate requests when the bucket is full.
+    /// Maximum immediate requests when the bucket is full; must be non-zero.
     pub burst: u32,
 }
 
 impl RateLimit {
-    /// Builds a rate limit.
-    /// Debug builds assert that both values are non-zero.
+    /// Builds a rate limit, validated when creating a client for the configured provider.
+    /// Zero RPM or burst values produce a validation error during client creation.
     pub fn new(rpm: u32, burst: u32) -> Self {
-        debug_assert!(rpm > 0, "rpm must be > 0");
-        debug_assert!(burst > 0, "burst must be >= 1");
         Self { rpm, burst }
     }
 }
@@ -45,6 +43,7 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
+    /// Derives immutable rate and capacity while initializing the existing token state.
     fn new(label: String, limit: RateLimit) -> Self {
         let capacity = limit.burst as f64;
         Self {
@@ -56,6 +55,24 @@ impl TokenBucket {
             refill_rate: limit.rpm as f64 / 60.0,
             capacity,
         }
+    }
+
+    /// Rejects zero rate or capacity without accessing mutable token state.
+    fn validate(&self) -> Result<(), ClientError> {
+        let invalid = if self.refill_rate <= 0.0 {
+            Some("rpm must be non-zero")
+        } else if self.capacity < 1.0 {
+            Some("burst must be non-zero")
+        } else {
+            None
+        };
+        if let Some(reason) = invalid {
+            return Err(ClientError::new(
+                ErrorKind::Validation,
+                format!("rate limit for provider '{}': {reason}", self.label),
+            ));
+        }
+        Ok(())
     }
 
     /// Waits until one token is available and then consumes it.
@@ -114,6 +131,7 @@ impl LlmBackend for RateLimitingClient {
 
 /// Client-factory wrapper that applies per-provider async rate limits.
 /// Providers without a configured limit pass through unchanged.
+/// Client creation rejects zero rate or burst before calling the inner factory.
 pub struct RateLimitingFactory<F: ProviderFactory> {
     inner: F,
     buckets: HashMap<String, Arc<TokenBucket>>,
@@ -132,6 +150,7 @@ impl RateLimitLayer {
     }
 
     /// Adds a per-provider rate limit. Call once per provider that needs limiting.
+    /// Zero rate or burst is rejected during client creation for this provider.
     pub fn with_limit(mut self, provider: Provider, limit: RateLimit) -> Self {
         self.limits.push((provider, limit));
         self
@@ -149,6 +168,7 @@ impl<F: ProviderFactory> RateLimitingFactory<F> {
 
     /// Sets the rate limit for one provider.
     /// A second call for the same provider replaces the previous value.
+    /// Zero rate or burst is rejected during client creation for this provider.
     pub fn with_limit(mut self, provider: Provider, limit: RateLimit) -> Self {
         let label = provider.as_str().to_owned();
         self.buckets
@@ -163,9 +183,12 @@ impl<F: ProviderFactory> ProviderFactory for RateLimitingFactory<F> {
         model_url: &ModelUrl,
         options: ClientOptions,
     ) -> Result<Client, ClientError> {
+        let bucket = self.buckets.get(model_url.provider().as_str());
+        if let Some(bucket) = bucket {
+            bucket.validate()?;
+        }
         let inner = self.inner.llm(model_url, options).await?;
-        let url = model_url;
-        match self.buckets.get(url.provider().as_str()) {
+        match bucket {
             Some(bucket) => Ok(Client::from_backend(RateLimitingClient {
                 inner,
                 bucket: Arc::clone(bucket),

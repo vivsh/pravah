@@ -495,9 +495,20 @@ pub struct EitherFlow<T, A, B, H> {
 }
 
 /// Compiled typed flow plus the runtime registry needed to execute handlers.
+/// Clones share immutable preparation and callback instances without rebuilding
+/// the graph. Each start or restore owns independent execution state.
 pub struct CompiledFlow<I, O> {
     prepared: PreparedGraph,
     _marker: PhantomData<fn(I) -> O>,
+}
+
+impl<I, O> Clone for CompiledFlow<I, O> {
+    fn clone(&self) -> Self {
+        Self {
+            prepared: self.prepared.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 /// Compiles a function-defined typed flow into the canonical graph runtime.
@@ -914,3 +925,7 @@ where
         })
     }
 }
+
+#[cfg(test)]
+#[path = "tests/typed.rs"]
+mod tests;

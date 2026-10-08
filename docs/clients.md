@@ -404,6 +404,12 @@ let providers = ProviderRegistry::with_builtins().register("company", factory)?;
 let ctx = Context::default().with_providers(providers);
 ```
 
+Retry multipliers must be finite and nonnegative; zero and fractional multipliers
+are supported. Rate limits require non-zero RPM and burst values. The builders
+retain these settings, and client creation returns `ErrorKind::Validation` for an
+invalid policy before calling the underlying provider factory. A rate limit is
+validated only when creating a client for its configured provider.
+
 Compatibility-only `FlowRuntime` also accepts a registry through `with_providers`.
 Legacy Chat client construction is asynchronous: use `.build().await?` and
 `Chat::from_snapshot(snapshot).await?`. Modern Chat construction remains

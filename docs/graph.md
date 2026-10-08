@@ -23,6 +23,25 @@ Use `.flow(other_flow)` to compose a subflow and `.each(item_flow)` to apply a
 flow to each input item. The same function may be reused at multiple call
 sites. Agent definitions use the same shape; see [clients.md](clients.md).
 
+Compile a definition once when registering it separately from its agent worker:
+
+```rust
+let executor = flow.prepared().executor(ctx);
+let flow_factory = move || flow.clone();
+```
+
+`CompiledFlow::clone()` shares the prepared graph and callback instances without
+allocating or recompiling. Input and output types need not implement `Clone`.
+Each start or restore owns independent execution state. The worker's providers
+and services remain explicitly selected through `Context`.
+
+Derive both registrations from this same definition rather than independently
+building the factory. When updating an existing registration, preserve its
+construction convention: `compile(factory)` and
+`factory(Flow::root()).finish::<Input>()` currently produce different root names,
+handler keys, and graph fingerprints. Sharing does not establish compatibility
+between separately built deployments or different callback implementations.
+
 ## Drive One Step at a Time
 
 Bind runtime-only dependencies to an external executor. The VM itself is
