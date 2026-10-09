@@ -13,6 +13,7 @@ cargo run --example graph_typed
 | Example | Demonstrates | Extra flag |
 | --- | --- | --- |
 | [graph_chat_builder](graph_chat_builder.rs) | Typed Chat, request memory, message keys, application state and JSON restoration | `--features testing` |
+| [graph_chat_stream](graph_chat_stream.rs) | Streaming text previews and authoritative typed completion with a local provider | — |
 | [graph_chat_working_memory](graph_chat_working_memory.rs) | Compaction, previous-summary access and completed-history replacement | `--features testing` |
 | [graph_json_tools](graph_json_tools.rs) | Catalogue-defined JSON tools, captured operation bindings and a shared Context service | `--features testing` |
 | [graph_typed](graph_typed.rs) | Maps, branches, reused subflows and `each` | — |

@@ -5,6 +5,27 @@ Pravah workflow. For execution and persistence, start with
 [graph.md](graph.md). The older trait-based agent API is available only through
 [`pravah::legacy`](legacy.md).
 
+## Streaming with an independent worker
+
+The synchronous VM still emits `Step::Agent(request)`. A worker can opt into
+Rath streaming without changing the workflow definition:
+
+```rust
+let completion = executor.execute_stream(&request, |request_id, event| async move {
+    publish_preview(request_id, event).await;
+}).await;
+runtime.resume_agent(completion)?;
+```
+
+`publish_preview` is application code accepting `Uuid` and
+`pravah::clients::LlmEvent`. It must handle its own delivery failures. The worker
+forwards only provisional events and awaits each callback; the terminal Rath
+response follows the existing durable completion path. Non-generation operations
+execute normally without events. Unsupported backends return a portable failure,
+never an ordinary-generation fallback. Live streams are runtime-only and cannot
+be serialized or reconnected from a snapshot. See [Chat streaming](chat.md#stream-a-reply)
+for cancellation and progress semantics.
+
 ## Define an Agent With a Function
 
 Agent definitions mirror flow definitions:
@@ -354,7 +375,7 @@ example including suspension and typed resume.
 Enable the `mcp` feature to use Streamable HTTP resource servers:
 
 ```toml
-pravah = { version = "0.4.23", features = ["mcp"] }
+pravah = { version = "0.4.24", features = ["mcp"] }
 ```
 
 Register credentials and headers on the runtime `Context`, not in the graph or

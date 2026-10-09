@@ -6,6 +6,9 @@ mod cases;
 #[path = "chat/tool_loop.rs"]
 mod tool_loop;
 
+#[path = "chat/streaming.rs"]
+mod streaming;
+
 use pravah::clients::{
     Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmBackend, Message,
     ModelUrl, Provider, ProviderFactory,
@@ -41,6 +44,23 @@ impl LlmBackend for Model {
             Provider::OpenAi,
             ClientOutput::Output(serde_json::json!("answer")),
         ))
+    }
+
+    /// Supplies two preview fragments and the same terminal result as ordinary generation.
+    async fn execute_stream<'a>(
+        &'a self,
+        messages: &[Message],
+    ) -> Result<rath::llm::LlmStream<'a>, ClientError> {
+        let events = [
+            rath::llm::LlmEvent::TextDelta { text: "an".into() },
+            rath::llm::LlmEvent::TextDelta {
+                text: "swer".into(),
+            },
+            rath::llm::LlmEvent::Completed {
+                response: self.execute(messages).await?,
+            },
+        ];
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
     }
 }
 
@@ -168,6 +188,9 @@ fn main() -> Result<(), GraphError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(|error| GraphError::Invalid(error.to_string()))?;
+    if std::env::var("PRAVAH_BENCH_CASE").as_deref() == Ok("streaming") {
+        return streaming::run(&runtime);
+    }
     if std::env::var_os("PRAVAH_BENCH_CASE").is_none() {
         run(&runtime)?;
     }

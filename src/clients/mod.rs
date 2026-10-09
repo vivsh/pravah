@@ -8,9 +8,9 @@ mod tests;
 pub use rath::core::{ErrorBody, ErrorKind, ModelUrl};
 pub use rath::embeddings::{EmbedRequest, EmbedResponse, EmbedTaskType, EmbeddingClient};
 pub use rath::llm::{
-    Attachment, CacheControl, LlmBackend, LlmClient as Client, LlmOptions as ClientOptions,
-    LlmOutput as ClientOutput, LlmResponse as ClientResponse, Message, Provider,
-    RathError as ClientError, ResponseFormat, Role, ThinkingLevel, TokenUsage, ToolCall,
+    Attachment, CacheControl, LlmBackend, LlmClient as Client, LlmEvent,
+    LlmOptions as ClientOptions, LlmOutput as ClientOutput, LlmResponse as ClientResponse, Message,
+    Provider, RathError as ClientError, ResponseFormat, Role, ThinkingLevel, TokenUsage, ToolCall,
     ToolChoice, ToolDefinition,
 };
 pub use rath::registry::{BuiltinProviderFactory, ProviderFactory, ProviderRegistry};

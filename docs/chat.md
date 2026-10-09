@@ -122,6 +122,40 @@ unaffected. No migration or automatic resubmission is performed.
 See the runnable [builder example](../examples/graph_chat_builder.rs), including
 keyed messages, state, and JSON restoration.
 
+## Stream a reply
+
+Keep `send` for ordinary responses. Use `send_stream` or `send_stream_with_key`
+when the selected Rath backend supports streaming:
+
+```rust
+use pravah::clients::LlmEvent;
+
+let reply = chat.send_stream_with_key("Explain this.", "message-42", |request_id, event| {
+    if let LlmEvent::TextDelta { text } = event {
+        print!("{text}");
+    }
+    std::future::ready(())
+}).await?;
+println!("Final typed output: {}", reply.output);
+```
+
+The async callback receives the agent request UUID and provisional `LlmEvent`
+values. It is awaited before reading the next event, so a slow consumer provides
+backpressure. Tool-call deltas can contain incomplete names/arguments; do not
+execute them. Different model requests within one tool loop have different UUIDs.
+The callback does not receive `Completed`: only the final validated response is
+accepted into history and returned as typed output. Progress may differ from it.
+
+Persistence, compaction, tools, controllers and budgets retain their usual order.
+Callbacks handle their own UI/delivery errors. Unsupported streaming and stream
+failures do not fall back or retry; output-limit failures discard partial output.
+Dropping a send future stops local consumption, but does not guarantee remote
+cancellation. A pending snapshot preserves the operation, not the live stream;
+restoration requires an explicit host decision to execute that pending request.
+Ordinary `send` and `send_with_key` remain non-streaming.
+
+See the credential-free [streaming example](../examples/graph_chat_stream.rs).
+
 ## Define A Chat Agent
 
 A chat begins with an ordinary function-defined agent:

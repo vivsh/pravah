@@ -92,6 +92,8 @@ into a concise, conversational interface:
   resources without putting credentials in the conversation.
 - **Working memory:** install `.compactor(policy)` to prepare history before
   model requests, retaining relevant context as conversations grow.
+- **Streaming feedback:** use `send_stream` to display incremental replies while
+  only final validated responses enter conversation history.
 - **Persistence integration:** attach `.store(history_store)` for history
   delivery, and save snapshots through your application's storage system.
 
@@ -249,7 +251,7 @@ should be idempotent or deduplicated as appropriate.
 
 ```toml
 [dependencies]
-pravah = "0.4.23"
+pravah = "0.4.24"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 ```

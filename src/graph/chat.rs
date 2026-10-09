@@ -18,6 +18,7 @@ use super::value::{Value, from_value, to_value};
 
 mod builder;
 mod request;
+mod streaming;
 #[cfg(test)]
 mod tests;
 pub use builder::ChatBuilder;

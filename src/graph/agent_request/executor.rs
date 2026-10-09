@@ -7,6 +7,8 @@ use crate::{Compactor, Context, HistoryStore};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
+mod streaming;
+
 /// An agent or tool callback executed outside the synchronous VM.
 pub trait DynAgentHandler: Send + Sync {
     /// Executes one callback; it owns no history or pending-operation state.

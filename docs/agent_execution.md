@@ -63,6 +63,12 @@ when enabled, and calls the model. Final messages are flushed before completion
 when persistence is enabled. Workers never save an unaccepted model proposal.
 See [history usage](history.md) for policy and store contracts.
 
+Workers may use `executor.execute_stream(&request, on_event).await` to publish
+provisional Rath progress, then deliver the returned completion in the same way.
+The VM remains synchronous; progress is not a new Step or snapshot field.
+See [streaming workers](clients.md#streaming-with-an-independent-worker) for
+callback, failure and cancellation rules.
+
 ## Durable host responsibilities
 
 1. Persist the pending snapshot before dispatch.
