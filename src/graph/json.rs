@@ -12,7 +12,7 @@ use super::state::Step;
 use super::value::to_value;
 
 /// Current JSON invocation request and response version.
-pub const JSON_WIRE_VERSION: u32 = 11;
+pub const JSON_WIRE_VERSION: u32 = 12;
 
 /// One external command for a trusted graph-backed workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]

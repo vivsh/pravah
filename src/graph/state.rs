@@ -136,6 +136,8 @@ impl Suspension {
 /// execution state.
 pub struct State {
     pub(crate) execution_id: Uuid,
+    /// Application-only value and its fixed type, independent of frame lifetime.
+    pub(crate) application_state: Option<(TypeSpec, Value)>,
     pub(crate) next_agent_sequence: u64,
     pub(crate) history_policy: HistoryPolicy,
     pub(crate) persisted_history_position: u64,

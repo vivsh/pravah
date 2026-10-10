@@ -85,8 +85,9 @@ let mut chat = Chat::builder::<String, String>()
 ```
 
 State needs neither `Clone` nor `Default`. Repeated state or service setters
-replace previous values; their order does not matter. State moves into the graph's
-existing application variable at build, while services remain runtime-only.
+replace previous values; their order does not matter. State moves into the execution's
+application-state slot at build, using the same API as ordinary graphs, while services
+remain runtime-only.
 Omitting `.state(...)` selects unit state. There is no `build_with_state` method.
 
 Restore synchronously with the same definition. Instructions alone may change:
@@ -265,6 +266,8 @@ previous state unchanged. Only explicit state access performs typed conversion.
 
 State is included in the same `Snapshot` as execution and conversation history;
 no separate state record is needed. Persist the complete snapshot together.
+Chat delegates its state access to the graph runtime's `get_state` and `set_state`
+API; state is execution-owned rather than tied to the root frame.
 It is independent of conversation keys, history summaries, and `AgentConfig::memory`.
 Agents and tools cannot implicitly read or mutate it. Include relevant fields
 explicitly in a message input when the model needs them; state is not

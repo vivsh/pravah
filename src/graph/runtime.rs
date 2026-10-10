@@ -24,6 +24,7 @@ use super::value::{Value, to_value};
 
 mod agent;
 mod agent_history;
+mod application_state;
 mod chat;
 mod compile;
 mod continuation;
@@ -54,7 +55,7 @@ use snapshot::validate_snapshot_state;
 use sparse::{SparseState, expand_state, sparse_state};
 
 /// Current serialized runtime snapshot version.
-pub const SNAPSHOT_VERSION: u32 = 15;
+pub const SNAPSHOT_VERSION: u32 = 16;
 
 #[derive(Clone)]
 struct CompiledGraph {

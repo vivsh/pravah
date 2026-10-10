@@ -6,6 +6,7 @@ pub(super) fn validate_snapshot_state(
     root_index: usize,
     state: &State,
 ) -> Result<(), GraphError> {
+    super::application_state::validate_snapshot_application_state(state)?;
     if state.frames.is_empty() {
         if state.waiting.is_some() {
             return Err(GraphError::SnapshotValidation(

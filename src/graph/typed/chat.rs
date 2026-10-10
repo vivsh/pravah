@@ -3,27 +3,14 @@ use crate::graph::NodeId;
 use crate::graph::chat::ChatRequest;
 
 /// Builds one prepared chat graph and returns its authored application access points.
-pub(crate) fn build_chat_graph<I, O, S>(
+pub(crate) fn build_chat_graph<I, O>(
     agent: Agent<O>,
-) -> Result<(PreparedGraph, VarId, [NodeId; 2]), GraphError>
+) -> Result<(PreparedGraph, [NodeId; 2]), GraphError>
 where
     I: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
     O: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
-    S: JsonSchema,
 {
     let root = Flow::<()>::root();
-    let state_var = {
-        let mut state = root
-            .state
-            .lock()
-            .map_err(|_| GraphError::Invalid("typed chat builder lock is poisoned".into()))?;
-        state.builder.variable(
-            VarKey::new("pravah.chat", "state"),
-            type_spec::<S>(),
-            VarScope::Local,
-            VarInit::Uninitialized,
-        )
-    };
     let request = root.clone().suspend::<ChatRequest<I>>();
     let bootstrap_edge = request.edge;
     let start = request.mark();
@@ -39,7 +26,7 @@ where
     let graph = compiled.prepared.graph();
     let bootstrap = suspension_producer(graph, bootstrap_edge)?;
     let response = suspension_producer(graph, response_edge)?;
-    Ok((compiled.prepared, state_var, [bootstrap, response]))
+    Ok((compiled.prepared, [bootstrap, response]))
 }
 
 /// Resolves the producing suspend node from the edge recorded during typed construction.

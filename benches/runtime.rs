@@ -2,6 +2,9 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[path = "runtime/application_state.rs"]
+mod application_state;
+
 use pravah::clients::{
     Client, ClientError, ClientOptions, ClientOutput, ClientResponse, LlmBackend, Message,
     ModelUrl, Provider, ProviderFactory,
@@ -140,6 +143,7 @@ async fn run() -> Result<(), GraphError> {
     report_value_benchmarks()?;
     report_typed_benchmarks()?;
     report_runtime_benchmarks().await?;
+    application_state::report()?;
     report_agent_benchmarks().await?;
     report_agent_executor_benchmarks().await
 }

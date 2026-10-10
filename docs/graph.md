@@ -79,7 +79,7 @@ stable API contract. Pravah does not spawn a background execution loop.
 ## Persist and Restore
 
 `Runtime::snapshot()` captures the frame stack, suspension state, graph
-fingerprint, and runtime-owned history. The graph remains a separately
+fingerprint, runtime-owned history, and optional application state. The graph remains a separately
 serialized artifact. Store the complete snapshot as one versioned value.
 
 Typed workflows restore through the same compiled flow. Attach fresh
@@ -97,6 +97,41 @@ data can contain credentials or other sensitive content; secure its storage.
 Resolved agent configuration, memory, selected tools,
 and resource text are checkpointed, so restoring does not rerun configuration
 or reread MCP resources.
+
+## Application State
+
+Start with application-only state when the host needs durable bookkeeping:
+
+```rust
+let mut runtime = flow.start_with_state(input, initial_state, execution_id)?;
+let state: ApplicationState = runtime.get_state()?;
+runtime.set_state(updated_state)?;
+
+let snapshot = runtime.snapshot()?;
+let runtime = flow.restore(snapshot)?;
+let state: ApplicationState = runtime.get_state()?;
+```
+
+State is owned by the execution, not a frame. It survives child-flow completion
+and remains readable and replaceable after `Step::Done`. It is never exposed to
+nodes, tools, history, or model context automatically; use `local`, `load`, and
+`store` for values that participate in workflow computation.
+
+The initial type/schema stays fixed. State needs `Serialize` and `JsonSchema`
+to enter the runtime, and `DeserializeOwned` and `JsonSchema` to read it;
+neither `Clone` nor `Default` is required. Missing state, wrong types, failed
+conversion, or schema validation reject without mutation. Full state validation
+runs at initialization, replacement, and restore, not at every VM instruction.
+
+Replace state between synchronous steps or at ordinary input suspensions.
+Outstanding agent requests and accepted-but-unprocessed agent completions block
+replacement with `GraphError::ApplicationStateBusy`, including after restore.
+Reads and snapshots remain available. Updates do not consume VM write epochs.
+
+Executions started with ordinary `start` have no application state; `set_state`
+does not initialize one. Chat uses this same storage and validation API while
+retaining its stricter between-turn `set` boundary. See the
+[approval checkpoint example](../examples/graph_snapshot_resume.rs).
 
 ## Agent Activation
 
@@ -124,7 +159,7 @@ typed `Runtime::resume` entry point as an ordinary suspend node, with
 `Runtime::resume_value` with an existing Pravah `Value`.
 
 Every serialized format has an explicit version. Synchronous execution with agent workers
-uses snapshot format 15 and JSON wire format 11; older snapshots and wire
+uses snapshot format 16 and JSON wire format 12; older snapshots and wire
 requests are rejected rather than interpreted with different semantics. During the `0.4.x`
 line, incompatible versions are rejected and are not migrated automatically. Drain
 in-flight workflows or keep the matching Pravah runtime when upgrading across

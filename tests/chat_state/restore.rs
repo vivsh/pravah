@@ -46,20 +46,19 @@ async fn failed_turn_roundtrips_keep_fresh_services_idle() -> Result<(), TestErr
     Ok(())
 }
 
-/// Rejects missing state, bad values and corrupted stable variable identities or epochs.
+/// Rejects missing state, bad values, malformed metadata and incompatible state types.
 #[tokio::test]
 async fn malformed_state_is_rejected() -> Result<(), TestError> {
     let chat = Chat::with_state(assistant, initial_state(), Context::default())?;
     let original = serde_json::to_value(chat.snapshot()?)?;
     let corruptions = [
-        ("/state/frames/0/variables", json!([])),
+        ("/state/application_state", json!(null)),
         (
-            "/state/frames/0/variables/0/value",
+            "/state/application_state/1",
             json!({"project":5,"visits":0}),
         ),
-        ("/state/frames/0/variables/0/variable", json!(500)),
-        ("/state/frames/0/variables/0/epoch", json!(0)),
-        ("/state/frames/0/variables/0/epoch", json!(u64::MAX)),
+        ("/state/application_state/0/name", json!("")),
+        ("/state/application_state/0/schema/type", json!(500)),
     ];
     for (path, value) in corruptions {
         let mut bad = original.clone();
@@ -76,13 +75,13 @@ async fn malformed_state_is_rejected() -> Result<(), TestError> {
     }
     assert!(matches!(
         Chat::<String, String, u64>::from_snapshot(assistant, chat.snapshot()?, Context::default()),
-        Err(GraphError::GraphMismatch { .. })
+        Err(GraphError::SnapshotValidation(_))
     ));
     assert_eq!(original, serde_json::to_value(chat.snapshot()?)?);
     Ok(())
 }
 
-/// Old lazy-chat graphs are rejected by fingerprint without changing the global snapshot format.
+/// Graphs without the current Chat bootstrap are rejected by fingerprint.
 #[tokio::test]
 async fn old_chat_graph_is_rejected() -> Result<(), TestError> {
     let root = Flow::<String>::root();

@@ -1,6 +1,6 @@
 [package]
 name = "pravah"
-version = "0.4.24"
+version = "0.4.25"
 edition = "2024"
 description = "Typed, stepwise agentic information flows for Rust"
 license = "MIT OR Apache-2.0"
@@ -43,7 +43,7 @@ indexmap = { version = "2.14.0", features = ["serde"] }
 either = { version = "1.15.0", features = ["serde"] }
 futures = "0.3.32"
 uuid = { version = "1", features = ["v5", "v7", "serde"] }
-rath-rs = { version = "0.3.3", path = "../rath" }
+rath-rs = { version = "0.3.4", path = "../rath" }
 rmcp = { version = "3.1", optional = true, default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
 http = { version = "1", optional = true }
 percent-encoding = { version = "2", optional = true }

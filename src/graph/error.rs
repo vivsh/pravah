@@ -23,6 +23,12 @@ impl std::fmt::Display for AgentClientOperation {
 #[derive(Debug, Error)]
 /// Error type for graph construction, validation, and VM execution failures.
 pub enum GraphError {
+    /// Application state is missing, has a different type, or fails validation.
+    #[error("invalid application state: {0}")]
+    ApplicationState(String),
+    /// An outstanding or accepted agent operation must finish before state replacement.
+    #[error("application state cannot change while an agent operation is pending")]
+    ApplicationStateBusy,
     /// A malformed agent request or completion rejected before execution-state mutation.
     #[error("invalid agent operation: {0}")]
     AgentRequestValidation(String),

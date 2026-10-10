@@ -10,11 +10,11 @@ use uuid::Uuid;
 
 use super::agent::Agent;
 use super::error::GraphError;
-use super::ids::{NodeId, VarId};
+use super::ids::NodeId;
 use super::runtime::{Runtime, Snapshot};
 use super::state::Step;
 use super::typed::build_chat_graph;
-use super::value::{Value, from_value, to_value};
+use super::value::{Value, from_value};
 
 mod builder;
 mod request;
@@ -59,7 +59,6 @@ impl<O> ChatTurn<O> {
 pub struct Chat<I, O, S = ()> {
     runtime: Runtime,
     executor: AgentExecutor,
-    state_var: VarId,
     input_boundaries: [NodeId; 2],
     _marker: PhantomData<fn(I, S) -> O>,
 }
@@ -83,7 +82,7 @@ where
     O: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
     S: 'static + Serialize + DeserializeOwned + JsonSchema + Send + Sync,
 {
-    /// Creates a snapshot-ready chat with initial application state stored in the VM.
+    /// Creates a snapshot-ready chat with application state owned by the execution.
     ///
     /// Graph validation and state conversion can fail. Only the initial input
     /// suspension executes; no agent configuration, history or external calls occur.
@@ -97,11 +96,10 @@ where
 
     /// Initializes the common graph for function-defined and builder-created chats.
     fn from_definition(agent: Agent<O>, state: S, context: Context) -> Result<Self, GraphError> {
-        let value = encode_state(state)?;
-        let (prepared, state_var, input_boundaries) = build_chat_graph::<I, O, S>(agent)?;
+        let (prepared, input_boundaries) = build_chat_graph::<I, O>(agent)?;
         let executor = prepared.executor(context);
         let mut runtime = prepared.start(Value::NULL, Uuid::now_v7())?;
-        runtime.write_chat_state(state_var, value)?;
+        runtime.initialize_application_state(state)?;
         let [bootstrap, _] = input_boundaries;
         if !matches!(runtime.next()?, Step::Suspend(_)) || !runtime.chat_ready(&[bootstrap]) {
             return Err(GraphError::Invalid(
@@ -111,7 +109,6 @@ where
         Ok(Self {
             runtime,
             executor,
-            state_var,
             input_boundaries,
             _marker: PhantomData,
         })
@@ -136,13 +133,12 @@ where
         snapshot: Snapshot,
         context: Context,
     ) -> Result<Self, GraphError> {
-        let (prepared, state_var, input_boundaries) = build_chat_graph::<I, O, S>(agent)?;
+        let (prepared, input_boundaries) = build_chat_graph::<I, O>(agent)?;
         let executor = prepared.executor(context);
         let runtime = prepared.restore(snapshot)?;
         let chat = Self {
             runtime,
             executor,
-            state_var,
             input_boundaries,
             _marker: PhantomData,
         };
@@ -157,22 +153,16 @@ where
     ///
     /// Decoding may allocate and fail; no typed copy is retained by the chat.
     pub fn get(&self) -> Result<S, GraphError> {
-        from_value(self.runtime.chat_state(self.state_var)?).map_err(|error| {
-            GraphError::ValueConversion {
-                target: "chat state".into(),
-                reason: error.to_string(),
-            }
-        })
+        self.runtime.get_state()
     }
 
     /// Replaces application state between turns, including before the first message.
     ///
-    /// Conversion, graph shape validation or epoch failure leaves state unchanged.
+    /// Conversion, type or schema validation failure leaves state unchanged.
     /// An unfinished turn rejects mutation; state is never automatically exposed to tools.
     pub fn set(&mut self, state: S) -> Result<(), GraphError> {
         self.require_ready("set")?;
-        self.runtime
-            .write_chat_state(self.state_var, encode_state(state)?)
+        self.runtime.set_state(state)
     }
 
     /// Installs compaction dependencies and opts this chat into request-time working memory.
@@ -352,13 +342,6 @@ where
                 reason: error.to_string(),
             })
     }
-}
-
-fn encode_state<S: Serialize>(state: S) -> Result<Value, GraphError> {
-    to_value(state).map_err(|error| GraphError::ValueConversion {
-        target: "chat state".into(),
-        reason: error.to_string(),
-    })
 }
 
 /// Result of one manually driven Chat step; errors use the ordinary Result channel.

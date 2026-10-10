@@ -228,13 +228,13 @@ fn summaries_follow_frame_ownership_and_missing_owner_is_rejected() -> Result<()
 fn previous_snapshot_format_is_rejected() -> Result<(), GraphError> {
     let runtime = runtime()?;
     let mut snapshot = runtime.snapshot()?;
-    snapshot.snapshot_version = 14;
+    snapshot.snapshot_version = 15;
     let flow = crate::graph::compile(|root: crate::graph::Flow<String>| root)?;
     assert!(matches!(
         flow.restore(snapshot),
         Err(GraphError::SnapshotVersion {
-            got: 14,
-            expected: 15
+            got: 15,
+            expected: 16
         })
     ));
     Ok(())

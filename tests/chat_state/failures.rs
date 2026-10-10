@@ -32,9 +32,9 @@ async fn rejected_set_is_atomic() -> Result<(), TestError> {
     Ok(())
 }
 
-/// Epoch exhaustion is detected before replacing state or altering the frame.
+/// Application writes are independent of exhausted VM epochs and never alter frame metadata.
 #[tokio::test]
-async fn exhausted_epoch_is_atomic() -> Result<(), TestError> {
+async fn application_state_does_not_consume_frame_epochs() -> Result<(), TestError> {
     let chat = Chat::with_state(assistant, initial_state(), Context::default())?;
     let mut snapshot = serde_json::to_value(chat.snapshot()?)?;
     *snapshot
@@ -46,13 +46,15 @@ async fn exhausted_epoch_is_atomic() -> Result<(), TestError> {
         Context::default(),
     )?;
     let before = serde_json::to_value(chat.snapshot()?)?;
-    assert!(
-        chat.set(Session {
-            visits: 1,
-            ..initial_state()
-        })
-        .is_err()
+    chat.set(Session {
+        visits: 1,
+        ..initial_state()
+    })?;
+    let after = serde_json::to_value(chat.snapshot()?)?;
+    assert_eq!(
+        before.pointer("/state/frames"),
+        after.pointer("/state/frames")
     );
-    assert_eq!(before, serde_json::to_value(chat.snapshot()?)?);
+    assert_eq!(chat.get()?.visits, 1);
     Ok(())
 }

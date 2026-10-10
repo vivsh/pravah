@@ -61,8 +61,8 @@ async fn tools_and_history_preparation_do_not_touch_state() -> Result<(), TestEr
     chat.send("second").await?;
     let after = serde_json::to_value(chat.snapshot()?)?;
     assert_eq!(
-        before.pointer("/state/frames/0/variables"),
-        after.pointer("/state/frames/0/variables")
+        before.pointer("/state/application_state"),
+        after.pointer("/state/application_state")
     );
     assert_eq!(script.calls().len(), 3);
     assert!(!serde_json::to_string(chat.snapshot()?.history())?.contains("private-state"));

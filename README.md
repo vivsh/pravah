@@ -251,7 +251,7 @@ should be idempotent or deduplicated as appropriate.
 
 ```toml
 [dependencies]
-pravah = "0.4.24"
+pravah = "0.4.25"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 ```

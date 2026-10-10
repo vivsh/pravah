@@ -17,7 +17,7 @@ cargo run --example graph_typed
 | [graph_chat_working_memory](graph_chat_working_memory.rs) | Compaction, previous-summary access and completed-history replacement | `--features testing` |
 | [graph_json_tools](graph_json_tools.rs) | Catalogue-defined JSON tools, captured operation bindings and a shared Context service | `--features testing` |
 | [graph_typed](graph_typed.rs) | Maps, branches, reused subflows and `each` | — |
-| [graph_snapshot_resume](graph_snapshot_resume.rs) | Explicit suspension, snapshot and typed resumption | — |
+| [graph_snapshot_resume](graph_snapshot_resume.rs) | Explicit suspension, application state, snapshot and typed resumption | — |
 | [graph_external_task](graph_external_task.rs) | External task suspension, snapshot restoration and explicit result delivery | — |
 | [graph_agent_budgets](graph_agent_budgets.rs) | Declarative agent construction, agent-turn and per-tool budgets with a deterministic provider | `--features testing` |
 | [graph_agent_control](graph_agent_control.rs) | Controller-requested approval, explicit resume and forced conclusion | `--features testing` |

@@ -23,6 +23,7 @@ mod tuples;
 
 use build::*;
 pub(crate) use chat::build_chat_graph;
+pub(crate) use support::type_spec;
 use support::*;
 pub use tuples::{MergeFlows, SplitOutputs};
 
@@ -887,6 +888,25 @@ where
             reason: err.to_string(),
         })?;
         self.prepared.start(input, execution_id)
+    }
+
+    /// Starts an execution owning application-only state, retained even after completion.
+    ///
+    /// State conversion and schema validation occur before returning the runtime.
+    /// Nodes cannot access this state; values do not change the graph fingerprint.
+    /// Read and replace it through Runtime's get_state and set_state methods.
+    pub fn start_with_state<S>(
+        &self,
+        input: I,
+        state: S,
+        execution_id: Uuid,
+    ) -> Result<Runtime, GraphError>
+    where
+        S: Serialize + JsonSchema,
+    {
+        let mut runtime = self.start(input, execution_id)?;
+        runtime.initialize_application_state(state)?;
+        Ok(runtime)
     }
 
     /// Starts a new execution with completed history owned by the returned runtime.

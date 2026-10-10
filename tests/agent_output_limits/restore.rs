@@ -80,8 +80,8 @@ async fn malformed_resolved_caps_and_old_checkpoints_are_rejected() -> Result<()
 /// Snapshot and wire version gates prevent older continuations from silently losing cap semantics.
 #[tokio::test]
 async fn old_snapshot_and_wire_formats_are_rejected() -> Result<(), TestError> {
-    assert_eq!(SNAPSHOT_VERSION, 15);
-    assert_eq!(JSON_WIRE_VERSION, 11);
+    assert_eq!(SNAPSHOT_VERSION, 16);
+    assert_eq!(JSON_WIRE_VERSION, 12);
     let flow = compile(workflow)?;
     let runtime = flow.start(Request::capped(), uuid::Uuid::nil())?;
     let mut snapshot = serde_json::to_value(runtime.snapshot()?)?;

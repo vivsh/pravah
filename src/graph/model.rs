@@ -7,7 +7,7 @@ use super::value::Value;
 /// Current serialized untyped graph schema version.
 pub const UNTYPED_GRAPH_SCHEMA_VERSION: u32 = 3;
 
-/// JSON Schema metadata associated with an edge or variable.
+/// JSON Schema metadata associated with an edge, variable, or application state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TypeSpec {
     /// Human-readable type name used in errors and metadata.

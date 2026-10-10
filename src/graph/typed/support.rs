@@ -85,7 +85,7 @@ where
     build(Flow::<I>::root_named(name.into())).finish::<I>()
 }
 
-pub(super) fn type_spec<T>() -> TypeSpec
+pub(crate) fn type_spec<T>() -> TypeSpec
 where
     T: JsonSchema,
 {

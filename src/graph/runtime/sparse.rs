@@ -8,6 +8,8 @@ use crate::graph::model::TypeSpec;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SparseState {
     pub(crate) execution_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) application_state: Option<(TypeSpec, Value)>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) next_agent_sequence: u64,
     #[serde(default, skip_serializing_if = "no_history_policy")]
@@ -169,6 +171,7 @@ pub(super) fn sparse_state(
     };
     Ok(SparseState {
         execution_id: state.execution_id,
+        application_state: state.application_state.clone(),
         next_agent_sequence: state.next_agent_sequence,
         history_policy: state.history_policy,
         persisted_history_position: state.persisted_history_position,
@@ -205,6 +208,7 @@ pub(super) fn expand_state(
     };
     Ok(State {
         execution_id: sparse.execution_id,
+        application_state: sparse.application_state,
         next_agent_sequence: sparse.next_agent_sequence,
         history_policy: sparse.history_policy,
         persisted_history_position: sparse.persisted_history_position,
