@@ -1,0 +1,174 @@
+{
+  "snapshot_version": 16,
+  "graph_fingerprint": "v1:f90a9d352361e96fd1883ed5c14b6564a38c3a6b50c0b2e98ef2c84529fa8c34",
+  "state": {
+    "execution_id": "01a1b7b2-97a2-7c82-a650-6f9311ce9765",
+    "application_state": [
+      {
+        "name": "uint32",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "format": "uint32",
+          "minimum": 0,
+          "title": "uint32",
+          "type": "integer"
+        }
+      },
+      8
+    ],
+    "next_agent_sequence": 2,
+    "frames": [
+      {
+        "graph_path": [],
+        "write_epoch": 3,
+        "edges": [
+          {
+            "edge": 0,
+            "epoch": 1,
+            "value": null
+          },
+          {
+            "edge": 1,
+            "epoch": 2,
+            "value": {
+              "input": "first question",
+              "key": "message-1"
+            }
+          },
+          {
+            "edge": 2,
+            "epoch": 3,
+            "value": "first"
+          }
+        ],
+        "node_epochs": [
+          {
+            "node": 0,
+            "epoch": 1
+          },
+          {
+            "node": 1,
+            "epoch": 2
+          }
+        ]
+      }
+    ],
+    "waiting": {
+      "kind": "suspend",
+      "suspension": {
+        "frame_depth": 1,
+        "graph_path": [],
+        "node": 2,
+        "target": "node",
+        "resume_type": {
+          "name": "ChatRequest",
+          "schema": {
+            "$defs": {
+              "McpResourceRef": {
+                "description": "Reference to one text resource exposed by a configured MCP server.",
+                "properties": {
+                  "arguments": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "server": {
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "server",
+                  "uri"
+                ],
+                "type": "object"
+              }
+            },
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "description": "One Chat submission with invocation-local context and tool/resource selection.\nConstruction and serialization do not validate policy; `send` rejects invalid requests.",
+            "properties": {
+              "input": {
+                "type": "string"
+              },
+              "key": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "memory": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "resources": {
+                "items": {
+                  "$ref": "#/$defs/McpResourceRef"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "input"
+            ],
+            "title": "ChatRequest",
+            "type": "object"
+          }
+        },
+        "payload": "first"
+      }
+    }
+  },
+  "history": {
+    "entries": [
+      {
+        "id": "b6e81251-fcb7-5ea3-a2b9-d98e3c1f133c",
+        "position": 0,
+        "session_id": "key:model-switch",
+        "agent_id": "typed::null::0::agent_to_string",
+        "evicted": false,
+        "message": {
+          "key": "message-1",
+          "role": {
+            "role": "user"
+          },
+          "content": "\"first question\""
+        }
+      },
+      {
+        "id": "6f7bca1b-fa51-5fb2-ac5a-2e34d0ca877a",
+        "position": 1,
+        "session_id": "key:model-switch",
+        "agent_id": "typed::null::0::agent_to_string",
+        "evicted": false,
+        "message": {
+          "role": {
+            "role": "assistant"
+          },
+          "content": "\"first\""
+        }
+      }
+    ],
+    "next_position": 2,
+    "last_usage": null,
+    "total_input": null,
+    "total_output": null
+  }
+}

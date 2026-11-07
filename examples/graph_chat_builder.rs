@@ -1,4 +1,4 @@
-//! A typed chat with request memory, message keys, and persistent application state.
+//! A typed chat with request memory, message keys, persistent state, and model switching.
 //!
 //! Run with --features testing. Scripted replies make this example fully offline.
 
@@ -26,7 +26,7 @@ fn context(reply: &str) -> Result<Context, pravah::GraphError> {
     Ok(Context::default().with_providers(pravah::testing::providers(client)?))
 }
 
-/// Saves one conversation, restores it with fresh dependencies, then sends another question.
+/// Restores the same conversation with a new model selected for its next turn.
 #[tokio::main]
 async fn main() -> Result<(), ExampleError> {
     let mut chat = assistant()
@@ -42,7 +42,8 @@ async fn main() -> Result<(), ExampleError> {
     let saved = serde_json::to_vec(&chat.snapshot()?)?;
     let mut chat = assistant().restore::<String>(
         serde_json::from_slice(&saved)?,
-        context("Keep each example focused on one feature.")?,
+        context("Keep each example focused on one feature.")?
+            .with_model_resolver(|_| Some("test:///replacement".into())),
     )?;
     println!("Restored project: {}", chat.get()?);
 

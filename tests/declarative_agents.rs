@@ -11,6 +11,8 @@ mod host;
 
 #[path = "declarative_agents/composition.rs"]
 mod composition;
+#[path = "declarative_agents/model_resolver.rs"]
+mod model_resolver;
 #[path = "declarative_agents/restore.rs"]
 mod restore;
 #[path = "declarative_agents/validation.rs"]

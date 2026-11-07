@@ -233,13 +233,14 @@ async fn configure_declared<I: Serialize>(
     input: I,
     settings: AgentSettings,
     instructions: String,
-    _ctx: Context,
+    ctx: Context,
 ) -> Result<AgentConfig, GraphError> {
     let content = serde_json::to_string(&input).map_err(|error| GraphError::ValueConversion {
         target: "agent user message".into(),
         reason: error.to_string(),
     })?;
-    let mut config = AgentConfig::new(settings.model, instructions, Message::user(content));
+    let model = ctx.resolve_agent_model(settings.model);
+    let mut config = AgentConfig::new(model, instructions, Message::user(content));
     config.key = settings.key;
     config.provider_config = settings.provider_config;
     config.max_output_tokens = settings.max_output_tokens;

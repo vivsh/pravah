@@ -59,8 +59,10 @@ terminal `.build()`. Scalar setters replace earlier values. Invalid/repeated
 budgets, malformed resources, duplicate tools and repeated controllers fail
 compilation. Missing or whitespace-only models and keys are rejected.
 
-Instructions alone may change on restore; already-configured invocations keep
-their saved instructions. Other settings must match the graph fingerprint.
+Instructions may change on restore; already-configured invocations keep their
+saved instructions. Authored settings, including the default model, must match
+the graph fingerprint. Use the [runtime resolver](#switch-models-without-rebuilding)
+to choose a different model for a future invocation.
 Without `.key`, graph agents remain frame-local, unlike Chat's default keyed
 conversation. The [budget example](../examples/graph_agent_budgets.rs) uses a
 declarative function-defined agent with a deterministic provider.
@@ -375,7 +377,7 @@ example including suspension and typed resume.
 Enable the `mcp` feature to use Streamable HTTP resource servers:
 
 ```toml
-pravah = { version = "0.4.25", features = ["mcp"] }
+pravah = { version = "0.4.26", features = ["mcp"] }
 ```
 
 Register credentials and headers on the runtime `Context`, not in the graph or
@@ -400,6 +402,36 @@ therefore performs no MCP request.
 
 See [MCP resources and agent tool filters](mcp.md) for catalog selection,
 resource templates, dynamic filtering, and a complete runnable example.
+
+## Switch Models Without Rebuilding
+
+Keep the same declared `.model(...)` in your Chat builder or Flow agent. Install
+a resolver in the `Context` you pass to Chat build/restore or the Flow executor:
+
+```rust
+use pravah::Context;
+
+let ctx = Context::default().with_model_resolver(|declared| match declared {
+    "openai:///gpt-5" => Some("openai:///gpt-5-mini".into()),
+    _ => None, // Keep the declared default.
+});
+```
+
+The mapping applies to all declarative agents with the matching default in that
+context. Custom `.configure(...)` callbacks still choose their own models.
+For a live Chat, have the callback read your application's current selection.
+Keep the callback fast and nonblocking; it runs synchronously on the worker.
+
+The configuration worker selects the model. A pending configure request that
+has not run uses the worker's current selection. Once its response is recorded,
+the invocation keeps that model through tool rounds and restoration. Existing
+history, message keys, and application state are retained. Reattach the resolver
+where future configuration runs; it is not stored in snapshots.
+
+The resolved URL is visible on generation requests for worker routing. An
+invalid replacement fails without falling back. When switching providers, make
+sure the selected provider supports the existing options, tools, and conversation
+history; the resolver does not translate them.
 
 ## Model URLs and Credentials
 

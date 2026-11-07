@@ -26,6 +26,34 @@ fn conflicting_flow(root: Flow<Question>) -> Flow<Notes> {
     root.agent(conflicting)
 }
 
+/// A custom configure callback remains authoritative over its model choice.
+#[tokio::test]
+async fn custom_configuration_is_not_intercepted() -> Result<(), GraphError> {
+    let flow = compile(|root: Flow<Question>| -> Flow<Notes> {
+        root.agent(|agent| agent.configure(configure))
+    })?;
+    let script = ScriptedFactory::new().then_output(serde_json::json!({"finding":"verified"}));
+    let ctx = Context::default()
+        .with_providers(providers(script.clone())?)
+        .with_model_resolver(|_| Some("test:///not-selected".into()));
+    let executor = flow.prepared().executor(ctx);
+    let mut runtime = flow.start(
+        Question {
+            topic: "question".into(),
+        },
+        Uuid::nil(),
+    )?;
+    assert!(matches!(
+        host::finish(&mut runtime, &executor).await?,
+        Step::Done(_)
+    ));
+    assert_eq!(
+        script.calls().first().map(|(model, _)| model.as_str()),
+        Some("test:///model")
+    );
+    Ok(())
+}
+
 /// Public graph compilation rejects invalid declarations and mixed configuration modes before execution.
 #[test]
 fn compilation_rejects_declaration_errors() -> Result<(), GraphError> {

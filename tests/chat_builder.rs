@@ -6,6 +6,8 @@ use pravah::{Chat, ChatBuilder, ChatRequest, Context, GraphError, Snapshot};
 mod construction;
 #[path = "chat_builder/inputs.rs"]
 mod inputs;
+#[path = "chat_builder/model_resolver.rs"]
+mod model_resolver;
 #[path = "chat_builder/recovery.rs"]
 mod recovery;
 #[path = "chat_builder/tools.rs"]

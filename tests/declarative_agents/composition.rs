@@ -1,6 +1,10 @@
 use super::*;
 use pravah::tools::ToolError;
 use pravah::{AgentDecision, AgentInterventionPoint, AgentLoop, Toolset};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct Search {
@@ -38,7 +42,7 @@ fn controlled_flow(root: Flow<Question>) -> Flow<Notes> {
     root.agent(controlled)
 }
 
-/// Declarative tools and budgets use ordinary control boundaries with the original typed input.
+/// Tools and controls retain the typed input and a single model selection across the invocation.
 #[tokio::test]
 async fn controls_and_tools_share_existing_execution() -> Result<(), GraphError> {
     let script = ScriptedFactory::new()
@@ -49,9 +53,15 @@ async fn controls_and_tools_share_existing_execution() -> Result<(), GraphError>
         )])
         .then_output(serde_json::json!({"finding":"verified"}));
     let flow = compile(controlled_flow)?;
-    let executor = flow
-        .prepared()
-        .executor(Context::default().with_providers(providers(script.clone())?));
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&resolutions);
+    let context = Context::default()
+        .with_providers(providers(script.clone())?)
+        .with_model_resolver(move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Some("test:///selected".into())
+        });
+    let executor = flow.prepared().executor(context);
     let mut runtime = flow.start(
         Question {
             topic: "durability".into(),
@@ -62,7 +72,10 @@ async fn controls_and_tools_share_existing_execution() -> Result<(), GraphError>
         host::finish(&mut runtime, &executor).await?,
         Step::Done(_)
     ));
-    assert_eq!(script.calls().len(), 2);
+    let calls = script.calls();
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|(model, _)| model == "test:///selected"));
+    assert_eq!(resolutions.load(Ordering::Relaxed), 1);
     Ok(())
 }
 

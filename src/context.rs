@@ -12,6 +12,8 @@ use crate::deps::{Deps, DepsError};
 #[cfg(feature = "mcp")]
 use crate::graph::{McpError, McpResourceInfo, McpServer};
 
+type ModelResolver = dyn Fn(&str) -> Option<String> + Send + Sync;
+
 /// Settings used to build a [`Context`].
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct FlowConf {
@@ -34,6 +36,7 @@ struct ContextInner {
     http_client: Option<reqwest::Client>,
     http_timeout_secs: u64,
     providers: Arc<ProviderRegistry>,
+    model_resolver: Option<Arc<ModelResolver>>,
     #[cfg(feature = "mcp")]
     mcp_servers: Arc<BTreeMap<String, McpServer>>,
 }
@@ -66,6 +69,7 @@ impl Context {
             http_client: None,
             http_timeout_secs: conf.http_timeout_secs.unwrap_or(30),
             providers: Arc::new(ProviderRegistry::with_builtins()),
+            model_resolver: None,
             #[cfg(feature = "mcp")]
             mcp_servers: Arc::new(BTreeMap::new()),
         }))
@@ -102,6 +106,33 @@ impl Context {
             providers: Arc::new(providers),
             ..inner
         }))
+    }
+
+    /// Replaces the runtime-only model resolver for declarative Chat and Flow agents.
+    ///
+    /// The worker calls it during configuration with the declared model URL.
+    /// Return `None` to use that default. A replacement must be a valid model URL;
+    /// failures use normal agent errors without falling back to the default.
+    /// Custom `Agent::configure` callbacks are unaffected. Once configuration is
+    /// recorded, the invocation keeps its selected model, including across restore.
+    /// Reinstall the resolver in the worker context for future invocations.
+    pub fn with_model_resolver(
+        self,
+        resolver: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        let inner = Arc::unwrap_or_clone(self.0);
+        Self(Arc::new(ContextInner {
+            model_resolver: Some(Arc::new(resolver)),
+            ..inner
+        }))
+    }
+
+    pub(crate) fn resolve_agent_model(&self, declared: String) -> String {
+        self.0
+            .model_resolver
+            .as_ref()
+            .and_then(|resolver| resolver(&declared))
+            .unwrap_or(declared)
     }
 
     /// Registers one runtime-only Streamable HTTP MCP resource server.

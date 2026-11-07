@@ -121,7 +121,9 @@ example explicitly supplies it as memory. Per-message memory stays outside
 conversation history, but may be retained in execution checkpoints.
 
 Restore with the same builder definition and state type, attaching fresh
-runtime dependencies. Instructions alone can change without discarding the conversation:
+runtime dependencies. You can update instructions or
+[select a different model for future turns](docs/clients.md#switch-models-without-rebuilding)
+without discarding the conversation:
 
 ```rust
 let checkpoint = load_checkpoint().await?;
@@ -137,7 +139,8 @@ let project = chat.get()?;
 
 State comes from the snapshot; no initial `.state(...)` is needed on restore.
 Updated instructions apply to new invocations; an already-configured invocation
-retains its saved instructions until it finishes. Other settings must still match.
+retains its saved instructions and model until it finishes. Keep the authored
+`.model(...)` default unchanged when switching via the runtime resolver.
 The save/load functions above belong to your application. Restoring a chat
 between turns lets it continue in another request or process. For explicit
 control over suspended or unfinished work, use a workflow execution loop.
@@ -251,7 +254,7 @@ should be idempotent or deduplicated as appropriate.
 
 ```toml
 [dependencies]
-pravah = "0.4.25"
+pravah = "0.4.26"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 ```

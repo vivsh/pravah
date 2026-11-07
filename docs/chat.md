@@ -90,7 +90,7 @@ application-state slot at build, using the same API as ordinary graphs, while se
 remain runtime-only.
 Omitting `.state(...)` selects unit state. There is no `build_with_state` method.
 
-Restore synchronously with the same definition. Instructions alone may change:
+Restore synchronously with the same definition. You can update instructions:
 
 ```rust
 let mut restored = Chat::builder::<String, String>()
@@ -106,8 +106,10 @@ For restoration, configure `.store(...)` and `.compactor(...)` on the builder
 before `.restore::<State>(snapshot, ctx)`. State comes only from the snapshot;
 do not supply `.state(...)` when restoring. Restore is unavailable on builders
 carrying non-unit initial state, preventing silent state replacement. Construction and
-restore do not call models or read resources. Changed models, budgets, provider options,
+restore do not call models or read resources. Changed model defaults, budgets, provider options,
 default resources, schemas, or tool definitions still reject incompatible snapshots.
+To switch the model without changing its declared default, use the
+[runtime model resolver](clients.md#switch-models-without-rebuilding).
 New instructions apply to the next invocation whose configuration has not yet committed;
 an already-configured invocation keeps its checkpointed instructions until it finishes.
 Committed configuration and resolved resources are not evaluated again after restoration.
